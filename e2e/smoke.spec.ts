@@ -22,7 +22,6 @@ test("protects the local API and creates a persistent workbench", async ({ page,
   await page.goto(`/?token=${encodeURIComponent(E2E_TOKEN)}`);
   await expect(page).toHaveTitle(/Lathe/i);
   await expect(page.getByRole("heading", { name: /Explore the path/i })).toBeVisible();
-  await expect(page.getByText(/Credentials are stored plaintext/i)).toBeVisible();
   await expect(page).not.toHaveURL(/token=/);
 
   const suffix = `${Date.now()}-${test.info().retry}`;

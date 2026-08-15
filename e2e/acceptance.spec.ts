@@ -253,6 +253,14 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
   await page.goto(`/projects/${project.id}/sessions/${sessionId}?token=${encodeURIComponent(E2E_TOKEN)}`);
   await expect(page.getByRole("heading", { name: sessionName })).toBeVisible();
   await page.getByLabel("Active branch").selectOption({ label: redBranchName });
+  await expect(page.locator(".tree-branch-name", { hasText: redBranchName })).toBeVisible();
+  await expect(page.locator(".tree-branch-name", { hasText: blueBranchName })).toBeVisible();
+  const uiForkName = `ui-path-${suffix}`;
+  await page.getByRole("button", { name: "Fork selected node" }).click();
+  const forkDialog = page.getByRole("dialog", { name: "Fork conversation" });
+  await forkDialog.getByLabel("Branch name").fill(uiForkName);
+  await forkDialog.getByRole("button", { name: "Create branch" }).click();
+  await expect(page.locator(".tree-branch-name", { hasText: uiForkName })).toBeVisible();
   await page.locator("details.comparison-picker > summary").click();
   await page.getByRole("checkbox", { name: blueBranchName }).check();
   const comparisonView = page.locator(".comparison-view");

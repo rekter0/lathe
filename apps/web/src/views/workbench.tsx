@@ -13,6 +13,7 @@ import { api, consumeEvents, downloadApiFile, jsonBody } from "../api.js";
 import { Button, Field, Input, Select, Textarea } from "../components/forms.js";
 import { isComposerSubmitKey } from "../components/composer-keys.js";
 import { McpApprovalResolver } from "../components/mcp-approval.js";
+import { useOperatorDialog } from "../components/operator-dialog.js";
 import { useUiStore } from "../store.js";
 import type { AssetRevision, Attachment, AutomationJob, BranchRef, Finding, MessageNode, ModelRun, SafeProvider, WorkbenchData } from "../types.js";
 
@@ -75,7 +76,7 @@ export function WorkbenchPage() {
     <div className="workbench-grid">
       <aside className="tree-pane">
         <div className="pane-label"><GitBranch size={14} /> CONVERSATION TREE <span>{data.nodes.length}</span></div>
-        <TreeOverview nodes={data.nodes} branches={data.branches} selectedNodeId={selectedNode?.id ?? null} onSelect={setSelectedNodeId} />
+        <TreeOverview nodes={data.nodes} branches={data.branches} activeBranchId={branch.id} selectedNodeId={selectedNode?.id ?? null} onSelect={setSelectedNodeId} />
         <div className="branch-legend">{data.branches.map((item) => <button key={item.id} onClick={() => setBranchId(item.id)} className={item.id === branch.id ? "active" : ""}><span />{item.name}</button>)}</div>
       </aside>
       <section className="transcript-pane">
@@ -87,7 +88,7 @@ export function WorkbenchPage() {
   </div>;
 }
 
-function TreeOverview({ nodes, branches, selectedNodeId, onSelect }: { nodes: MessageNode[]; branches: BranchRef[]; selectedNodeId: string | null; onSelect(id: string): void }) {
+function TreeOverview({ nodes, branches, activeBranchId, selectedNodeId, onSelect }: { nodes: MessageNode[]; branches: BranchRef[]; activeBranchId: string; selectedNodeId: string | null; onSelect(id: string): void }) {
   const layout = useMemo(() => {
     const children = new Map<string | null, MessageNode[]>();
     for (const node of nodes) children.set(node.parentId, [...(children.get(node.parentId) ?? []), node]);
@@ -95,24 +96,32 @@ function TreeOverview({ nodes, branches, selectedNodeId, onSelect }: { nodes: Me
     const positions = new Map<string, { x: number; y: number }>();
     const place = (node: MessageNode, depth: number): number => {
       const descendants = children.get(node.id) ?? [];
-      const x = descendants.length === 0 ? leaf++ * 92 : descendants.map((child) => place(child, depth + 1)).reduce((sum, value) => sum + value, 0) / descendants.length;
-      positions.set(node.id, { x, y: depth * 76 });
+      const x = descendants.length === 0 ? leaf++ * 116 : descendants.map((child) => place(child, depth + 1)).reduce((sum, value) => sum + value, 0) / descendants.length;
+      positions.set(node.id, { x, y: depth * 82 });
       return x;
     };
     for (const root of children.get(null) ?? []) place(root, 0);
-    const flowNodes: Node[] = nodes.map((node) => ({
-      id: node.id,
-      position: positions.get(node.id) ?? { x: 0, y: 0 },
-      data: { label: node.role === "assistant" ? "AI" : node.role === "tool" ? "TOOL" : "YOU" },
-      className: `tree-node tree-node-${node.role} ${selectedNodeId === node.id ? "selected" : ""}`,
-      style: { width: 64, height: 32 }
-    }));
+    const flowNodes: Node[] = nodes.map((node) => {
+      const headBranches = branches.filter((branch) => branch.headNodeId === node.id);
+      return {
+        id: node.id,
+        position: positions.get(node.id) ?? { x: 0, y: 0 },
+        data: { label: <TreeNodeLabel role={node.role} branches={headBranches} activeBranchId={activeBranchId} /> },
+        className: `tree-node tree-node-${node.role} ${selectedNodeId === node.id ? "selected" : ""}`,
+        style: { width: headBranches.length > 0 ? 100 : 64, height: headBranches.length > 0 ? 46 : 32 }
+      };
+    });
     const flowEdges: Edge[] = nodes.filter((node) => node.parentId).map((node) => ({ id: `${node.parentId}-${node.id}`, source: node.parentId!, target: node.id, className: "tree-edge" }));
     return { flowNodes, flowEdges };
-  }, [nodes, selectedNodeId]);
+  }, [activeBranchId, branches, nodes, selectedNodeId]);
   return <ReactFlow nodes={layout.flowNodes} edges={layout.flowEdges} fitView minZoom={0.15} maxZoom={1.6} nodesDraggable={false} nodesConnectable={false} elementsSelectable onNodeClick={(_, node) => onSelect(node.id)}>
     <Background color="#24312d" gap={18} size={1} /><Controls showInteractive={false} position="bottom-left" />
   </ReactFlow>;
+}
+
+export function TreeNodeLabel({ role, branches, activeBranchId }: { role: MessageNode["role"]; branches: BranchRef[]; activeBranchId: string }) {
+  const roleLabel = role === "assistant" ? "AI" : role === "tool" ? "TOOL" : "YOU";
+  return <div className="tree-node-label"><span>{roleLabel}</span>{branches.length > 0 && <span className="tree-branch-names" title={branches.map((branch) => branch.name).join(", ")}>{branches.map((branch) => <span className={`tree-branch-name${branch.id === activeBranchId ? " active" : ""}`} key={branch.id}>{branch.name}</span>)}</span>}</div>;
 }
 
 function Transcript({ nodes, runs, data, branchId, sessionId, liveRunId = null, liveRun, onBranchCreated, onRunStarted, onSelectRun }: { nodes: MessageNode[]; runs: ModelRun[]; data?: WorkbenchData; branchId?: string; sessionId?: string; liveRunId?: string | null; liveRun?: ModelRun; onBranchCreated?(id: string): void; onRunStarted?(id: string): void; onSelectRun(id: string): void }) {
@@ -190,14 +199,10 @@ function reasoningFromRun(run?: ModelRun): string | null {
 }
 
 function ResendAction({ node, data, onBranchCreated, onRunStarted }: { node: MessageNode; data: WorkbenchData; onBranchCreated?(id: string): void; onRunStarted?(id: string): void }) {
+  const dialogs = useOperatorDialog();
   const resend = useMutation({
-    mutationFn: async () => {
+    mutationFn: async ({ text, branchName }: { text: string; branchName: string }) => {
       if (!data.session.providerProfileId || !data.session.modelId) throw new Error("Select a provider and model before resending");
-      const originalText = node.parts.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-      const text = window.prompt("Edit payload before resending", originalText);
-      if (text === null || !text.trim()) return null;
-      const branchName = window.prompt("New branch name", `edit-${node.id.slice(0, 6)}`);
-      if (!branchName) return null;
       const created = await api<{ branch: BranchRef }>("/api/branches", { method: "POST", ...jsonBody({ sessionId: data.session.id, name: branchName, headNodeId: node.parentId }) });
       const parts: MessagePart[] = [{ type: "text", text }, ...node.parts.filter((part) => part.type !== "text")];
       const appended = await api<{ node: MessageNode }>(`/api/sessions/${data.session.id}/messages`, { method: "POST", ...jsonBody({ branchId: created.branch.id, parentId: node.parentId, role: "user", parts }) });
@@ -206,7 +211,15 @@ function ResendAction({ node, data, onBranchCreated, onRunStarted }: { node: Mes
     },
     onSuccess: (result) => { if (result) { onRunStarted?.(result.runId); onBranchCreated?.(result.branchId); } }
   });
-  return <button className="message-resend" onClick={() => resend.mutate()} disabled={resend.isPending} title={resend.error?.message ?? "Edit this operator turn and resend it on a new sibling branch"}><RotateCcw size={10} />{resend.isPending ? "branching…" : "edit / resend"}</button>;
+  const requestResend = async () => {
+    const originalText = node.parts.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+    const text = await dialogs.prompt({ title: "Edit and resend payload", description: "The original turn stays unchanged. Lathe will create a sibling path with this payload.", label: "Payload", defaultValue: originalText, confirmLabel: "Continue", multiline: true });
+    if (!text?.trim()) return;
+    const branchName = await dialogs.prompt({ title: "Name the new branch", description: "This label identifies the divergent path in the conversation tree.", label: "Branch name", defaultValue: `edit-${node.id.slice(0, 6)}`, confirmLabel: "Create branch and run" });
+    if (!branchName?.trim()) return;
+    resend.mutate({ text, branchName: branchName.trim() });
+  };
+  return <button className="message-resend" onClick={() => void requestResend()} disabled={resend.isPending} title={resend.error?.message ?? "Edit this operator turn and resend it on a new sibling branch"}><RotateCcw size={10} />{resend.isPending ? "branching…" : "edit / resend"}</button>;
 }
 
 function RenderedText({ text }: { text: string }) {
@@ -245,18 +258,19 @@ function ComparisonView({ nodes, runs, branches }: { nodes: MessageNode[]; runs:
 }
 
 function BranchActions({ data, branch, selectedNode, onChanged }: { data: WorkbenchData; branch: BranchRef; selectedNode: MessageNode | null; onChanged(): void }) {
-  const fork = useMutation({ mutationFn: async () => {
-    const name = window.prompt("Branch name", `variation-${data.branches.length}`);
-    if (!name) return;
-    await api("/api/branches", { method: "POST", ...jsonBody({ sessionId: data.session.id, name, headNodeId: selectedNode?.id ?? branch.headNodeId }) });
-  }, onSuccess: onChanged });
+  const dialogs = useOperatorDialog();
+  const fork = useMutation({ mutationFn: (name: string) => api("/api/branches", { method: "POST", ...jsonBody({ sessionId: data.session.id, name, headNodeId: selectedNode?.id ?? branch.headNodeId }) }), onSuccess: onChanged });
   const rewind = useMutation({ mutationFn: () => api(`/api/branches/${branch.id}/head`, { method: "PATCH", ...jsonBody({ headNodeId: selectedNode?.id ?? null }) }), onSuccess: onChanged });
-  const checkpoint = useMutation({ mutationFn: async () => {
-    const name = window.prompt("Checkpoint name", "checkpoint");
-    if (!name) return;
-    await api(`/api/sessions/${data.session.id}/checkpoints`, { method: "POST", ...jsonBody({ name, nodeId: selectedNode?.id ?? branch.headNodeId }) });
-  }, onSuccess: onChanged });
-  return <><Button variant="ghost" onClick={() => fork.mutate()} title="Fork selected node"><GitBranch size={15} /></Button><Button variant="ghost" onClick={() => rewind.mutate()} title="Move branch head to selected node"><RotateCcw size={15} /></Button><Button variant="ghost" onClick={() => checkpoint.mutate()} title="Checkpoint selected node"><Archive size={15} /></Button></>;
+  const checkpoint = useMutation({ mutationFn: (name: string) => api(`/api/sessions/${data.session.id}/checkpoints`, { method: "POST", ...jsonBody({ name, nodeId: selectedNode?.id ?? branch.headNodeId }) }), onSuccess: onChanged });
+  const requestFork = async () => {
+    const name = await dialogs.prompt({ title: "Fork conversation", description: "Create a new branch from the selected node without changing the current path.", label: "Branch name", defaultValue: `variation-${data.branches.length}`, confirmLabel: "Create branch" });
+    if (name?.trim()) fork.mutate(name.trim());
+  };
+  const requestCheckpoint = async () => {
+    const name = await dialogs.prompt({ title: "Create checkpoint", description: "Save this node and the session's current immutable configuration for later restoration.", label: "Checkpoint name", defaultValue: "checkpoint", confirmLabel: "Save checkpoint" });
+    if (name?.trim()) checkpoint.mutate(name.trim());
+  };
+  return <><Button variant="ghost" onClick={() => void requestFork()} title="Fork selected node" aria-label="Fork selected node" disabled={fork.isPending}><GitBranch size={15} /></Button><Button variant="ghost" onClick={() => rewind.mutate()} title="Move branch head to selected node" aria-label="Move branch head to selected node" disabled={rewind.isPending}><RotateCcw size={15} /></Button><Button variant="ghost" onClick={() => void requestCheckpoint()} title="Checkpoint selected node" aria-label="Checkpoint selected node" disabled={checkpoint.isPending}><Archive size={15} /></Button></>;
 }
 
 function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchData; branch: BranchRef; onRunStarted(id: string): void; onChanged(): void }) {
@@ -391,6 +405,7 @@ function Inspector({ data, branch, selectedNode, onChanged }: { data: WorkbenchD
 }
 
 function ConfigInspector({ data, onChanged }: { data: WorkbenchData; onChanged(): void }) {
+  const dialogs = useOperatorDialog();
   const [draft, setDraft] = useState<ResolvedConfig>(() => structuredClone(data.session.draftConfig));
   const [selection, setSelection] = useState(data.session.providerProfileId && data.session.modelId ? `${data.session.providerProfileId}::${data.session.modelId}` : "");
   const [overrides, setOverrides] = useState(() => JSON.stringify(draft.protocolOverrides, null, 2));
@@ -422,12 +437,14 @@ function ConfigInspector({ data, onChanged }: { data: WorkbenchData; onChanged()
     await api(`/api/sessions/${data.session.id}/config`, { method: "PATCH", ...jsonBody({ config: { ...draft, protocolOverrides: JSON.parse(overrides) } }) });
     await api(`/api/sessions/${data.session.id}/continuation`, { method: "PATCH", ...jsonBody({ enabled: autoContinueTools, limit: autoContinueLimit }) });
   }, onSuccess: onChanged });
-  const saveHarness = useMutation({ mutationFn: async () => {
+  const saveHarness = useMutation({ mutationFn: (name: string) => {
     if (save.isPending) throw new Error("Save the session draft first");
-    const name = window.prompt("New harness name", `${data.session.name} harness`);
-    if (!name) return;
-    await api(`/api/sessions/${data.session.id}/save-harness`, { method: "POST", ...jsonBody({ name, description: `Saved from ${data.session.name}`, tags: [] }) });
+    return api(`/api/sessions/${data.session.id}/save-harness`, { method: "POST", ...jsonBody({ name, description: `Saved from ${data.session.name}`, tags: [] }) });
   } });
+  const requestSaveHarness = async () => {
+    const name = await dialogs.prompt({ title: "Save reusable harness", description: "Create a new immutable harness revision from the session's current draft configuration.", label: "Harness name", defaultValue: `${data.session.name} harness`, confirmLabel: "Save harness" });
+    if (name?.trim()) saveHarness.mutate(name.trim());
+  };
   const addPrompt = () => {
     const asset = prompts.data?.assets.find((item) => item.id === promptRevisionId);
     if (!asset || !asset.value || typeof asset.value !== "object" || Array.isArray(asset.value) || typeof asset.value.content !== "string") return;
@@ -453,7 +470,7 @@ function ConfigInspector({ data, onChanged }: { data: WorkbenchData; onChanged()
     <div className="config-section"><h3>Tools <span>{draft.tools.filter((item) => item.enabled).length}</span></h3><div className="inline-add"><Select value={toolRevisionId} onChange={(event) => setToolRevisionId(event.target.value)}><option value="">Add from library…</option>{toolSpecs.data?.assets.map((asset) => <option value={asset.id} key={asset.id}>{asset.name} · r{asset.revision}</option>)}</Select><Button variant="secondary" onClick={addTool} disabled={!toolRevisionId}><PlusIcon /></Button></div>{draft.tools.map((tool, index) => <div className="tool-binding" key={`${tool.toolRevisionId}-${index}`}><label className="tool-toggle"><input type="checkbox" checked={tool.enabled} onChange={(event) => setDraft({ ...draft, tools: draft.tools.map((item, itemIndex) => itemIndex === index ? { ...item, enabled: event.target.checked } : item) })} /><span><strong>{tool.name}</strong><small>{tool.mode} · {tool.description}</small></span><Select value={tool.mode} onChange={(event) => setDraft({ ...draft, tools: draft.tools.map((item, itemIndex) => itemIndex === index ? { ...item, mode: event.target.value as typeof item.mode, implementationRevisionId: null, targetId: null, mcpServerId: null } : item) })}><option value="manual">manual</option><option value="mock">mock</option><option value="real">real</option><option value="mcp">MCP</option></Select></label>{(tool.mode === "real" || tool.mode === "mock") && <Select aria-label={`${tool.name} implementation`} value={tool.implementationRevisionId ?? ""} onChange={(event) => setDraft({ ...draft, tools: draft.tools.map((item, itemIndex) => itemIndex === index ? { ...item, implementationRevisionId: event.target.value || null } : item) })}><option value="">Select implementation…</option>{implementations.data?.assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · r{asset.revision}</option>)}</Select>}{tool.mode === "real" && <Select aria-label={`${tool.name} target`} value={tool.targetId ?? ""} onChange={(event) => setDraft({ ...draft, tools: draft.tools.map((item, itemIndex) => itemIndex === index ? { ...item, targetId: event.target.value || null } : item) })}><option value="">Local host</option>{targets.data?.assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</Select>}{tool.mode === "mcp" && <Select aria-label={`${tool.name} MCP server`} value={tool.mcpServerId ?? ""} onChange={(event) => setDraft({ ...draft, tools: draft.tools.map((item, itemIndex) => itemIndex === index ? { ...item, mcpServerId: event.target.value || null } : item) })}><option value="">Select MCP server…</option>{mcpServers.data?.assets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</Select>}</div>)}</div>
     <Field label="Protocol overrides"><CodeMirror value={overrides} onChange={setOverrides} extensions={[json()]} height="130px" theme="dark" /></Field>
     {draft.compileWarnings.map((warning) => <div className="warning" key={warning}>{warning}</div>)}
-    {save.error && <div className="form-error">{save.error.message}</div>}<div className="inspector-actions"><Button onClick={() => save.mutate()} disabled={save.isPending}><Save size={14} /> Save draft</Button><Button variant="secondary" onClick={() => saveHarness.mutate()}><Archive size={14} /> Save as harness</Button></div>
+    {save.error && <div className="form-error">{save.error.message}</div>}{saveHarness.error && <div className="form-error">{saveHarness.error.message}</div>}<div className="inspector-actions"><Button onClick={() => save.mutate()} disabled={save.isPending}><Save size={14} /> Save draft</Button><Button variant="secondary" onClick={() => void requestSaveHarness()} disabled={saveHarness.isPending}><Archive size={14} /> Save as harness</Button></div>
   </div>;
 }
 
