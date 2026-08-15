@@ -40,6 +40,28 @@ test("protects the local API and creates a persistent workbench", async ({ page,
   await expect(page.getByRole("heading", { name: /Explore the path/i })).toBeVisible();
   await expect(page).not.toHaveURL(/token=/);
 
+  const librarySettings = page.getByRole("link", { name: "Settings" });
+  const interfaceSettings = page.getByRole("button", { name: "Interface settings" });
+  await expect(librarySettings).toHaveAttribute("href", "/settings");
+  await expect(interfaceSettings).toBeVisible();
+
+  await interfaceSettings.click();
+  let interfaceDialog = page.getByRole("dialog", { name: "Interface settings" });
+  await expect(interfaceDialog).toBeVisible();
+  await interfaceDialog.getByRole("button", { name: /Extra large/ }).click();
+  await expect(interfaceDialog.getByRole("slider", { name: "Interface text size" })).toHaveValue("130");
+  await expect.poll(() => page.locator("html").evaluate((element) => getComputedStyle(element).fontSize)).toBe("20.8px");
+  await interfaceDialog.getByRole("button", { name: "Done" }).click();
+
+  await page.reload();
+  await expect.poll(() => page.locator("html").evaluate((element) => getComputedStyle(element).fontSize)).toBe("20.8px");
+  await page.getByRole("button", { name: "Interface settings" }).click();
+  interfaceDialog = page.getByRole("dialog", { name: "Interface settings" });
+  await expect(interfaceDialog.getByRole("slider", { name: "Interface text size" })).toHaveValue("130");
+  await interfaceDialog.getByRole("button", { name: "Reset text size" }).click();
+  await expect.poll(() => page.locator("html").evaluate((element) => getComputedStyle(element).fontSize)).toBe("16px");
+  await interfaceDialog.getByRole("button", { name: "Done" }).click();
+
   const suffix = `${Date.now()}-${test.info().retry}`;
   const projectName = `Playwright project ${suffix}`;
   const sessionName = `Branch smoke ${suffix}`;
@@ -75,6 +97,8 @@ test("protects the local API and creates a persistent workbench", async ({ page,
   expect(providerResponse.status()).toBe(201);
 
   await page.goto("/settings");
+  await expect(page.getByRole("button", { name: "Interface settings" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workbench settings" })).toBeVisible();
   await page.getByRole("button", { name: `Edit ${providerLabel}` }).click();
   const providerEditor = page.locator(".editor-panel");
   await expect(providerEditor.getByText("Edit provider · revision 1")).toBeVisible();
@@ -175,6 +199,7 @@ test("protects the local API and creates a persistent workbench", async ({ page,
 
   await expect(page).toHaveURL(/\/projects\/[^/]+\/sessions\/[^/]+/);
   await expect(page.getByRole("heading", { name: sessionName })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Interface settings" })).toBeVisible();
   await expect(page.getByText("CONVERSATION TREE")).toBeVisible();
   await expect(page.getByRole("heading", { name: "The branch starts here" })).toBeVisible();
   await expectOriginalCasingOnCodeSurfaces(page);

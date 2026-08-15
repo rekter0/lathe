@@ -5,10 +5,12 @@ import { RouterProvider } from "@tanstack/react-router";
 import { initializeLaunchToken } from "./api.js";
 import { OperatorDialogProvider } from "./components/operator-dialog.js";
 import { router } from "./router.js";
+import { initializeUiPreferences } from "./ui-preferences.js";
 import "@xyflow/react/dist/style.css";
 import "./styles.css";
 
 initializeLaunchToken();
+initializeUiPreferences();
 
 const queryClient = new QueryClient({
   defaultOptions: {
