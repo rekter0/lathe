@@ -30,6 +30,19 @@ function memoryStorage(): Storage {
 describe("project sidebar", () => {
   beforeEach(() => {
     Object.defineProperty(window, "localStorage", { configurable: true, value: memoryStorage() });
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: (query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        dispatchEvent: () => false
+      })
+    });
   });
   afterEach(cleanup);
 
@@ -66,5 +79,30 @@ describe("project sidebar", () => {
     expect(container.querySelector(".body-shell")?.classList.contains("project-rail-collapsed")).toBe(false);
     expect(screen.getByRole("button", { name: "Collapse projects sidebar" }).getAttribute("aria-expanded")).toBe("true");
     expect(window.localStorage.getItem("lathe.project-rail-collapsed")).toBe("false");
+  });
+
+  it("defaults to the compact rail on a narrow viewport without overriding a saved preference", () => {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: (query: string) => ({
+        matches: query === "(max-width: 600px)",
+        media: query,
+        onchange: null,
+        addListener: () => undefined,
+        removeListener: () => undefined,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+        dispatchEvent: () => false
+      })
+    });
+
+    const { container } = render(
+      <ProjectRailLayout projects={[project]}>
+        <div>Workbench</div>
+      </ProjectRailLayout>
+    );
+
+    expect(container.querySelector(".body-shell")?.classList.contains("project-rail-collapsed")).toBe(true);
+    expect(screen.getByRole("button", { name: "Expand projects sidebar" })).not.toBeNull();
   });
 });

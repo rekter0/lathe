@@ -90,4 +90,38 @@ test("protects the local API and creates a persistent workbench", async ({ page,
   await expect(page.getByText("CONVERSATION TREE")).toBeVisible();
   await expect(page.getByRole("heading", { name: "The branch starts here" })).toBeVisible();
   await expect(page.getByLabel("Active branch")).toHaveValue(/.+/);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const continuation = page.locator(".continuation-control");
+  await continuation.scrollIntoViewIfNeeded();
+  await expect(continuation).toBeVisible();
+
+  const layout = await page.evaluate(() => {
+    const main = document.querySelector<HTMLElement>(".main-stage");
+    const inspector = document.querySelector<HTMLElement>(".inspector-pane");
+    const continuationControl = document.querySelector<HTMLElement>(".continuation-control");
+    const turnLimitField = continuationControl?.querySelector<HTMLElement>(".field");
+    const label = continuationControl?.children.item(0)?.getBoundingClientRect();
+    const turnLimit = continuationControl?.children.item(1)?.getBoundingClientRect();
+    const turnLimitChildren = turnLimitField
+      ? [...turnLimitField.children].map((child) => child.getBoundingClientRect())
+      : [];
+    return {
+      documentOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      mainOverflow: (main?.scrollWidth ?? 0) - (main?.clientWidth ?? 0),
+      inspectorOverflow: (inspector?.scrollWidth ?? 0) - (inspector?.clientWidth ?? 0),
+      continuationColumns: continuationControl ? getComputedStyle(continuationControl).gridTemplateColumns : "",
+      continuationOverlaps: label && turnLimit ? label.bottom > turnLimit.top + 1 : true,
+      turnLimitDisplay: turnLimitField ? getComputedStyle(turnLimitField).display : "",
+      turnLimitChildrenOverlap: turnLimitChildren.some((box, index) => index > 0 && box.top < turnLimitChildren[index - 1]!.bottom)
+    };
+  });
+
+  expect(layout.documentOverflow).toBe(0);
+  expect(layout.mainOverflow).toBe(0);
+  expect(layout.inspectorOverflow).toBe(0);
+  expect(layout.continuationColumns.split(" ")).toHaveLength(1);
+  expect(layout.continuationOverlaps).toBe(false);
+  expect(layout.turnLimitDisplay).toBe("grid");
+  expect(layout.turnLimitChildrenOverlap).toBe(false);
 });

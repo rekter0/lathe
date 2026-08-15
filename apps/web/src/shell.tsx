@@ -17,7 +17,9 @@ const PROJECT_RAIL_STORAGE_KEY = "lathe.project-rail-collapsed";
 function savedProjectRailState(): boolean {
   if (typeof window === "undefined") return false;
   try {
-    return window.localStorage.getItem(PROJECT_RAIL_STORAGE_KEY) === "true";
+    const saved = window.localStorage.getItem(PROJECT_RAIL_STORAGE_KEY);
+    if (saved !== null) return saved === "true";
+    return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 600px)").matches;
   } catch {
     return false;
   }
