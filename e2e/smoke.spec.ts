@@ -1,5 +1,21 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { E2E_TOKEN } from "../playwright.config.js";
+
+async function expectOriginalCasingOnCodeSurfaces(page: Page): Promise<void> {
+  const transformed = await page.locator("code, pre, .cm-editor, .cm-content, .input, .select, .textarea").evaluateAll((elements) =>
+    elements.flatMap((element) => {
+      const transform = getComputedStyle(element).textTransform;
+      if (transform === "none") return [];
+      return [{
+        element: element.tagName.toLowerCase(),
+        className: element.getAttribute("class") ?? "",
+        text: (element.textContent ?? "").slice(0, 80),
+        transform,
+      }];
+    })
+  );
+  expect(transformed).toEqual([]);
+}
 
 test("protects the local API and creates a persistent workbench", async ({ page, request }) => {
   const unprotectedHealth = await request.get("/api/health");
@@ -62,6 +78,7 @@ test("protects the local API and creates a persistent workbench", async ({ page,
   await page.getByRole("button", { name: `Edit ${providerLabel}` }).click();
   const providerEditor = page.locator(".editor-panel");
   await expect(providerEditor.getByText("Edit provider · revision 1")).toBeVisible();
+  await expectOriginalCasingOnCodeSurfaces(page);
   await providerEditor.getByLabel("Label").fill(revisedProviderLabel);
   await providerEditor.getByRole("button", { name: "Save new revision" }).click();
   await expect(page.getByRole("button", { name: `Edit ${revisedProviderLabel}` })).toBeVisible();
@@ -95,17 +112,21 @@ test("protects the local API and creates a persistent workbench", async ({ page,
   await page.locator(".editor-panel").getByRole("button", { name: "Save new revision" }).click();
   await expect(page.getByRole("button", { name: `Edit ${toolLabel}` })).toBeVisible();
   await page.getByRole("button", { name: `Edit ${implementationLabel} implementation` }).click();
+  await expect(page.locator(".implementation-panel .cm-content")).toContainText("function build");
+  await expectOriginalCasingOnCodeSurfaces(page);
   await page.locator(".implementation-panel form").getByLabel("Label").fill(revisedImplementationLabel);
   await page.locator(".implementation-panel form").getByRole("button", { name: "Save new revision" }).click();
   await expect(page.getByRole("button", { name: `Edit ${revisedImplementationLabel} implementation` })).toBeVisible();
 
   await page.getByRole("tab", { name: "Targets" }).click();
   await page.getByRole("button", { name: `Edit ${targetLabel} target` }).click();
+  await expectOriginalCasingOnCodeSurfaces(page);
   await page.getByLabel("Target label").fill(revisedTargetLabel);
   await page.getByRole("button", { name: "Save new revision" }).click();
   await expect(page.getByRole("button", { name: `Edit ${revisedTargetLabel} target` })).toBeVisible();
   await page.getByRole("tab", { name: "MCP", exact: true }).click();
   await page.getByRole("button", { name: `Edit ${mcpLabel} MCP profile` }).click();
+  await expectOriginalCasingOnCodeSurfaces(page);
   await page.getByLabel("Server label").fill(revisedMcpLabel);
   await page.getByRole("button", { name: "Save new revision" }).click();
   await expect(page.getByRole("button", { name: `Edit ${revisedMcpLabel} MCP profile` })).toBeVisible();
@@ -148,6 +169,7 @@ test("protects the local API and creates a persistent workbench", async ({ page,
   await expect(page.getByRole("heading", { name: sessionName })).toBeVisible();
   await expect(page.getByText("CONVERSATION TREE")).toBeVisible();
   await expect(page.getByRole("heading", { name: "The branch starts here" })).toBeVisible();
+  await expectOriginalCasingOnCodeSurfaces(page);
   await expect(page.getByLabel("Active branch")).toHaveValue(/.+/);
 
   const executionPermission = page.getByLabel("Tool execution permission");
