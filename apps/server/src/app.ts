@@ -24,7 +24,7 @@ import {
   type MessagePart,
   type ResolvedConfig
 } from "@lathe/domain";
-import type { ContentStore, LatheRepository } from "@lathe/db";
+import type { ContentStore, LatheRepository, ResourceDeletionResult } from "@lathe/db";
 import { previewBatchVariation, type BatchVaryPlan } from "@lathe/automation";
 import { discoverProviderModels, redactText } from "@lathe/providers";
 import {
@@ -72,6 +72,15 @@ function validateAssetCredentials(kind: AssetKind, value: JsonValue): void {
   }
 }
 
+function resourceInUseMessage(label: string, result: ResourceDeletionResult): string {
+  const examples = result.references
+    .slice(0, 3)
+    .map((reference) => `${reference.kind} “${reference.label}” (${reference.detail})`)
+    .join(", ");
+  const remainder = result.references.length - 3;
+  return `${label} is still in use by ${examples}${remainder > 0 ? ` and ${remainder} more reference${remainder === 1 ? "" : "s"}` : ""}. Remove those references before deleting it.`;
+}
+
 export function createApp(dependencies: AppDependencies): Hono {
   const { repository, contentStore, events, runCoordinator } = dependencies;
   const app = new Hono();
@@ -109,6 +118,19 @@ export function createApp(dependencies: AppDependencies): Hono {
     const project = await repository.updateProject(context.req.param("id"), Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined)));
     if (!project) throw new HTTPException(404, { message: "Project not found" });
     return context.json({ project });
+  });
+  app.delete("/api/projects/:id", async (context) => {
+    const project = await repository.getProject(context.req.param("id"));
+    if (!project) throw new HTTPException(404, { message: "Project not found" });
+    const sessions = await repository.listSessions(project.id);
+    for (const session of sessions) {
+      const [runs, jobs] = await Promise.all([repository.listRuns(session.id), repository.listAutomationJobs(session.id)]);
+      if (runs.some((run) => ["queued", "streaming", "awaiting-tool"].includes(run.status)) || jobs.some((job) => ["queued", "running"].includes(job.status))) {
+        throw new HTTPException(409, { message: `Project “${project.name}” has active work in session “${session.name}”. Cancel or finish it before deleting the project.` });
+      }
+    }
+    if (!await repository.deleteProject(project.id)) throw new HTTPException(404, { message: "Project not found" });
+    return context.json({ deleted: true, id: project.id });
   });
 
   app.get("/api/sessions", async (context) => {
@@ -188,6 +210,16 @@ export function createApp(dependencies: AppDependencies): Hono {
     if (!session) throw new HTTPException(404, { message: "Session not found" });
     return context.json({ session });
   });
+  app.delete("/api/sessions/:id", async (context) => {
+    const session = await repository.getSession(context.req.param("id"));
+    if (!session) throw new HTTPException(404, { message: "Session not found" });
+    const [runs, jobs] = await Promise.all([repository.listRuns(session.id), repository.listAutomationJobs(session.id)]);
+    if (runs.some((run) => ["queued", "streaming", "awaiting-tool"].includes(run.status)) || jobs.some((job) => ["queued", "running"].includes(job.status))) {
+      throw new HTTPException(409, { message: `Session “${session.name}” has active work. Cancel or finish it before deleting the session.` });
+    }
+    if (!await repository.deleteSession(session.id)) throw new HTTPException(404, { message: "Session not found" });
+    return context.json({ deleted: true, id: session.id });
+  });
 
   app.post("/api/sessions/:id/messages", async (context) => {
     const input = await parseBody(context.req.raw, appendMessageSchema);
@@ -266,6 +298,12 @@ export function createApp(dependencies: AppDependencies): Hono {
     const body = await parseBody(context.req.raw, z.object({ label: z.string().trim().min(1).max(120), value: z.string().min(1) }));
     return context.json({ secret: await repository.createSecret(body.label, body.value) }, 201);
   });
+  app.delete("/api/secrets/:id", async (context) => {
+    const result = await repository.deleteSecret(context.req.param("id"));
+    if (result.references.length > 0) return context.json({ error: { code: "resource-in-use", message: resourceInUseMessage("Secret", result), references: result.references } }, 409);
+    if (!result.deleted) throw new HTTPException(404, { message: "Secret not found" });
+    return context.json({ deleted: true, id: context.req.param("id") });
+  });
   app.post("/api/providers", async (context) => {
     const input = await parseBody(context.req.raw, createProviderProfileSchema);
     const provider = await repository.createProviderProfile({
@@ -305,6 +343,12 @@ export function createApp(dependencies: AppDependencies): Hono {
     if (!provider) throw new HTTPException(404, { message: "Provider profile revision not found" });
     return context.json({ provider: sanitizeProvider(provider) }, 201);
   });
+  app.delete("/api/providers/:id", async (context) => {
+    const result = await repository.deleteProviderProfile(context.req.param("id"));
+    if (result.references.length > 0) return context.json({ error: { code: "resource-in-use", message: resourceInUseMessage("Provider profile", result), references: result.references } }, 409);
+    if (!result.deleted) throw new HTTPException(404, { message: "Provider profile not found" });
+    return context.json({ deleted: true, id: context.req.param("id") });
+  });
 
   app.get("/api/assets", async (context) => {
     const kind = context.req.query("kind") as AssetKind | undefined;
@@ -314,6 +358,12 @@ export function createApp(dependencies: AppDependencies): Hono {
     const asset = await parseBody(context.req.raw, z.custom<Parameters<typeof repository.saveAssetRevision>[0]>((value) => Boolean(value && typeof value === "object")));
     validateAssetCredentials(asset.kind, asset.value);
     return context.json({ asset: sanitizeAssetRevision(await repository.saveAssetRevision(asset)) }, 201);
+  });
+  app.delete("/api/library/assets/:id", async (context) => {
+    const result = await repository.deleteAssetRevision(context.req.param("id"));
+    if (result.references.length > 0) return context.json({ error: { code: "resource-in-use", message: resourceInUseMessage("Library revision", result), references: result.references } }, 409);
+    if (!result.deleted) throw new HTTPException(404, { message: "Library revision not found" });
+    return context.json({ deleted: true, id: context.req.param("id") });
   });
   app.post("/api/library/assets", async (context) => {
     const body = await parseBody(context.req.raw, z.object({
@@ -328,6 +378,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       trusted: z.boolean().default(false)
     }));
     const kindRevisions = await repository.listAssetRevisions(body.kind);
+    const allKindRevisions = await repository.listAssetRevisions(body.kind, true);
     const prior = body.assetId
       ? kindRevisions.filter((item) => item.assetId === body.assetId).toSorted((left, right) => right.revision - left.revision)[0]
       : undefined;
@@ -364,7 +415,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       id: uuidv7(),
       assetId,
       kind: body.kind,
-      revision: (prior?.revision ?? 0) + 1,
+      revision: Math.max(0, ...allKindRevisions.filter((item) => item.assetId === assetId).map((item) => item.revision)) + 1,
       name: body.name,
       description: body.description,
       tags: body.tags,

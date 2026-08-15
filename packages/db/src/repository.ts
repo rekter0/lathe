@@ -70,6 +70,18 @@ export interface CreateRunInput extends Pick<ModelRun, "sessionId" | "branchId" 
 export interface RestoreCheckpointInput { checkpointId: string; sessionId: string; branchId: string }
 export interface RestoreCheckpointResult { checkpoint: Checkpoint; branch: BranchRef; session: Session }
 
+export interface ResourceReference {
+  kind: "project" | "session" | "checkpoint" | "snapshot" | "asset" | "automation";
+  id: string;
+  label: string;
+  detail: string;
+}
+
+export interface ResourceDeletionResult {
+  deleted: boolean;
+  references: ResourceReference[];
+}
+
 export interface LatheRepository {
   readonly dialect: "sqlite" | "postgres";
   close(): Promise<void>;
@@ -77,12 +89,14 @@ export interface LatheRepository {
   getProject(id: string): Promise<Project | null>;
   createProject(input: CreateProjectInput): Promise<Project>;
   updateProject(id: string, input: Partial<CreateProjectInput>): Promise<Project | null>;
+  deleteProject(id: string): Promise<boolean>;
   listSessions(projectId: string): Promise<Session[]>;
   getSession(id: string): Promise<Session | null>;
   createSession(input: CreateSessionInput): Promise<{ session: Session; branch: BranchRef }>;
   updateSessionDraft(id: string, config: ResolvedConfig): Promise<Session | null>;
   updateSessionModel(id: string, providerProfileId: string | null, modelId: string | null): Promise<Session | null>;
   updateSessionContinuation(id: string, enabled: boolean, limit: number): Promise<Session | null>;
+  deleteSession(id: string): Promise<boolean>;
   listNodes(sessionId: string): Promise<MessageNode[]>;
   getNode(id: string): Promise<MessageNode | null>;
   appendNode(input: AppendNodeInput): Promise<MessageNode>;
@@ -102,11 +116,14 @@ export interface LatheRepository {
   getProviderProfile(id: string): Promise<ProviderProfile | null>;
   createProviderProfile(input: CreateProviderInput): Promise<ProviderProfile>;
   createProviderRevision(id: string, input: Partial<CreateProviderInput>): Promise<ProviderProfile | null>;
+  deleteProviderProfile(id: string): Promise<ResourceDeletionResult>;
   listSecrets(): Promise<SecretMetadata[]>;
   createSecret(label: string, value: string): Promise<SecretMetadata>;
   resolveSecret(id: string): Promise<string | undefined>;
+  deleteSecret(id: string): Promise<ResourceDeletionResult>;
   saveAssetRevision(asset: AssetRevision): Promise<AssetRevision>;
-  listAssetRevisions(kind?: AssetKind): Promise<AssetRevision[]>;
+  listAssetRevisions(kind?: AssetKind, includeArchived?: boolean): Promise<AssetRevision[]>;
+  deleteAssetRevision(id: string): Promise<ResourceDeletionResult>;
   saveAttachment(input: Omit<Attachment, "id" | "createdAt">): Promise<Attachment>;
   getAttachment(id: string): Promise<Attachment | null>;
   listAttachments(projectId: string): Promise<Attachment[]>;
@@ -120,6 +137,42 @@ export interface LatheRepository {
 }
 
 type Schema = Record<string, any>;
+
+function jsonReferences(value: JsonValue, id: string): boolean {
+  if (value === id) return true;
+  if (Array.isArray(value)) return value.some((item) => jsonReferences(item, id));
+  if (value && typeof value === "object") return Object.values(value).some((item) => jsonReferences(item, id));
+  return false;
+}
+
+function configReferencesAsset(config: ResolvedConfig, id: string): boolean {
+  return config.promptBlocks.some((block) => block.revisionId === id)
+    || config.tools.some((tool) => (
+      tool.toolRevisionId === id
+      || tool.implementationRevisionId === id
+      || tool.targetId === id
+      || tool.mcpServerId === id
+    ));
+}
+
+function assetReference(asset: AssetRevision, detail: string): ResourceReference {
+  return {
+    kind: "asset",
+    id: asset.id,
+    label: `${asset.name} · revision ${asset.revision}`,
+    detail
+  };
+}
+
+function uniqueReferences(references: ResourceReference[]): ResourceReference[] {
+  const seen = new Set<string>();
+  return references.filter((reference) => {
+    const key = `${reference.kind}:${reference.id}:${reference.detail}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 export class DrizzleLatheRepository implements LatheRepository {
   constructor(
@@ -181,6 +234,12 @@ export class DrizzleLatheRepository implements LatheRepository {
   async updateProject(id: string, input: Partial<CreateProjectInput>): Promise<Project | null> {
     const values = { ...input, updatedAt: nowIso() };
     return this.returningOrNull(this.db.update(this.schema.projects).set(values).where(eq(this.schema.projects.id, id)).returning());
+  }
+
+  async deleteProject(id: string): Promise<boolean> {
+    return Boolean(await this.returningOrNull<Project>(
+      this.db.delete(this.schema.projects).where(eq(this.schema.projects.id, id)).returning()
+    ));
   }
 
   private async returningOrNull<T>(query: any): Promise<T | null> {
@@ -249,6 +308,12 @@ export class DrizzleLatheRepository implements LatheRepository {
         .where(eq(this.schema.sessions.id, id))
         .returning()
     );
+  }
+
+  async deleteSession(id: string): Promise<boolean> {
+    return Boolean(await this.returningOrNull<Session>(
+      this.db.delete(this.schema.sessions).where(eq(this.schema.sessions.id, id)).returning()
+    ));
   }
 
   async listNodes(sessionId: string): Promise<MessageNode[]> {
@@ -514,6 +579,20 @@ export class DrizzleLatheRepository implements LatheRepository {
     return profile;
   }
 
+  async deleteProviderProfile(id: string): Promise<ResourceDeletionResult> {
+    const profile = await this.getProviderProfile(id);
+    if (!profile || profile.archivedAt) return { deleted: false, references: [] };
+    const references = await this.providerReferences(id);
+    if (references.length > 0) return { deleted: false, references };
+    const archived = await this.returningOrNull<ProviderProfile>(
+      this.db.update(this.schema.providerProfiles)
+        .set({ archivedAt: nowIso(), updatedAt: nowIso() })
+        .where(and(eq(this.schema.providerProfiles.id, id), isNull(this.schema.providerProfiles.archivedAt)))
+        .returning()
+    );
+    return { deleted: Boolean(archived), references: [] };
+  }
+
   async listSecrets(): Promise<SecretMetadata[]> {
     const rows = await this.all<SecretMetadata & { value: string }>(
       this.db.select().from(this.schema.secrets).orderBy(this.schema.secrets.label)
@@ -534,6 +613,17 @@ export class DrizzleLatheRepository implements LatheRepository {
     return row?.value;
   }
 
+  async deleteSecret(id: string): Promise<ResourceDeletionResult> {
+    const secret = await this.get<{ id: string }>(this.db.select({ id: this.schema.secrets.id }).from(this.schema.secrets).where(eq(this.schema.secrets.id, id)));
+    if (!secret) return { deleted: false, references: [] };
+    const references = await this.secretReferences(id);
+    if (references.length > 0) return { deleted: false, references };
+    const deleted = await this.returningOrNull<{ id: string }>(
+      this.db.delete(this.schema.secrets).where(eq(this.schema.secrets.id, id)).returning({ id: this.schema.secrets.id })
+    );
+    return { deleted: Boolean(deleted), references: [] };
+  }
+
   async saveAssetRevision(asset: AssetRevision): Promise<AssetRevision> {
     const query = this.db.insert(this.schema.assetRevisions).values(asset).onConflictDoNothing().returning();
     const inserted = await this.returningOrNull<AssetRevision>(query);
@@ -543,10 +633,109 @@ export class DrizzleLatheRepository implements LatheRepository {
     return existing;
   }
 
-  async listAssetRevisions(kind?: AssetKind): Promise<AssetRevision[]> {
+  async listAssetRevisions(kind?: AssetKind, includeArchived = false): Promise<AssetRevision[]> {
     const base = this.db.select().from(this.schema.assetRevisions);
-    const query = kind ? base.where(eq(this.schema.assetRevisions.kind, kind)) : base;
+    const conditions = [
+      ...(kind ? [eq(this.schema.assetRevisions.kind, kind)] : []),
+      ...(!includeArchived ? [isNull(this.schema.assetRevisions.archivedAt)] : [])
+    ];
+    const query = conditions.length > 0 ? base.where(and(...conditions)) : base;
     return this.all(query.orderBy(this.schema.assetRevisions.kind, this.schema.assetRevisions.name, desc(this.schema.assetRevisions.revision)));
+  }
+
+  async deleteAssetRevision(id: string): Promise<ResourceDeletionResult> {
+    const asset = await this.get<AssetRevision>(this.db.select().from(this.schema.assetRevisions).where(eq(this.schema.assetRevisions.id, id)));
+    if (!asset || asset.archivedAt) return { deleted: false, references: [] };
+    const references = await this.assetReferences(id);
+    if (references.length > 0) return { deleted: false, references };
+    const archived = await this.returningOrNull<AssetRevision>(
+      this.db.update(this.schema.assetRevisions)
+        .set({ archivedAt: nowIso() })
+        .where(and(eq(this.schema.assetRevisions.id, id), isNull(this.schema.assetRevisions.archivedAt)))
+        .returning()
+    );
+    return { deleted: Boolean(archived), references: [] };
+  }
+
+  private async referenceRows(): Promise<{
+    projects: Project[];
+    sessions: Session[];
+    checkpoints: Checkpoint[];
+    snapshots: ConfigSnapshot[];
+    assets: AssetRevision[];
+    jobs: AutomationJob[];
+  }> {
+    const [projects, sessions, checkpoints, snapshots, assets, jobs] = await Promise.all([
+      this.all<Project>(this.db.select().from(this.schema.projects)),
+      this.all<Session>(this.db.select().from(this.schema.sessions)),
+      this.all<Checkpoint>(this.db.select().from(this.schema.checkpoints)),
+      this.all<ConfigSnapshot>(this.db.select().from(this.schema.configSnapshots)),
+      this.listAssetRevisions(),
+      this.all<AutomationJob>(this.db.select().from(this.schema.automationJobs))
+    ]);
+    return { projects, sessions, checkpoints, snapshots, assets, jobs };
+  }
+
+  private async providerReferences(id: string): Promise<ResourceReference[]> {
+    const { sessions, checkpoints, snapshots, assets, jobs } = await this.referenceRows();
+    const references: ResourceReference[] = [];
+    for (const session of sessions) {
+      if (session.providerProfileId === id || session.draftConfig.provider?.profileId === id) {
+        references.push({ kind: "session", id: session.id, label: session.name, detail: "selected provider or session draft" });
+      }
+    }
+    for (const checkpoint of checkpoints) {
+      if (checkpoint.providerProfileId === id) references.push({ kind: "checkpoint", id: checkpoint.id, label: checkpoint.name, detail: "captured provider" });
+    }
+    for (const snapshot of snapshots) {
+      if (snapshot.config.provider?.profileId === id) references.push({ kind: "snapshot", id: snapshot.id, label: snapshot.id, detail: "saved provider configuration" });
+    }
+    for (const asset of assets) {
+      if (jsonReferences(asset.value, id)) references.push(assetReference(asset, "saved revision value"));
+    }
+    for (const job of jobs) {
+      if (jsonReferences(job.plan, id)) references.push({ kind: "automation", id: job.id, label: job.kind, detail: "saved automation plan" });
+    }
+    return uniqueReferences(references);
+  }
+
+  private async assetReferences(id: string): Promise<ResourceReference[]> {
+    const { projects, sessions, snapshots, assets, jobs } = await this.referenceRows();
+    const references: ResourceReference[] = [];
+    for (const project of projects) {
+      if (project.defaultHarnessRevisionId === id) references.push({ kind: "project", id: project.id, label: project.name, detail: "default harness" });
+    }
+    for (const session of sessions) {
+      if (configReferencesAsset(session.draftConfig, id)) references.push({ kind: "session", id: session.id, label: session.name, detail: "session draft" });
+    }
+    for (const snapshot of snapshots) {
+      if (configReferencesAsset(snapshot.config, id)) references.push({ kind: "snapshot", id: snapshot.id, label: snapshot.id, detail: "saved configuration" });
+    }
+    for (const asset of assets) {
+      if (asset.id !== id && jsonReferences(asset.value, id)) references.push(assetReference(asset, "saved revision value"));
+    }
+    for (const job of jobs) {
+      if (jsonReferences(job.plan, id)) references.push({ kind: "automation", id: job.id, label: job.kind, detail: "saved automation plan" });
+    }
+    return uniqueReferences(references);
+  }
+
+  private async secretReferences(id: string): Promise<ResourceReference[]> {
+    const { sessions, snapshots, assets, jobs } = await this.referenceRows();
+    const references: ResourceReference[] = [];
+    for (const session of sessions) {
+      if (jsonReferences(session.draftConfig as unknown as JsonValue, id)) references.push({ kind: "session", id: session.id, label: session.name, detail: "session draft" });
+    }
+    for (const snapshot of snapshots) {
+      if (jsonReferences(snapshot.config as unknown as JsonValue, id)) references.push({ kind: "snapshot", id: snapshot.id, label: snapshot.id, detail: "saved configuration" });
+    }
+    for (const asset of assets) {
+      if (jsonReferences(asset.value, id)) references.push(assetReference(asset, "credential reference"));
+    }
+    for (const job of jobs) {
+      if (jsonReferences(job.plan, id)) references.push({ kind: "automation", id: job.id, label: job.kind, detail: "saved automation plan" });
+    }
+    return uniqueReferences(references);
   }
 
   async saveAttachment(input: Omit<Attachment, "id" | "createdAt">): Promise<Attachment> {

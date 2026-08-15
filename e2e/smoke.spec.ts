@@ -87,6 +87,14 @@ test("protects the local API and creates a persistent workbench", async ({ page,
   const activeProvidersText = await activeProviders.text();
   expect(activeProvidersText).not.toContain(`credential-${suffix}`);
   expect(JSON.parse(activeProvidersText)).toMatchObject({ providers: expect.arrayContaining([expect.objectContaining({ label: revisedProviderLabel, revision: 2, hasCredential: true })]) });
+  await page.getByRole("button", { name: `Delete ${revisedProviderLabel} provider` }).click();
+  const providerDeleteDialog = page.getByRole("dialog", { name: `Delete provider “${revisedProviderLabel}”?` });
+  await expect(providerDeleteDialog).toBeVisible();
+  await providerDeleteDialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(page.getByRole("button", { name: `Edit ${revisedProviderLabel}` })).toBeVisible();
+  await page.getByRole("button", { name: `Delete ${revisedProviderLabel} provider` }).click();
+  await page.getByRole("dialog", { name: `Delete provider “${revisedProviderLabel}”?` }).getByRole("button", { name: "Delete provider" }).click();
+  await expect(page.getByRole("button", { name: `Edit ${revisedProviderLabel}` })).toHaveCount(0);
 
   const assetPayloads = [
     { kind: "prompt", name: promptLabel, description: "Prompt before edit", tags: [], provenance: { operatorAuthored: true }, trusted: true, value: { content: "Prompt before edit" } },
@@ -219,4 +227,24 @@ test("protects the local API and creates a persistent workbench", async ({ page,
   expect(layout.continuationOverlaps).toBe(false);
   expect(layout.turnLimitDisplay).toBe("grid");
   expect(layout.turnLimitChildrenOverlap).toBe(false);
+
+  const workbenchUrl = new URL(page.url());
+  const workbenchSegments = workbenchUrl.pathname.split("/");
+  const projectId = workbenchSegments[2]!;
+  const sessionId = workbenchSegments[4]!;
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto(`/?project=${projectId}`);
+  await page.getByRole("button", { name: `Delete ${sessionName} session` }).click();
+  const sessionDeleteDialog = page.getByRole("dialog", { name: `Delete session “${sessionName}”?` });
+  await expect(sessionDeleteDialog).toBeVisible();
+  await sessionDeleteDialog.getByRole("button", { name: "Delete session" }).click();
+  await expect(page.getByRole("link", { name: sessionName })).toHaveCount(0);
+  expect((await request.get(`/api/sessions/${sessionId}`, { headers: apiHeaders })).status()).toBe(404);
+
+  await page.getByRole("button", { name: "Delete project" }).click();
+  const projectDeleteDialog = page.getByRole("dialog", { name: `Delete project “${projectName}”?` });
+  await expect(projectDeleteDialog).toBeVisible();
+  await projectDeleteDialog.getByRole("button", { name: "Delete project" }).click();
+  await expect(page.getByRole("heading", { name: projectName })).toHaveCount(0);
+  expect((await request.get(`/api/sessions?projectId=${projectId}`, { headers: apiHeaders })).status()).toBe(200);
 });

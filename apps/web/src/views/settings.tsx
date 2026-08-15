@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as Tabs from "@radix-ui/react-tabs";
 import CodeMirror from "@uiw/react-codemirror";
 import { json } from "@codemirror/lang-json";
-import { Box, Braces, Cable, Download, KeyRound, Library, PackageOpen, Pencil, Plus, RefreshCw, ShieldCheck, TerminalSquare, Upload, X } from "lucide-react";
+import { Box, Braces, Cable, Download, KeyRound, Library, PackageOpen, Pencil, Plus, RefreshCw, ShieldCheck, TerminalSquare, Trash2, Upload, X } from "lucide-react";
 import { api, downloadApiFile, jsonBody } from "../api.js";
 import { Button, Field, Input, Select, Textarea } from "../components/forms.js";
 import { useOperatorDialog } from "../components/operator-dialog.js";
@@ -32,6 +32,46 @@ function parseObjectJson(source: string, label: string): Record<string, unknown>
     throw new Error(`${label} must be a JSON object`);
   }
   return value as Record<string, unknown>;
+}
+
+interface DeleteItem {
+  id: string;
+  name: string;
+}
+
+function useConfirmedDelete(options: {
+  subject: string;
+  endpoint(item: DeleteItem): string;
+  invalidateKey: readonly unknown[];
+  description: string;
+  onDeleted?(item: DeleteItem): void;
+}) {
+  const dialogs = useOperatorDialog();
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: (item: DeleteItem) => api(options.endpoint(item), { method: "DELETE" }),
+    onSuccess: (_result, item) => {
+      void queryClient.invalidateQueries({ queryKey: [...options.invalidateKey] });
+      options.onDeleted?.(item);
+    },
+    onError: (error, item) => void dialogs.confirm({
+      title: `Could not delete ${options.subject} “${item.name}”`,
+      description: error.message,
+      confirmLabel: "Close",
+      danger: true
+    })
+  });
+  const request = async (item: DeleteItem) => {
+    mutation.reset();
+    const approved = await dialogs.confirm({
+      title: `Delete ${options.subject} “${item.name}”?`,
+      description: options.description,
+      confirmLabel: `Delete ${options.subject}`,
+      danger: true
+    });
+    if (approved) mutation.mutate(item);
+  };
+  return { ...mutation, request };
 }
 
 export function SettingsPage() {
@@ -82,6 +122,13 @@ function ProviderSettings() {
     setExtraBody("{}");
     setClearCredential(false);
   };
+  const deleteProvider = useConfirmedDelete({
+    subject: "provider",
+    endpoint: (item) => `/api/providers/${item.id}`,
+    invalidateKey: ["providers"],
+    description: "This removes the provider revision from the global library. Lathe will refuse the deletion if a session, checkpoint, saved configuration, or automation plan still references it.",
+    onDeleted: (item) => { if (editingProvider?.id === item.id) resetFields(); }
+  });
 
   const saveProvider = useMutation({
     mutationFn: () => {
@@ -153,12 +200,13 @@ function ProviderSettings() {
     <section className="panel library-list">
       <div className="panel-title"><KeyRound size={16} /> Saved providers</div>
       {providers.data?.providers.map((provider) => <article className={`library-card${editingProvider?.id === provider.id ? " editing" : ""}`} key={provider.id}>
-        <div><strong>{provider.label}</strong><small>{provider.protocol} · revision {provider.revision}</small></div><div className="library-actions"><Button variant="ghost" onClick={() => beginEdit(provider)} title="Edit provider as a new revision" aria-label={`Edit ${provider.label}`}><Pencil size={13} /></Button><Button variant="ghost" onClick={() => discover.mutate(provider.id)} title="Discover compatible models" aria-label={`Discover models for ${provider.label}`} disabled={discover.isPending && discover.variables === provider.id}><RefreshCw size={13} className={discover.isPending && discover.variables === provider.id ? "spin-icon" : ""} /></Button></div>
+        <div><strong>{provider.label}</strong><small>{provider.protocol} · revision {provider.revision}</small></div><div className="library-actions"><Button variant="ghost" onClick={() => beginEdit(provider)} title="Edit provider as a new revision" aria-label={`Edit ${provider.label}`}><Pencil size={13} /></Button><Button variant="ghost" onClick={() => discover.mutate(provider.id)} title="Discover compatible models" aria-label={`Discover models for ${provider.label}`} disabled={discover.isPending && discover.variables === provider.id}><RefreshCw size={13} className={discover.isPending && discover.variables === provider.id ? "spin-icon" : ""} /></Button><Button variant="ghost" className="delete-icon-button" onClick={() => void deleteProvider.request({ id: provider.id, name: provider.label })} title={`Delete ${provider.label}`} aria-label={`Delete ${provider.label} provider`} disabled={deleteProvider.isPending && deleteProvider.variables?.id === provider.id}><Trash2 size={13} /></Button></div>
         <code>{provider.baseUrl}</code>
         <p>{provider.models.length} models · credential {provider.hasCredential ? "stored" : "not set"}</p>
         {discover.variables === provider.id && discover.data && <div className="discovery-result"><strong>{discover.data.models.length} models discovered</strong>{discover.data.models.slice(0, 12).map((model) => <code key={model.id}>{model.id}</code>)}{discover.data.models.length > 12 && <small>+{discover.data.models.length - 12} more</small>}{discover.data.warnings.map((warning) => <small className="warning" key={warning}>{warning}</small>)}<Button variant="secondary" onClick={() => saveCatalog.mutate({ providerId: provider.id, models: discover.data.models })} disabled={discover.data.models.length === 0 || saveCatalog.isPending}><SaveCatalogIcon />{saveCatalog.isPending ? "Saving revision…" : "Save discovered catalog"}</Button>{saveCatalog.error && <div className="form-error">{saveCatalog.error.message}</div>}</div>}
       </article>)}
       {providers.data?.providers.length === 0 && <p className="quiet">No provider profiles yet.</p>}
+      {deleteProvider.error && <div className="form-error library-delete-error">{deleteProvider.error.message}</div>}
     </section>
     <section className="panel editor-panel">
       <div className="panel-title">{editingProvider ? <Pencil size={16} /> : <Plus size={16} />}{editingProvider ? `Edit provider · revision ${editingProvider.revision}` : "New provider profile"}{editingProvider && <Button type="button" variant="ghost" className="panel-title-action" onClick={cancelEdit} title="Cancel editing" aria-label="Cancel provider editing"><X size={13} /></Button>}</div>
@@ -199,6 +247,13 @@ function AssetSettings({ kind }: { kind: "prompt" | "tool-spec" }) {
     setContent("");
     setSchema('{\n  "type": "object",\n  "properties": {}\n}');
   };
+  const deleteAsset = useConfirmedDelete({
+    subject: kind === "prompt" ? "prompt revision" : "tool specification",
+    endpoint: (item) => `/api/library/assets/${item.id}`,
+    invalidateKey: ["assets", kind],
+    description: "This removes the immutable revision from the global library. Lathe will refuse the deletion while a harness, session draft, saved snapshot, project, or automation plan references it.",
+    onDeleted: (item) => { if (editingAsset?.id === item.id) resetFields(); }
+  });
   const save = useMutation({
     mutationFn: () => api("/api/library/assets", {
       method: "POST",
@@ -227,8 +282,9 @@ function AssetSettings({ kind }: { kind: "prompt" | "tool-spec" }) {
       {query.data?.assets.map((asset) => {
         const latest = query.data.assets.filter((candidate) => candidate.assetId === asset.assetId).toSorted((left, right) => right.revision - left.revision)[0];
         const mayEdit = latest?.id === asset.id;
-        return <article className={`library-card${editingAsset?.id === asset.id ? " editing" : ""}`} key={asset.id}><div><strong>{asset.name}</strong><small>revision {asset.revision}</small></div><div className="library-actions"><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "trusted" : "disabled"}</span>{mayEdit && <Button variant="ghost" onClick={() => beginEdit(asset)} title="Edit as a new immutable revision" aria-label={`Edit ${asset.name}`}><Pencil size={13} /></Button>}</div><p>{asset.description || "No description"}</p><code>{asset.contentHash.slice(0, 16)}…</code></article>;
+        return <article className={`library-card${editingAsset?.id === asset.id ? " editing" : ""}`} key={asset.id}><div><strong>{asset.name}</strong><small>revision {asset.revision}</small></div><div className="library-actions"><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "trusted" : "disabled"}</span>{mayEdit && <Button variant="ghost" onClick={() => beginEdit(asset)} title="Edit as a new immutable revision" aria-label={`Edit ${asset.name}`}><Pencil size={13} /></Button>}<Button variant="ghost" className="delete-icon-button" onClick={() => void deleteAsset.request(asset)} title={`Delete ${asset.name} revision ${asset.revision}`} aria-label={`Delete ${asset.name} revision ${asset.revision}`} disabled={deleteAsset.isPending && deleteAsset.variables?.id === asset.id}><Trash2 size={13} /></Button></div><p>{asset.description || "No description"}</p><code>{asset.contentHash.slice(0, 16)}…</code></article>;
       })}
+      {deleteAsset.error && <div className="form-error library-delete-error">{deleteAsset.error.message}</div>}
     </section>
     <section className="panel editor-panel"><div className="panel-title">{editingAsset ? <Pencil size={16} /> : <Plus size={16} />}{editingAsset ? `Edit ${kind === "prompt" ? "prompt" : "tool"} · revision ${editingAsset.revision}` : `New ${kind === "prompt" ? "prompt" : "tool"}`}{editingAsset && <Button type="button" variant="ghost" className="panel-title-action" onClick={() => { save.reset(); resetFields(); }} title="Cancel editing" aria-label={`Cancel ${kind} editing`}><X size={13} /></Button>}</div>
       <form onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
@@ -260,6 +316,13 @@ function ToolImplementationEditor() {
     setSource(defaultSource);
     setMockResult('{\n  "ok": true\n}');
   };
+  const deleteImplementation = useConfirmedDelete({
+    subject: "tool implementation",
+    endpoint: (item) => `/api/library/assets/${item.id}`,
+    invalidateKey: ["assets", "tool-implementation"],
+    description: "This removes the implementation revision from the global library. Lathe will refuse the deletion while a harness, session, or saved configuration is bound to it.",
+    onDeleted: (item) => { if (editingAsset?.id === item.id) resetFields(); }
+  });
   const save = useMutation({
     mutationFn: () => api("/api/library/assets", { method: "POST", ...jsonBody({
       ...(editingAsset ? { assetId: editingAsset.assetId, baseRevisionId: editingAsset.id } : {}),
@@ -310,8 +373,8 @@ function ToolImplementationEditor() {
     const latest = implementations.data.assets.filter((candidate) => candidate.assetId === asset.assetId).toSorted((left, right) => right.revision - left.revision)[0];
     const mayTrust = !asset.trusted && latest?.id === asset.id;
     const mayEdit = latest?.id === asset.id;
-    return <article className={`library-card${editingAsset?.id === asset.id ? " editing" : ""}`} key={asset.id}><div><strong>{asset.name}</strong><small>{asset.tags.join(" · ") || "implementation"} · revision {asset.revision}</small></div><div className="library-actions"><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "enabled" : "disabled"}</span>{mayEdit && <Button variant="ghost" onClick={() => beginEdit(asset)} title="Edit implementation as a new revision" aria-label={`Edit ${asset.name} implementation`}><Pencil size={13} /></Button>}</div><code>{asset.contentHash.slice(0, 16)}…</code>{mayTrust && <Button variant="danger" className="trust-action" onClick={() => void requestTrust(asset)} disabled={trust.isPending}><ShieldCheck size={12} /> Trust as new revision</Button>}</article>;
-  })}{trust.error && <div className="form-error implementation-error">{trust.error.message}</div>}</div><form onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
+    return <article className={`library-card${editingAsset?.id === asset.id ? " editing" : ""}`} key={asset.id}><div><strong>{asset.name}</strong><small>{asset.tags.join(" · ") || "implementation"} · revision {asset.revision}</small></div><div className="library-actions"><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "enabled" : "disabled"}</span>{mayEdit && <Button variant="ghost" onClick={() => beginEdit(asset)} title="Edit implementation as a new revision" aria-label={`Edit ${asset.name} implementation`}><Pencil size={13} /></Button>}<Button variant="ghost" className="delete-icon-button" onClick={() => void deleteImplementation.request(asset)} title={`Delete ${asset.name} revision ${asset.revision}`} aria-label={`Delete ${asset.name} implementation revision ${asset.revision}`} disabled={deleteImplementation.isPending && deleteImplementation.variables?.id === asset.id}><Trash2 size={13} /></Button></div><code>{asset.contentHash.slice(0, 16)}…</code>{mayTrust && <Button variant="danger" className="trust-action" onClick={() => void requestTrust(asset)} disabled={trust.isPending}><ShieldCheck size={12} /> Trust as new revision</Button>}</article>;
+  })}{trust.error && <div className="form-error implementation-error">{trust.error.message}</div>}{deleteImplementation.error && <div className="form-error implementation-error">{deleteImplementation.error.message}</div>}</div><form onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
     {editingAsset && <div className="editor-context"><span>Edit implementation · revision {editingAsset.revision}</span><Button type="button" variant="ghost" onClick={() => { save.reset(); resetFields(); }} aria-label="Cancel implementation editing"><X size={13} /> Cancel</Button></div>}
     <div className="two-fields"><Field label="Label"><Input value={name} onChange={(event) => setName(event.target.value)} required /></Field><Field label="Mode"><Select value={mode} onChange={(event) => setMode(event.target.value as "real" | "mock")}><option value="real">Real command handler</option><option value="mock">Deterministic mock</option></Select></Field></div>
     {mode === "real" ? <Field label="Synchronous QuickJS source" hint="Expose build(input) and formatResult(result). No imports, filesystem, network, process, or environment access."><CodeMirror value={source} onChange={setSource} height="260px" theme="dark" /></Field> : <Field label="Mock JSON result"><CodeMirror value={mockResult} onChange={setMockResult} extensions={[json()]} height="160px" theme="dark" /></Field>}
@@ -340,6 +403,23 @@ function ConnectionSettings({ section }: { section: "targets" | "mcp" }) {
   const [mcpRoots, setMcpRoots] = useState("[]");
   const [mcpJson, setMcpJson] = useState("{}");
   const [secretId, setSecretId] = useState("");
+  const deleteConnection = useConfirmedDelete({
+    subject: section === "targets" ? "target revision" : "MCP profile",
+    endpoint: (item) => `/api/library/assets/${item.id}`,
+    invalidateKey: ["assets"],
+    description: "This removes the revision from the global library. Lathe will refuse the deletion while another saved revision, harness, session, snapshot, project, or automation plan references it.",
+    onDeleted: (item) => {
+      if (editingTarget?.id === item.id) { setEditingTarget(null); setTargetName(""); setTargetJson(defaultTargetJson); }
+      if (editingMcp?.id === item.id) { setEditingMcp(null); setMcpName(""); setMcpJson("{}"); }
+    }
+  });
+  const deleteSecret = useConfirmedDelete({
+    subject: "secret",
+    endpoint: (item) => `/api/secrets/${item.id}`,
+    invalidateKey: ["secrets"],
+    description: "This permanently deletes the stored secret value. Lathe will refuse the deletion while an MCP profile, target, session, snapshot, or automation plan references its secret ID.",
+    onDeleted: (item) => { if (secretId === item.id) setSecretId(""); }
+  });
   const createSecret = useMutation({ mutationFn: () => api("/api/secrets", { method: "POST", ...jsonBody({ label: secretLabel, value: secretValue }) }), onSuccess: () => { setSecretLabel(""); setSecretValue(""); void queryClient.invalidateQueries({ queryKey: ["secrets"] }); } });
   const saveTarget = useMutation({ mutationFn: () => {
     const value = parseObjectJson(targetJson, "Target JSON");
@@ -441,16 +521,16 @@ function ConnectionSettings({ section }: { section: "targets" | "mcp" }) {
         const latest = targets.data.assets.filter((candidate) => candidate.assetId === asset.assetId).toSorted((left, right) => right.revision - left.revision)[0];
         const mayTrust = !asset.trusted && latest?.id === asset.id;
         const mayEdit = latest?.id === asset.id;
-        return <article className={`library-card${editingTarget?.id === asset.id ? " editing" : ""}`} key={asset.id}><div><strong>{asset.name}</strong><small>revision {asset.revision}</small></div><div className="library-actions"><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "enabled" : "disabled"}</span>{mayEdit && <Button variant="ghost" onClick={() => beginTargetEdit(asset)} title="Edit target as a new revision" aria-label={`Edit ${asset.name} target`}><Pencil size={13} /></Button>}</div><code>{JSON.stringify(asset.value)}</code>{mayTrust && <Button variant="danger" className="trust-action" onClick={() => void requestTrustConnection(asset)} disabled={trustConnection.isPending}><ShieldCheck size={12} /> Trust as new revision</Button>}</article>;
-      })}<form className="connection-form" onSubmit={(event) => { event.preventDefault(); saveTarget.mutate(); }}>{editingTarget && <div className="editor-context"><span>Edit target · revision {editingTarget.revision}</span><Button type="button" variant="ghost" onClick={cancelTargetEdit} aria-label="Cancel target editing"><X size={13} /> Cancel</Button></div>}<Field label="Target label"><Input value={targetName} onChange={(event) => setTargetName(event.target.value)} required /></Field><Field label="Target JSON" hint={editingTarget ? "Redacted environment values are preserved. Replace a marker to update it, or delete the key to remove it." : undefined}><CodeMirror value={targetJson} onChange={setTargetJson} extensions={[json()]} height="175px" theme="dark" /></Field>{editingTarget && <p className="warning provider-revision-note">Saving creates revision {editingTarget.revision + 1}. Existing session bindings remain pinned to revision {editingTarget.revision}.</p>}{saveTarget.error && <div className="form-error">{saveTarget.error.message}</div>}<Button disabled={!targetName || saveTarget.isPending}>{saveTarget.isPending ? "Saving…" : editingTarget ? "Save new revision" : "Save target"}</Button></form></section>}
+        return <article className={`library-card${editingTarget?.id === asset.id ? " editing" : ""}`} key={asset.id}><div><strong>{asset.name}</strong><small>revision {asset.revision}</small></div><div className="library-actions"><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "enabled" : "disabled"}</span>{mayEdit && <Button variant="ghost" onClick={() => beginTargetEdit(asset)} title="Edit target as a new revision" aria-label={`Edit ${asset.name} target`}><Pencil size={13} /></Button>}<Button variant="ghost" className="delete-icon-button" onClick={() => void deleteConnection.request(asset)} title={`Delete ${asset.name} revision ${asset.revision}`} aria-label={`Delete ${asset.name} target revision ${asset.revision}`} disabled={deleteConnection.isPending && deleteConnection.variables?.id === asset.id}><Trash2 size={13} /></Button></div><code>{JSON.stringify(asset.value)}</code>{mayTrust && <Button variant="danger" className="trust-action" onClick={() => void requestTrustConnection(asset)} disabled={trustConnection.isPending}><ShieldCheck size={12} /> Trust as new revision</Button>}</article>;
+      })}{deleteConnection.error && <div className="form-error library-delete-error">{deleteConnection.error.message}</div>}<form className="connection-form" onSubmit={(event) => { event.preventDefault(); saveTarget.mutate(); }}>{editingTarget && <div className="editor-context"><span>Edit target · revision {editingTarget.revision}</span><Button type="button" variant="ghost" onClick={cancelTargetEdit} aria-label="Cancel target editing"><X size={13} /> Cancel</Button></div>}<Field label="Target label"><Input value={targetName} onChange={(event) => setTargetName(event.target.value)} required /></Field><Field label="Target JSON" hint={editingTarget ? "Redacted environment values are preserved. Replace a marker to update it, or delete the key to remove it." : undefined}><CodeMirror value={targetJson} onChange={setTargetJson} extensions={[json()]} height="175px" theme="dark" /></Field>{editingTarget && <p className="warning provider-revision-note">Saving creates revision {editingTarget.revision + 1}. Existing session bindings remain pinned to revision {editingTarget.revision}.</p>}{saveTarget.error && <div className="form-error">{saveTarget.error.message}</div>}<Button disabled={!targetName || saveTarget.isPending}>{saveTarget.isPending ? "Saving…" : editingTarget ? "Save new revision" : "Save target"}</Button></form></section>}
     {section === "mcp" && <section className="panel"><div className="panel-title"><Cable size={16} /> MCP servers</div><p className="quiet">Stdio and Streamable HTTP are supported. A stdio profile may launch through any trusted execution-target revision.</p>
       {servers.data?.assets.map((asset) => {
         const latest = servers.data.assets.filter((candidate) => candidate.assetId === asset.assetId).toSorted((left, right) => right.revision - left.revision)[0];
         const mayTrust = !asset.trusted && latest?.id === asset.id;
         const mayEdit = latest?.id === asset.id;
-        return <article className={`library-card${editingMcp?.id === asset.id ? " editing" : ""}`} key={asset.id}><div><strong>{asset.name}</strong><small>{asset.tags.join(" · ")} · revision {asset.revision}</small></div><div className="library-actions"><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "enabled" : "disabled"}</span><Button variant="ghost" onClick={() => inspectMcp.mutate(asset.id)} title="Inspect capabilities" aria-label={`Inspect ${asset.name} capabilities`} disabled={!asset.trusted}><Cable size={13} /></Button>{mayEdit && <Button variant="ghost" onClick={() => beginMcpEdit(asset)} title="Edit MCP profile as a new revision" aria-label={`Edit ${asset.name} MCP profile`}><Pencil size={13} /></Button>}</div><code>{asset.contentHash.slice(0, 16)}…</code>{mayTrust && <Button variant="danger" className="trust-action" onClick={() => void requestTrustConnection(asset)} disabled={trustConnection.isPending}><ShieldCheck size={12} /> Trust as new revision</Button>}</article>;
+        return <article className={`library-card${editingMcp?.id === asset.id ? " editing" : ""}`} key={asset.id}><div><strong>{asset.name}</strong><small>{asset.tags.join(" · ")} · revision {asset.revision}</small></div><div className="library-actions"><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "enabled" : "disabled"}</span><Button variant="ghost" onClick={() => inspectMcp.mutate(asset.id)} title="Inspect capabilities" aria-label={`Inspect ${asset.name} capabilities`} disabled={!asset.trusted}><Cable size={13} /></Button>{mayEdit && <Button variant="ghost" onClick={() => beginMcpEdit(asset)} title="Edit MCP profile as a new revision" aria-label={`Edit ${asset.name} MCP profile`}><Pencil size={13} /></Button>}<Button variant="ghost" className="delete-icon-button" onClick={() => void deleteConnection.request(asset)} title={`Delete ${asset.name} revision ${asset.revision}`} aria-label={`Delete ${asset.name} MCP profile revision ${asset.revision}`} disabled={deleteConnection.isPending && deleteConnection.variables?.id === asset.id}><Trash2 size={13} /></Button></div><code>{asset.contentHash.slice(0, 16)}…</code>{mayTrust && <Button variant="danger" className="trust-action" onClick={() => void requestTrustConnection(asset)} disabled={trustConnection.isPending}><ShieldCheck size={12} /> Trust as new revision</Button>}</article>;
       })}<form className="connection-form" onSubmit={(event) => { event.preventDefault(); saveMcp.mutate(); }}>{editingMcp && <div className="editor-context"><span>Edit MCP profile · revision {editingMcp.revision}</span><Button type="button" variant="ghost" onClick={cancelMcpEdit} aria-label="Cancel MCP profile editing"><X size={13} /> Cancel</Button></div>}{editingMcp ? <><Field label="Server label"><Input value={mcpName} onChange={(event) => setMcpName(event.target.value)} required /></Field><Field label="Profile JSON" hint="Secret references remain symbolic. Saving updates the embedded profile revision automatically."><CodeMirror value={mcpJson} onChange={setMcpJson} extensions={[json()]} height="260px" theme="dark" /></Field><p className="warning provider-revision-note">Saving creates revision {editingMcp.revision + 1}. Existing session bindings remain pinned to revision {editingMcp.revision}.</p></> : <><div className="two-fields"><Field label="Server label"><Input value={mcpName} onChange={(event) => setMcpName(event.target.value)} required /></Field><Field label="Transport"><Select value={mcpKind} onChange={(event) => setMcpKind(event.target.value as typeof mcpKind)}><option value="stdio">stdio</option><option value="streamableHttp">Streamable HTTP</option></Select></Field></div><Field label={mcpKind === "stdio" ? "Command" : "URL"}><Input value={mcpAddress} onChange={(event) => setMcpAddress(event.target.value)} required /></Field>{mcpKind === "stdio" && <Field label="Execution target" hint="Host is the default. Select a trusted revision to launch stdio through Docker, Podman, or SSH."><Select value={mcpTargetId} onChange={(event) => setMcpTargetId(event.target.value)}><option value="">Host process</option>{targets.data?.assets.filter((asset) => asset.trusted).map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · r{asset.revision}</option>)}</Select></Field>}<Field label="Optional credential"><Select value={secretId} onChange={(event) => setSecretId(event.target.value)}><option value="">None</option>{secrets.data?.secrets.map((secret) => <option key={secret.id} value={secret.id}>{secret.label}</option>)}</Select></Field><Field label="Roots (JSON array)" hint="Roots default to none. Adding one explicitly exposes that URI and its contents to the MCP server."><CodeMirror value={mcpRoots} onChange={setMcpRoots} extensions={[json()]} height="85px" theme="dark" /></Field></>}{saveMcp.error && <div className="form-error">{saveMcp.error.message}</div>}<Button disabled={!mcpName || (!editingMcp && !mcpAddress) || saveMcp.isPending}>{saveMcp.isPending ? "Saving…" : editingMcp ? "Save new revision" : "Save MCP profile"}</Button></form>{trustConnection.error && <div className="form-error">{trustConnection.error.message}</div>}{inspectMcp.error && <div className="form-error">{inspectMcp.error.message}</div>}{inspectMcp.data && <pre className="capability-result">{JSON.stringify(inspectMcp.data, null, 2)}</pre>}</section>}
-  </div>{section === "mcp" && <section className="panel secret-panel"><div className="panel-title"><KeyRound size={16} /> Secret references</div><p className="quiet">Values are stored plaintext in v1 but are never returned after saving. MCP profiles reference only secret IDs.</p><div className="secret-list">{secrets.data?.secrets.map((secret) => <span className="pill" key={secret.id}>{secret.label}</span>)}</div><form className="connection-form inline-secret" onSubmit={(event) => { event.preventDefault(); createSecret.mutate(); }}><Field label="Label"><Input value={secretLabel} onChange={(event) => setSecretLabel(event.target.value)} required /></Field><Field label="Value"><Input type="password" value={secretValue} onChange={(event) => setSecretValue(event.target.value)} required autoComplete="off" /></Field><Button disabled={!secretLabel || !secretValue}>Store secret</Button></form></section>}</>;
+  </div>{section === "mcp" && <section className="panel secret-panel"><div className="panel-title"><KeyRound size={16} /> Secret references</div><p className="quiet">Values are stored plaintext in v1 but are never returned after saving. MCP profiles reference only secret IDs.</p><div className="secret-list">{secrets.data?.secrets.map((secret) => <span className="secret-entry" key={secret.id}><span className="pill">{secret.label}</span><Button variant="ghost" className="delete-icon-button" onClick={() => void deleteSecret.request({ id: secret.id, name: secret.label })} title={`Delete ${secret.label}`} aria-label={`Delete ${secret.label} secret`} disabled={deleteSecret.isPending && deleteSecret.variables?.id === secret.id}><Trash2 size={12} /></Button></span>)}</div>{deleteSecret.error && <div className="form-error library-delete-error">{deleteSecret.error.message}</div>}<form className="connection-form inline-secret" onSubmit={(event) => { event.preventDefault(); createSecret.mutate(); }}><Field label="Label"><Input value={secretLabel} onChange={(event) => setSecretLabel(event.target.value)} required /></Field><Field label="Value"><Input type="password" value={secretValue} onChange={(event) => setSecretValue(event.target.value)} required autoComplete="off" /></Field><Button disabled={!secretLabel || !secretValue}>Store secret</Button></form></section>}</>;
 }
 
 interface ArtifactImportResult {
@@ -465,6 +545,12 @@ function ArtifactSettings() {
   const queryClient = useQueryClient();
   const harnesses = useQuery({ queryKey: ["assets", "harness"], queryFn: () => api<{ assets: AssetRevision[] }>("/api/assets?kind=harness") });
   const [file, setFile] = useState<File | null>(null);
+  const deleteHarness = useConfirmedDelete({
+    subject: "harness revision",
+    endpoint: (item) => `/api/library/assets/${item.id}`,
+    invalidateKey: ["assets", "harness"],
+    description: "This removes the harness revision from the global library. Lathe will refuse the deletion while it is a project default, session draft dependency, saved snapshot dependency, or automation input.",
+  });
   const importBundle = useMutation({
     mutationFn: async () => {
       if (!file) throw new Error("Select a Lathe artifact bundle");
@@ -484,9 +570,10 @@ function ArtifactSettings() {
   return <div className="artifact-grid">
     <section className="panel library-list"><div className="panel-title"><Download size={16} /> Export reusable harnesses <small>{harnesses.data?.assets.length ?? 0}</small></div>
       <p className="quiet artifact-intro">Bundles include the versioned harness, referenced prompt/tool specifications, a manifest, and SHA-256 checksums. Credentials are never exported.</p>
-      {harnesses.data?.assets.map((harness) => <article className="library-card artifact-card" key={harness.id}><div><strong>{harness.name}</strong><small>revision {harness.revision} · {harness.trusted ? "trusted" : "disabled"}</small></div><Button variant="ghost" onClick={() => exportHarness.mutate(harness)} title="Export harness bundle"><Download size={14} /></Button><p>{harness.description || "No description"}</p><code>{harness.contentHash.slice(0, 16)}…</code></article>)}
+      {harnesses.data?.assets.map((harness) => <article className="library-card artifact-card" key={harness.id}><div><strong>{harness.name}</strong><small>revision {harness.revision} · {harness.trusted ? "trusted" : "disabled"}</small></div><div className="library-actions"><Button variant="ghost" onClick={() => exportHarness.mutate(harness)} title="Export harness bundle" aria-label={`Export ${harness.name} harness`}><Download size={14} /></Button><Button variant="ghost" className="delete-icon-button" onClick={() => void deleteHarness.request(harness)} title={`Delete ${harness.name} revision ${harness.revision}`} aria-label={`Delete ${harness.name} harness revision ${harness.revision}`} disabled={deleteHarness.isPending && deleteHarness.variables?.id === harness.id}><Trash2 size={13} /></Button></div><p>{harness.description || "No description"}</p><code>{harness.contentHash.slice(0, 16)}…</code></article>)}
       {harnesses.data?.assets.length === 0 && <p className="quiet">No harness revisions available.</p>}
       {exportHarness.error && <div className="form-error artifact-error">{exportHarness.error.message}</div>}
+      {deleteHarness.error && <div className="form-error artifact-error">{deleteHarness.error.message}</div>}
     </section>
     <section className="panel artifact-import-panel"><div className="panel-title"><Upload size={16} /> Import an artifact</div>
       <form onSubmit={(event) => { event.preventDefault(); importBundle.mutate(); }}>

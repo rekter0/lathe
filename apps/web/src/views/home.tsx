@@ -2,9 +2,10 @@ import { useMemo, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import * as Dialog from "@radix-ui/react-dialog";
-import { ArrowRight, GitFork, Plus, ShieldCheck, X } from "lucide-react";
+import { ArrowRight, GitFork, Plus, ShieldCheck, Trash2, X } from "lucide-react";
 import { api, jsonBody } from "../api.js";
 import { Button, EmptyState, Field, Input, Select, Textarea } from "../components/forms.js";
+import { useOperatorDialog } from "../components/operator-dialog.js";
 import type { AssetRevision, Project, SafeProvider, Session } from "../types.js";
 
 function useSelectedProject(projects: Project[]): Project | null {
@@ -15,6 +16,7 @@ function useSelectedProject(projects: Project[]): Project | null {
 }
 
 export function HomePage() {
+  const dialogs = useOperatorDialog();
   const queryClient = useQueryClient();
   const projectsQuery = useQuery({ queryKey: ["projects"], queryFn: () => api<{ projects: Project[] }>("/api/projects") });
   const project = useSelectedProject(projectsQuery.data?.projects ?? []);
@@ -59,6 +61,37 @@ export function HomePage() {
       window.location.assign(`/projects/${session.projectId}/sessions/${session.id}`);
     }
   });
+  const deleteProject = useMutation({
+    mutationFn: (selected: Project) => api(`/api/projects/${selected.id}`, { method: "DELETE" }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      window.location.assign("/");
+    }
+  });
+  const deleteSession = useMutation({
+    mutationFn: (selected: Session) => api(`/api/sessions/${selected.id}`, { method: "DELETE" }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["sessions", project?.id] })
+  });
+  const requestProjectDelete = async () => {
+    if (!project) return;
+    const count = sessionsQuery.data?.sessions.length ?? 0;
+    const approved = await dialogs.confirm({
+      title: `Delete project “${project.name}”?`,
+      description: `This permanently deletes the project and its ${count} session${count === 1 ? "" : "s"}, conversation trees, runs, findings, jobs, and attachment records. Shared library revisions are not deleted.`,
+      confirmLabel: "Delete project",
+      danger: true
+    });
+    if (approved) deleteProject.mutate(project);
+  };
+  const requestSessionDelete = async (session: Session) => {
+    const approved = await dialogs.confirm({
+      title: `Delete session “${session.name}”?`,
+      description: "This permanently deletes its conversation tree, branches, checkpoints, runs, findings, and automation jobs. Shared library revisions remain available.",
+      confirmLabel: "Delete session",
+      danger: true
+    });
+    if (approved) deleteSession.mutate(session);
+  };
 
   return (
     <div className="home-view">
@@ -76,19 +109,23 @@ export function HomePage() {
 
       <section className="section-heading">
         <div><span className="eyebrow">WORKSPACE</span><h2>{project?.name ?? "No projects yet"}</h2></div>
-        <Dialog.Root open={projectOpen} onOpenChange={setProjectOpen}>
-          <Dialog.Trigger asChild><Button variant="secondary"><Plus size={15} /> New project</Button></Dialog.Trigger>
-          <Dialog.Portal>
-            <Dialog.Overlay className="dialog-overlay" />
-            <Dialog.Content className="dialog-content">
-              <Dialog.Title>Create a project</Dialog.Title>
-              <Dialog.Description>Projects group sessions, findings, attachments, and an optional workspace root.</Dialog.Description>
-              <ProjectForm pending={createProject.isPending} error={createProject.error?.message} onSubmit={(value) => createProject.mutate(value)} />
-              <Dialog.Close className="dialog-close" aria-label="Close"><X size={17} /></Dialog.Close>
-            </Dialog.Content>
-          </Dialog.Portal>
-        </Dialog.Root>
+        <div className="section-heading-actions">
+          {project && <Button variant="danger" onClick={() => void requestProjectDelete()} disabled={deleteProject.isPending}><Trash2 size={14} /> Delete project</Button>}
+          <Dialog.Root open={projectOpen} onOpenChange={setProjectOpen}>
+            <Dialog.Trigger asChild><Button variant="secondary"><Plus size={15} /> New project</Button></Dialog.Trigger>
+            <Dialog.Portal>
+              <Dialog.Overlay className="dialog-overlay" />
+              <Dialog.Content className="dialog-content">
+                <Dialog.Title>Create a project</Dialog.Title>
+                <Dialog.Description>Projects group sessions, findings, attachments, and an optional workspace root.</Dialog.Description>
+                <ProjectForm pending={createProject.isPending} error={createProject.error?.message} onSubmit={(value) => createProject.mutate(value)} />
+                <Dialog.Close className="dialog-close" aria-label="Close"><X size={17} /></Dialog.Close>
+              </Dialog.Content>
+            </Dialog.Portal>
+          </Dialog.Root>
+        </div>
       </section>
+      {deleteProject.error && <div className="form-error home-delete-error">{deleteProject.error.message}</div>}
 
       {!project ? (
         <EmptyState title="Create your first project"><p>A project is the stable container around related attack sessions and findings.</p></EmptyState>
@@ -98,13 +135,17 @@ export function HomePage() {
             <div className="panel-title"><GitFork size={16} /><span>Sessions</span><small>{sessionsQuery.data?.sessions.length ?? 0}</small></div>
             <div className="session-list">
               {sessionsQuery.data?.sessions.map((session) => (
-                <Link key={session.id} to="/projects/$projectId/sessions/$sessionId" params={{ projectId: project.id, sessionId: session.id }} className="session-row">
-                  <span className="session-status" />
-                  <span><strong>{session.name}</strong><small>{session.modelId ?? "No model selected"} · {new Date(session.updatedAt).toLocaleString()}</small></span>
-                  <ArrowRight size={16} />
-                </Link>
+                <div className="session-row" key={session.id}>
+                  <Link to="/projects/$projectId/sessions/$sessionId" params={{ projectId: project.id, sessionId: session.id }} className="session-row-link">
+                    <span className="session-status" />
+                    <span><strong>{session.name}</strong><small>{session.modelId ?? "No model selected"} · {new Date(session.updatedAt).toLocaleString()}</small></span>
+                    <ArrowRight size={16} />
+                  </Link>
+                  <Button variant="ghost" className="session-delete" onClick={() => void requestSessionDelete(session)} disabled={deleteSession.isPending && deleteSession.variables?.id === session.id} title={`Delete ${session.name}`} aria-label={`Delete ${session.name} session`}><Trash2 size={13} /></Button>
+                </div>
               ))}
               {sessionsQuery.data?.sessions.length === 0 && <div className="quiet">No sessions in this project.</div>}
+              {deleteSession.error && <div className="form-error session-delete-error">{deleteSession.error.message}</div>}
             </div>
           </section>
 

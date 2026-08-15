@@ -368,4 +368,98 @@ describe("Lathe API", () => {
       await persistence.repository.close();
     }
   });
+
+  it("deletes only unused shared resources and cascades idle sessions and projects", async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), "lathe-api-delete-"));
+    directories.push(dataDirectory);
+    const persistence = await createPersistence({ dataDirectory });
+    const token = "test-token";
+    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const app = createApp({
+      repository: persistence.repository,
+      contentStore: persistence.contentStore,
+      events: new EventHub(),
+      runCoordinator: new UnavailableRunCoordinator(),
+      apiToken: token,
+      dataDirectory
+    });
+    try {
+      const provider = await persistence.repository.createProviderProfile({
+        label: "Referenced provider", protocol: "openai-chat", baseUrl: "https://provider.invalid", models: []
+      });
+      const project = await persistence.repository.createProject({ name: "Disposable project" });
+      const { session } = await persistence.repository.createSession({
+        projectId: project.id, name: "Referenced session", providerProfileId: provider.id, modelId: "fixture-model"
+      });
+
+      const blockedProvider = await app.request(`/api/providers/${provider.id}`, { method: "DELETE", headers });
+      expect(blockedProvider.status).toBe(409);
+      expect(await blockedProvider.json()).toMatchObject({
+        error: { code: "resource-in-use", references: [expect.objectContaining({ kind: "session", id: session.id })] }
+      });
+
+      expect((await app.request(`/api/sessions/${session.id}`, { method: "DELETE", headers })).status).toBe(200);
+      expect(await persistence.repository.getSession(session.id)).toBeNull();
+      expect((await app.request(`/api/providers/${provider.id}`, { method: "DELETE", headers })).status).toBe(200);
+      expect((await persistence.repository.listProviderProfiles()).some((item) => item.id === provider.id)).toBe(false);
+
+      const { session: activeSession, branch } = await persistence.repository.createSession({ projectId: project.id, name: "Active session" });
+      const snapshot = await persistence.repository.createConfigSnapshot(activeSession.id, emptyResolvedConfig());
+      const run = await persistence.repository.createRun({ sessionId: activeSession.id, branchId: branch.id, contextNodeId: null, configSnapshotId: snapshot.id });
+      const blockedProject = await app.request(`/api/projects/${project.id}`, { method: "DELETE", headers });
+      expect(blockedProject.status).toBe(409);
+      expect(await blockedProject.text()).toContain("active work");
+      await persistence.repository.updateRun(run.id, { status: "cancelled" });
+      expect((await app.request(`/api/projects/${project.id}`, { method: "DELETE", headers })).status).toBe(200);
+      expect(await persistence.repository.getProject(project.id)).toBeNull();
+      expect(await persistence.repository.getSession(activeSession.id)).toBeNull();
+
+      const assetProject = await persistence.repository.createProject({ name: "Asset project" });
+      const { session: assetSession } = await persistence.repository.createSession({ projectId: assetProject.id, name: "Asset session" });
+      const promptValue: JsonObject = { content: "Pinned prompt" };
+      const prompt: AssetRevision = {
+        id: uuidv7(), assetId: uuidv7(), kind: "prompt", revision: 1,
+        name: "Pinned prompt", description: "Deletion fixture", tags: [], provenance: { operatorAuthored: true },
+        value: promptValue, contentHash: sha256Json(promptValue), trusted: true, archivedAt: null, createdAt: nowIso()
+      };
+      await persistence.repository.saveAssetRevision(prompt);
+      const config = emptyResolvedConfig();
+      config.promptBlocks.push({ revisionId: prompt.id, name: prompt.name, content: "Pinned prompt", enabled: true, order: 0 });
+      await persistence.repository.updateSessionDraft(assetSession.id, config);
+      expect((await app.request(`/api/library/assets/${prompt.id}`, { method: "DELETE", headers })).status).toBe(409);
+      await persistence.repository.updateSessionDraft(assetSession.id, emptyResolvedConfig());
+      expect((await app.request(`/api/library/assets/${prompt.id}`, { method: "DELETE", headers })).status).toBe(200);
+      expect((await persistence.repository.listAssetRevisions("prompt")).some((item) => item.id === prompt.id)).toBe(false);
+
+      const baseValue: JsonObject = { content: "Revision one" };
+      const base: AssetRevision = {
+        id: uuidv7(), assetId: uuidv7(), kind: "prompt", revision: 1,
+        name: "Revision lineage", description: "Deletion fixture", tags: [], provenance: { operatorAuthored: true },
+        value: baseValue, contentHash: sha256Json(baseValue), trusted: true, archivedAt: null, createdAt: nowIso()
+      };
+      await persistence.repository.saveAssetRevision(base);
+      const revisionTwo = await app.request("/api/library/assets", {
+        method: "POST", headers, body: JSON.stringify({
+          assetId: base.assetId, baseRevisionId: base.id, kind: "prompt", name: base.name,
+          description: base.description, tags: [], provenance: { operatorAuthored: true }, trusted: true,
+          value: { content: "Revision two" }
+        })
+      });
+      expect(revisionTwo.status).toBe(201);
+      const revisionTwoAsset = (await revisionTwo.json() as { asset: AssetRevision }).asset;
+      expect(revisionTwoAsset.revision).toBe(2);
+      expect((await app.request(`/api/library/assets/${revisionTwoAsset.id}`, { method: "DELETE", headers })).status).toBe(200);
+      const revisionThree = await app.request("/api/library/assets", {
+        method: "POST", headers, body: JSON.stringify({
+          assetId: base.assetId, baseRevisionId: base.id, kind: "prompt", name: base.name,
+          description: base.description, tags: [], provenance: { operatorAuthored: true }, trusted: true,
+          value: { content: "Revision three" }
+        })
+      });
+      expect(revisionThree.status).toBe(201);
+      expect((await revisionThree.json() as { asset: AssetRevision }).asset.revision).toBe(3);
+    } finally {
+      await persistence.repository.close();
+    }
+  });
 });

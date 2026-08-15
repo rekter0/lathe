@@ -1,5 +1,5 @@
 import { expect } from "vitest";
-import { emptyResolvedConfig } from "@lathe/domain";
+import { emptyResolvedConfig, nowIso, sha256Json, uuidv7, type AssetRevision, type JsonObject } from "@lathe/domain";
 import type { LatheRepository } from "../src/index.js";
 
 export async function repositoryContract(repository: LatheRepository): Promise<void> {
@@ -138,4 +138,48 @@ export async function repositoryContract(repository: LatheRepository): Promise<v
   expect(await repository.getAutomationJob(queuedJob.id)).toMatchObject({ status: "interrupted" });
   expect(await repository.getAutomationJob(runningJob.id)).toMatchObject({ status: "interrupted" });
   expect(await repository.getAutomationJob(completedJob.id)).toMatchObject({ status: "completed" });
+
+  const referencedProviderDeletion = await repository.deleteProviderProfile(providerRevision!.id);
+  expect(referencedProviderDeletion.deleted).toBe(false);
+  expect(referencedProviderDeletion.references.some((reference) => reference.kind === "session" || reference.kind === "checkpoint")).toBe(true);
+
+  const promptValue: JsonObject = { content: "Immutable prompt" };
+  const prompt: AssetRevision = {
+    id: uuidv7(), assetId: uuidv7(), kind: "prompt", revision: 1,
+    name: "Deletion prompt", description: "Reference checks", tags: [], provenance: { operatorAuthored: true },
+    value: promptValue, contentHash: sha256Json(promptValue), trusted: true, archivedAt: null, createdAt: nowIso()
+  };
+  await repository.saveAssetRevision(prompt);
+  const promptConfig = emptyResolvedConfig();
+  promptConfig.promptBlocks.push({ revisionId: prompt.id, name: prompt.name, content: "Immutable prompt", enabled: true, order: 0 });
+  await repository.updateSessionDraft(session.id, promptConfig);
+  const referencedAssetDeletion = await repository.deleteAssetRevision(prompt.id);
+  expect(referencedAssetDeletion.deleted).toBe(false);
+  expect(referencedAssetDeletion.references).toContainEqual(expect.objectContaining({ kind: "session", id: session.id }));
+  await repository.updateSessionDraft(session.id, emptyResolvedConfig());
+  expect(await repository.deleteAssetRevision(prompt.id)).toEqual({ deleted: true, references: [] });
+  expect((await repository.listAssetRevisions("prompt")).some((asset) => asset.id === prompt.id)).toBe(false);
+  expect((await repository.listAssetRevisions("prompt", true)).find((asset) => asset.id === prompt.id)?.archivedAt).not.toBeNull();
+
+  const secret = await repository.createSecret("Deletion secret", "secret-value");
+  const targetValue: JsonObject = { id: "target", label: "Target", kind: "host", environment: { TOKEN: { kind: "secret", secretId: secret.id } } };
+  const target: AssetRevision = {
+    id: uuidv7(), assetId: uuidv7(), kind: "target", revision: 1,
+    name: "Secret target", description: "Reference checks", tags: [], provenance: { operatorAuthored: true },
+    value: targetValue, contentHash: sha256Json(targetValue), trusted: true, archivedAt: null, createdAt: nowIso()
+  };
+  await repository.saveAssetRevision(target);
+  expect((await repository.deleteSecret(secret.id)).references).toContainEqual(expect.objectContaining({ kind: "asset", id: target.id }));
+  expect(await repository.deleteAssetRevision(target.id)).toEqual({ deleted: true, references: [] });
+  expect(await repository.deleteSecret(secret.id)).toEqual({ deleted: true, references: [] });
+  expect(await repository.resolveSecret(secret.id)).toBeUndefined();
+
+  expect(await repository.deleteSession(session.id)).toBe(true);
+  expect(await repository.getSession(session.id)).toBeNull();
+  expect(await repository.listNodes(session.id)).toEqual([]);
+  expect(await repository.getRun(run.id)).toBeNull();
+  expect(await repository.deleteProviderProfile(providerRevision!.id)).toEqual({ deleted: true, references: [] });
+  expect(await repository.deleteProject(otherProject.id)).toBe(true);
+  expect(await repository.getProject(otherProject.id)).toBeNull();
+  expect(await repository.getSession(otherSession.id)).toBeNull();
 }
