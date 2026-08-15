@@ -1,0 +1,63 @@
+import { describe, expect, it } from "vitest";
+import { createAutomationSchema, createProviderProfileSchema, createSessionSchema } from "../src/index.js";
+
+describe("provider profile schema", () => {
+  it("accepts HTTP endpoints but rejects credentials embedded in URLs", () => {
+    expect(createProviderProfileSchema.safeParse({
+      label: "Gateway",
+      protocol: "openai-responses",
+      baseUrl: "https://gateway.example/v1"
+    }).success).toBe(true);
+
+    expect(createProviderProfileSchema.safeParse({
+      label: "Unsafe gateway",
+      protocol: "openai-responses",
+      baseUrl: "https://operator:password@gateway.example/v1"
+    }).success).toBe(false);
+
+    expect(createProviderProfileSchema.safeParse({
+      label: "Unsafe override",
+      protocol: "openai-responses",
+      baseUrl: "https://gateway.example/v1",
+      endpointOverride: "https://operator:password@gateway.example/v1/responses"
+    }).success).toBe(false);
+  });
+});
+
+describe("session schema", () => {
+  it("requires provider and model selections as one atomic choice", () => {
+    expect(createSessionSchema.safeParse({ projectId: "project", name: "Session" }).success).toBe(true);
+    expect(createSessionSchema.safeParse({ projectId: "project", name: "Session", providerProfileId: "provider" }).success).toBe(false);
+    expect(createSessionSchema.safeParse({ projectId: "project", name: "Session", modelId: "model" }).success).toBe(false);
+    expect(createSessionSchema.safeParse({ projectId: "project", name: "Session", providerProfileId: "provider", modelId: "model" }).success).toBe(true);
+  });
+});
+
+describe("automation schema", () => {
+  const envelope = { projectId: "project", sessionId: "session", concurrency: 3 };
+
+  it("validates each plan by its discriminator", () => {
+    expect(createAutomationSchema.safeParse({
+      ...envelope,
+      kind: "payload-fanout",
+      plan: { payload: "probe", branchIds: ["branch"] }
+    }).success).toBe(true);
+    expect(createAutomationSchema.safeParse({
+      ...envelope,
+      kind: "payload-fanout",
+      plan: { pointer: "/payload", values: ["probe"], template: {} }
+    }).success).toBe(false);
+  });
+
+  it("rejects malformed JSON Pointer escapes and invalid varied configs", () => {
+    expect(createAutomationSchema.safeParse({
+      ...envelope,
+      kind: "batch-vary",
+      plan: {
+        pointer: "/config/~2temperature",
+        values: [0.5],
+        template: { sourceBranchId: "branch", payload: "probe" }
+      }
+    }).success).toBe(false);
+  });
+});

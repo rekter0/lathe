@@ -1,0 +1,235 @@
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import type {
+  JsonObject,
+  JsonValue,
+  MessagePart,
+  ModelCapabilities,
+  ResolvedConfig
+} from "@lathe/domain";
+
+export const projects = sqliteTable("projects", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  description: text("description").notNull(),
+  defaultHarnessRevisionId: text("default_harness_revision_id"),
+  workspaceRoot: text("workspace_root"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+});
+
+export const sessions = sqliteTable(
+  "sessions",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    providerProfileId: text("provider_profile_id"),
+    modelId: text("model_id"),
+    activeBranchId: text("active_branch_id"),
+    draftConfig: text("draft_config", { mode: "json" }).$type<ResolvedConfig>().notNull(),
+    autoContinueTools: integer("auto_continue_tools", { mode: "boolean" }).notNull(),
+    autoContinueLimit: integer("auto_continue_limit").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => [index("sessions_project_idx").on(table.projectId)]
+);
+
+export const messageNodes = sqliteTable(
+  "message_nodes",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    parentId: text("parent_id"),
+    role: text("role", { enum: ["user", "assistant", "tool"] }).notNull(),
+    parts: text("parts", { mode: "json" }).$type<MessagePart[]>().notNull(),
+    sourceRunId: text("source_run_id"),
+    configSnapshotId: text("config_snapshot_id"),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => [index("message_nodes_session_idx").on(table.sessionId), index("message_nodes_parent_idx").on(table.parentId)]
+);
+
+export const branches = sqliteTable(
+  "branches",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    headNodeId: text("head_node_id"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => [
+    index("branches_session_idx").on(table.sessionId),
+    uniqueIndex("branches_session_name_uq").on(table.sessionId, table.name)
+  ]
+);
+
+export const configSnapshots = sqliteTable(
+  "config_snapshots",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    config: text("config", { mode: "json" }).$type<ResolvedConfig>().notNull(),
+    contentHash: text("content_hash").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => [index("config_snapshots_session_idx").on(table.sessionId)]
+);
+
+export const checkpoints = sqliteTable(
+  "checkpoints",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    nodeId: text("node_id"),
+    configSnapshotId: text("config_snapshot_id").notNull().references(() => configSnapshots.id),
+    providerProfileId: text("provider_profile_id"),
+    modelId: text("model_id"),
+    autoContinueTools: integer("auto_continue_tools", { mode: "boolean" }).notNull().default(false),
+    autoContinueLimit: integer("auto_continue_limit").notNull().default(8),
+    sessionStateCaptured: integer("session_state_captured", { mode: "boolean" }).notNull().default(false),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => [index("checkpoints_session_idx").on(table.sessionId)]
+);
+
+export const modelRuns = sqliteTable(
+  "model_runs",
+  {
+    id: text("id").primaryKey(),
+    sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    branchId: text("branch_id").notNull().references(() => branches.id, { onDelete: "cascade" }),
+    contextNodeId: text("context_node_id"),
+    resultNodeId: text("result_node_id"),
+    configSnapshotId: text("config_snapshot_id").notNull().references(() => configSnapshots.id),
+    status: text("status").notNull(),
+    classification: text("classification"),
+    operatorLabel: text("operator_label"),
+    operatorNotes: text("operator_notes"),
+    normalizedOutput: text("normalized_output", { mode: "json" }).$type<JsonValue>(),
+    usage: text("usage", { mode: "json" }).$type<JsonObject>(),
+    traceHash: text("trace_hash"),
+    startedAt: text("started_at"),
+    finishedAt: text("finished_at"),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => [index("model_runs_session_idx").on(table.sessionId), index("model_runs_branch_idx").on(table.branchId)]
+);
+
+export const providerProfiles = sqliteTable("provider_profiles", {
+  id: text("id").primaryKey(),
+  label: text("label").notNull(),
+  protocol: text("protocol").notNull(),
+  baseUrl: text("base_url").notNull(),
+  endpointOverride: text("endpoint_override"),
+  credential: text("credential").notNull(),
+  headers: text("headers", { mode: "json" }).$type<Record<string, string>>().notNull(),
+  extraBody: text("extra_body", { mode: "json" }).$type<JsonObject>().notNull(),
+  models: text("models", { mode: "json" }).$type<Array<{ id: string; label: string; capabilities: ModelCapabilities; discovered: boolean }>>().notNull(),
+  revision: integer("revision").notNull(),
+  archivedAt: text("archived_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+});
+
+export const secrets = sqliteTable("secrets", {
+  id: text("id").primaryKey(),
+  label: text("label").notNull(),
+  value: text("value").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+});
+
+export const assetRevisions = sqliteTable(
+  "asset_revisions",
+  {
+    id: text("id").primaryKey(),
+    assetId: text("asset_id").notNull(),
+    kind: text("kind").notNull(),
+    revision: integer("revision").notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    tags: text("tags", { mode: "json" }).$type<string[]>().notNull(),
+    provenance: text("provenance", { mode: "json" }).$type<JsonObject>().notNull(),
+    value: text("value", { mode: "json" }).$type<JsonValue>().notNull(),
+    contentHash: text("content_hash").notNull(),
+    trusted: integer("trusted", { mode: "boolean" }).notNull(),
+    archivedAt: text("archived_at"),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => [
+    uniqueIndex("asset_revisions_asset_revision_uq").on(table.assetId, table.revision),
+    index("asset_revisions_kind_idx").on(table.kind)
+  ]
+);
+
+export const attachments = sqliteTable(
+  "attachments",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    fileName: text("file_name").notNull(),
+    mediaType: text("media_type").notNull(),
+    size: integer("size").notNull(),
+    sha256: text("sha256").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => [index("attachments_project_idx").on(table.projectId), index("attachments_hash_idx").on(table.sha256)]
+);
+
+export const findings = sqliteTable(
+  "findings",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    branchId: text("branch_id").notNull().references(() => branches.id, { onDelete: "cascade" }),
+    nodeId: text("node_id"),
+    title: text("title").notNull(),
+    severity: text("severity").notNull(),
+    summary: text("summary").notNull(),
+    expected: text("expected").notNull(),
+    observed: text("observed").notNull(),
+    tags: text("tags", { mode: "json" }).$type<string[]>().notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => [index("findings_project_idx").on(table.projectId)]
+);
+
+export const automationJobs = sqliteTable(
+  "automation_jobs",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    status: text("status").notNull(),
+    concurrency: integer("concurrency").notNull(),
+    plan: text("plan", { mode: "json" }).$type<JsonObject>().notNull(),
+    progress: text("progress", { mode: "json" }).$type<JsonObject>().notNull(),
+    error: text("error", { mode: "json" }).$type<JsonObject>(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => [index("automation_jobs_session_idx").on(table.sessionId)]
+);
+
+export const sqliteSchema = {
+  projects,
+  sessions,
+  messageNodes,
+  branches,
+  configSnapshots,
+  checkpoints,
+  modelRuns,
+  providerProfiles,
+  secrets,
+  assetRevisions,
+  attachments,
+  findings,
+  automationJobs
+};
