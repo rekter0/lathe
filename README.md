@@ -17,7 +17,7 @@ Lathe is deliberately not an autonomous agent or a scanner. The operator chooses
 - Redacted raw provider/MCP traces, content-addressed attachments, persisted automation jobs, and checksum-verified `.lathe-harness` and `.lathe-finding` bundles.
 - SQLite by default or PostgreSQL selected at startup, both behind the same repository contract.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for package boundaries, persistence rules, and run flow.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for package boundaries, persistence rules, and run flow, and [docs/tools.md](./docs/tools.md) for tool, Bash, container-user, target, and execution-permission examples.
 
 ## Quick start
 
@@ -113,7 +113,7 @@ function formatResult(input) {
 
 The QuickJS handler has no imports, filesystem, network, process, or environment access. Its output is an execution request; the approved target then executes exactly one program plus argument vector. A shell is never implicit—select `/bin/sh` (or an equivalent shell) as the visible program when shell syntax is intentional.
 
-Every real or MCP tool call requires operator approval by default. Session trust is scoped to the exact tool revision hash and target; editing either invalidates it. MCP roots default to none, sampling and elicitation always require approval, and imported prompt/resource content remains untrusted until explicitly selected.
+Every real or MCP tool call requires operator approval by default. A session can explicitly select bypass approval for tool calls; the choice is snapshotted and recorded, while MCP sampling and elicitation remain approval-gated. Session trust is scoped to the exact tool revision hash and target; editing either invalidates it. MCP roots default to none, and imported prompt/resource content remains untrusted until explicitly selected.
 
 ## Reproducible artifacts
 

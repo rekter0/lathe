@@ -59,6 +59,7 @@ export const resolvedConfigSchema: z.ZodType<ResolvedConfig> = z.object({
     targetId: idSchema.nullable(),
     mcpServerId: idSchema.nullable()
   })).max(1_000),
+  toolApprovalMode: z.enum(["manual", "bypass-approval"]).default("manual"),
   provider: z.object({
     profileId: idSchema,
     profileRevision: z.number().int().positive(),

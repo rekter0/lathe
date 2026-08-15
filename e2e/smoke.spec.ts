@@ -150,6 +150,20 @@ test("protects the local API and creates a persistent workbench", async ({ page,
   await expect(page.getByRole("heading", { name: "The branch starts here" })).toBeVisible();
   await expect(page.getByLabel("Active branch")).toHaveValue(/.+/);
 
+  const executionPermission = page.getByLabel("Tool execution permission");
+  await expect(executionPermission).toHaveValue("manual");
+  await executionPermission.selectOption("bypass-approval");
+  await expect(page.getByText("Commands run without per-call approval.")).toBeVisible();
+  await page.getByRole("button", { name: "Save draft" }).click();
+  await expect.poll(async () => {
+    const url = new URL(page.url());
+    const id = url.pathname.split("/").at(-1)!;
+    const response = await request.get(`/api/sessions/${id}`, { headers: apiHeaders });
+    return ((await response.json()) as { session: { draftConfig: { toolApprovalMode?: string } } }).session.draftConfig.toolApprovalMode;
+  }).toBe("bypass-approval");
+  await page.reload();
+  await expect(page.getByLabel("Tool execution permission")).toHaveValue("bypass-approval");
+
   await page.setViewportSize({ width: 390, height: 844 });
   const continuation = page.locator(".continuation-control");
   await continuation.scrollIntoViewIfNeeded();

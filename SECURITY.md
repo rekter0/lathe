@@ -44,7 +44,9 @@ That isolation ends at the execution request. When the operator approves a host,
 - SSH commands run through the system OpenSSH configuration/agent/key reference and can affect the remote account;
 - cancellation can be uncertain after a transport or remote-host failure.
 
-Approval is required by default and displays the original arguments, edited arguments, resolved program/args, cwd, environment names, target, and timeout. Session-only trust is bound to an exact implementation/tool revision hash and target ID. Editing either invalidates trust. Never approve a command you would not run directly in a terminal.
+Approval is required by default and displays the original arguments, edited arguments, resolved program/args, cwd, environment names, target, and timeout. Session-only trust is bound to an exact implementation/tool revision hash and target ID. Editing either invalidates trust.
+
+A session may explicitly select **Bypass approval** for real and MCP tool calls. In that mode, commands start without a per-call operator decision, although the snapshotted policy, resolved launcher, arguments, output, and bypass decision remain evidence. Asset trust checks, handler isolation, execution limits, and separate MCP sampling/elicitation approvals still apply. Combining bypass approval with automatic tool continuation allows a bounded command sequence to run without stopping between calls; use a narrowly privileged target and a small turn limit. Never enable bypass for a command/target combination you would not run directly in a terminal.
 
 Private SSH keys are referenced by path and are not copied into Lathe. Strict host-key checking and batch mode are required; maintain a trustworthy `known_hosts` file and SSH configuration.
 
@@ -74,7 +76,7 @@ Before a real engagement:
 2. Set restrictive provider credentials and verify every provider/MCP URL.
 3. Choose an isolated `LATHE_DATA_DIR`; confirm its permissions and backup policy.
 4. Prefer a constrained container or SSH account over host execution.
-5. Review tool revisions and resolved commands before granting session trust.
+5. Review tool revisions and resolved commands before granting session trust or enabling bypass approval.
 6. Keep MCP roots empty unless a server genuinely needs a specific directory.
 7. Review traces and export contents before sharing or filing a report.
 8. Stop Lathe when finished and revoke temporary provider credentials.

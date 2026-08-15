@@ -104,6 +104,7 @@ export interface PromptBlockSnapshot {
 }
 
 export type ToolImplementationMode = "manual" | "mock" | "real" | "mcp";
+export type ToolApprovalMode = "manual" | "bypass-approval";
 
 export interface ToolBindingSnapshot {
   toolRevisionId: Id;
@@ -134,6 +135,7 @@ export interface ProviderSnapshot {
 export interface ResolvedConfig {
   promptBlocks: PromptBlockSnapshot[];
   tools: ToolBindingSnapshot[];
+  toolApprovalMode: ToolApprovalMode;
   provider: ProviderSnapshot | null;
   temperature: number | null;
   maxOutputTokens: number | null;

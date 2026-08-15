@@ -169,6 +169,22 @@ describe("provider run coordinator", () => {
       expect(evidence).toContain('"kind":"direct"');
       expect(evidence).toMatch(/[a-f0-9]{64}/);
       await expect(restartedCoordinator.resolveToolCall(started.id, "call-1", { decision: "approve-once" })).rejects.toThrow(/no pending|already been resolved/);
+
+      config.toolApprovalMode = "bypass-approval";
+      await persistence.repository.updateSessionDraft(session.id, config);
+      const currentBranch = (await persistence.repository.listBranches(session.id)).find((item) => item.id === branch.id)!;
+      const bypassed = await restartedCoordinator.start({
+        sessionId: session.id,
+        branchId: currentBranch.id,
+        contextNodeId: currentBranch.headNodeId,
+        userMessage: "echo without a prompt"
+      });
+      await waitFor(async () => (await persistence.repository.getRun(bypassed.id))?.status === "completed", 12_000);
+      const bypassedRun = await persistence.repository.getRun(bypassed.id);
+      expect(JSON.stringify(bypassedRun?.normalizedOutput)).toContain('"decision":"bypass-approval"');
+      const bypassedSnapshot = await persistence.repository.getConfigSnapshot(bypassedRun!.configSnapshotId);
+      expect(bypassedSnapshot?.config.toolApprovalMode).toBe("bypass-approval");
+      expect(JSON.stringify((await persistence.repository.listNodes(session.id)).at(-1)?.parts)).toContain("lathe");
     } finally {
       await persistence.repository.close();
     }
@@ -321,6 +337,7 @@ describe("provider run coordinator", () => {
       await persistence.repository.saveAssetRevision(mcp);
       const config = emptyResolvedConfig();
       config.tools.push({ toolRevisionId: spec.id, implementationRevisionId: null, name: "remote_tool", description: "Remote", inputSchema: specValue.inputSchema as JsonObject, enabled: true, mode: "mcp", targetId: null, mcpServerId: mcp.id });
+      config.toolApprovalMode = "bypass-approval";
       const { session, branch } = await persistence.repository.createSession({ projectId: project.id, name: "Session", providerProfileId: profile.id, modelId: "active-model", draftConfig: config });
       const encoder = new TextEncoder();
       const requestBodies: string[] = [];
@@ -347,13 +364,11 @@ describe("provider run coordinator", () => {
       };
       const coordinator = new ProviderRunCoordinator(persistence.repository, persistence.contentStore, new EventHub(), fetchFixture);
       const started = await coordinator.start({ sessionId: session.id, branchId: branch.id, contextNodeId: null, userMessage: "call" });
-      await waitFor(async () => (await persistence.repository.getRun(started.id))?.status === "awaiting-tool");
-      const toolResolution = coordinator.resolveToolCall(started.id, "mcp-call", { decision: "approve-once" });
       await waitFor(async () => JSON.stringify((await persistence.repository.getRun(started.id))?.normalizedOutput).includes(samplingRequest.id));
       await expect(coordinator.resolveMcpApproval(started.id, samplingRequest.id, { outcome: "approved", response: { type: "text", text: "operator-authored" } })).rejects.toThrow(/must not include an operator response/);
       expect(fetchCount).toBe(1);
       await coordinator.resolveMcpApproval(started.id, samplingRequest.id, { outcome: "approved" });
-      await toolResolution;
+      await waitFor(async () => (await persistence.repository.getRun(started.id))?.status === "completed");
 
       const runs = await persistence.repository.listRuns(session.id);
       const nested = runs.find((run) => (run.normalizedOutput as JsonObject | null)?.kind === "mcp-sampling");
@@ -369,6 +384,7 @@ describe("provider run coordinator", () => {
         timings: { durationMs: expect.any(Number) }
       });
       expect(JSON.stringify((await persistence.repository.getRun(started.id))?.normalizedOutput)).toContain(nested!.id);
+      expect(JSON.stringify((await persistence.repository.getRun(started.id))?.normalizedOutput)).toContain('"decision":"bypass-approval"');
       expect(requestBodies[1]).toContain("nested question");
       expect(requestBodies[1]).toContain("nested system");
       expect(requestBodies[1]).toContain("END");

@@ -124,6 +124,7 @@ export function emptyResolvedConfig(): ResolvedConfig {
   return {
     promptBlocks: [],
     tools: [],
+    toolApprovalMode: "manual",
     provider: null,
     temperature: null,
     maxOutputTokens: null,

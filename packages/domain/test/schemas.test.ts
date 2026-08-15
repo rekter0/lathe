@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createAutomationSchema, createProviderProfileSchema, createSessionSchema } from "../src/index.js";
+import { createAutomationSchema, createProviderProfileSchema, createSessionSchema, emptyResolvedConfig, resolvedConfigSchema } from "../src/index.js";
 
 describe("provider profile schema", () => {
   it("accepts HTTP endpoints but rejects credentials embedded in URLs", () => {
@@ -30,6 +30,14 @@ describe("session schema", () => {
     expect(createSessionSchema.safeParse({ projectId: "project", name: "Session", providerProfileId: "provider" }).success).toBe(false);
     expect(createSessionSchema.safeParse({ projectId: "project", name: "Session", modelId: "model" }).success).toBe(false);
     expect(createSessionSchema.safeParse({ projectId: "project", name: "Session", providerProfileId: "provider", modelId: "model" }).success).toBe(true);
+  });
+
+  it("defaults legacy configs to manual tool approval and accepts explicit bypass", () => {
+    const legacy = JSON.parse(JSON.stringify(emptyResolvedConfig())) as Record<string, unknown>;
+    delete legacy.toolApprovalMode;
+    expect(resolvedConfigSchema.parse(legacy).toolApprovalMode).toBe("manual");
+    expect(resolvedConfigSchema.parse({ ...legacy, toolApprovalMode: "bypass-approval" }).toolApprovalMode).toBe("bypass-approval");
+    expect(resolvedConfigSchema.safeParse({ ...legacy, toolApprovalMode: "always" }).success).toBe(false);
   });
 });
 

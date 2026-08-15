@@ -8,6 +8,7 @@ import {
   type MessagePart,
   type ProviderProfile,
   type ResolvedConfig,
+  type ToolApprovalMode,
   type ToolCallPart,
   type ToolResultPart
 } from "@lathe/domain";
@@ -67,6 +68,7 @@ interface PendingToolRun {
   calls: ToolCallPart[];
   resolutions: Map<string, ToolResultPart>;
   prepared: Map<string, PreparedToolCall>;
+  toolApprovalMode: ToolApprovalMode;
 }
 
 interface PreparedToolCall {
@@ -281,6 +283,7 @@ function safeProviderSnapshot(profile: ProviderProfile, modelId: string, config:
   const model = profile.models.find((entry) => entry.id === modelId);
   return {
     ...structuredClone(config),
+    toolApprovalMode: config.toolApprovalMode ?? "manual",
     provider: {
       profileId: profile.id,
       profileRevision: profile.revision,
@@ -548,7 +551,8 @@ export class ProviderRunCoordinator implements RunCoordinator {
       assistantNodeId: assistant.id,
       calls,
       resolutions,
-      prepared
+      prepared,
+      toolApprovalMode: snapshot.config.toolApprovalMode ?? "manual"
     };
     this.pendingTools.set(runId, pending);
     this.events.publish(`run:${runId}`, "run.awaiting-tool.restored", {
@@ -943,7 +947,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
       for (const call of toolParts) {
         const item = await this.prepareToolCall(config, call);
         prepared.set(call.callId, item);
-        toolCallEvidence.push(this.preparedEvidence(item, run.sessionId));
+        toolCallEvidence.push(this.preparedEvidence(item, run.sessionId, config.toolApprovalMode ?? "manual"));
       }
       const normalized: JsonObject = { text, reasoning, toolCalls: toolCallEvidence, compileWarnings };
       const usageValue = usage ? JSON.parse(JSON.stringify(usage)) as JsonObject : null;
@@ -957,10 +961,25 @@ export class ProviderRunCoordinator implements RunCoordinator {
       });
       this.events.publish(`session:${run.sessionId}`, "node.created", node as unknown as JsonValue);
       if (toolParts.length > 0) {
-        this.pendingTools.set(runId, {
-          runId, sessionId: run.sessionId, branchId: run.branchId, assistantNodeId: node.id, calls: toolParts, resolutions: new Map(), prepared
-        });
+        const pending: PendingToolRun = {
+          runId,
+          sessionId: run.sessionId,
+          branchId: run.branchId,
+          assistantNodeId: node.id,
+          calls: toolParts,
+          resolutions: new Map(),
+          prepared,
+          toolApprovalMode: config.toolApprovalMode ?? "manual"
+        };
+        this.pendingTools.set(runId, pending);
         this.events.publish(`run:${runId}`, "run.awaiting-tool", { calls: toolParts } as unknown as JsonValue);
+        if (pending.toolApprovalMode === "bypass-approval") {
+          void this.resolveBypassedToolCalls(pending).catch(async (error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            await this.annotateRun(runId, "bypassApprovalError", message);
+            this.events.publish(`run:${runId}`, "tool.bypass.failed", { message });
+          });
+        }
       } else {
         this.events.publish(`run:${runId}`, "run.completed", { resultNodeId: node.id, traceHash: stored.sha256 });
       }
@@ -1010,6 +1029,19 @@ export class ProviderRunCoordinator implements RunCoordinator {
       return JSON.parse(value) as JsonValue;
     } catch {
       return value;
+    }
+  }
+
+  private async resolveBypassedToolCalls(pending: PendingToolRun): Promise<void> {
+    for (const call of pending.calls) {
+      if (pending.resolutions.has(call.callId)) continue;
+      const prepared = pending.prepared.get(call.callId);
+      if (prepared?.mode !== "real" && prepared?.mode !== "mcp") continue;
+      this.events.publish(`run:${pending.runId}`, "tool.bypass.started", {
+        callId: call.callId,
+        mode: prepared.mode
+      });
+      await this.resolveToolCall(pending.runId, call.callId, {});
     }
   }
 
@@ -1096,10 +1128,11 @@ export class ProviderRunCoordinator implements RunCoordinator {
     };
   }
 
-  private preparedEvidence(prepared: PreparedToolCall, sessionId: string): JsonValue {
+  private preparedEvidence(prepared: PreparedToolCall, sessionId: string, toolApprovalMode: ToolApprovalMode): JsonValue {
     const base: JsonObject = {
       ...prepared.call,
       mode: prepared.mode,
+      toolApprovalMode,
       toolRevisionHash: prepared.toolRevisionHash,
       targetId: prepared.targetId,
       targetRevisionId: prepared.targetRevisionId,
@@ -1187,14 +1220,15 @@ export class ProviderRunCoordinator implements RunCoordinator {
         overrideRequest: effectiveRequest
       })
     };
+    const bypassApproval = pending.toolApprovalMode === "bypass-approval";
     const trusted = !requiresApproval(approval, this.trust);
     const decisionValue = typeof resolution.decision === "string" ? resolution.decision : undefined;
-    if (!trusted && !["approve-once", "approve-session", "reject"].includes(decisionValue ?? "")) {
+    if (!bypassApproval && !trusted && !["approve-once", "approve-session", "reject"].includes(decisionValue ?? "")) {
       throw new ApprovalRequiredError("Real tool execution requires approve-once, approve-session, or reject");
     }
     const decision = decisionValue === "reject"
       ? { kind: "reject" as const, reason: typeof resolution.reason === "string" ? resolution.reason : "Rejected by operator" }
-      : trusted
+      : bypassApproval || trusted
         ? { kind: "approve-once" as const }
         : decisionValue === "approve-session"
         ? { kind: "approve-session" as const }
@@ -1202,7 +1236,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
     const resolved = resolveApproval(approval, decision, this.trust);
     prepared.approvalEvidence = this.toJson({
       ...createApprovalView(approval),
-      decision: decision.kind,
+      decision: decision.kind === "reject" ? "reject" : bypassApproval ? "bypass-approval" : decision.kind,
       trustedForSession: resolved.approved ? resolved.trustedForSession : false
     });
     if (!resolved.approved) throw new Error(resolved.reason ?? "Tool call rejected");
@@ -1252,6 +1286,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
       targetRevisionId: prepared.targetRevisionId,
       targetRevisionHash: prepared.targetRevisionHash
     };
+    const bypassApproval = pending.toolApprovalMode === "bypass-approval";
     const trusted = this.trust.isTrusted(binding);
     const effectiveArguments = resolution.overrideArguments ?? prepared.call.arguments;
     prepared.approvalEvidence = this.toJson({
@@ -1265,7 +1300,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
       originalArguments: prepared.call.arguments,
       effectiveArguments,
       edited: resolution.overrideArguments !== undefined,
-      decision: decision === "reject" ? "reject" : trusted ? "session-trust" : decision,
+      decision: decision === "reject" ? "reject" : bypassApproval ? "bypass-approval" : trusted ? "session-trust" : decision,
       mcpServer: mcpServerForApproval(prepared),
       target: prepared.mcpExecutionTarget
         ? executionTargetForApproval(prepared.mcpExecutionTarget)
@@ -1274,8 +1309,8 @@ export class ProviderRunCoordinator implements RunCoordinator {
     if (decision === "reject") {
       throw new Error(typeof resolution.reason === "string" ? resolution.reason : "MCP tool call rejected by operator");
     }
-    if (!trusted && !["approve-once", "approve-session"].includes(decision)) throw new ApprovalRequiredError("MCP tool call requires explicit approval");
-    if (decision === "approve-session") this.trust.grant(binding);
+    if (!bypassApproval && !trusted && !["approve-once", "approve-session"].includes(decision)) throw new ApprovalRequiredError("MCP tool call requires explicit approval");
+    if (!bypassApproval && decision === "approve-session") this.trust.grant(binding);
     const writer = await this.contentStore.createTraceWriter();
     const approvedSampling: ApprovedMcpSampling[] = [];
     const elicitationResponses: JsonValue[] = [];
