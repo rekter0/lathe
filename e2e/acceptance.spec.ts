@@ -299,13 +299,19 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
   await page.getByRole("tab", { name: "Run", exact: true }).click();
   const inspectorLayout = await page.locator(".inspector-pane").evaluate((inspector) => {
     const panel = inspector.querySelector<HTMLElement>("[role='tabpanel'][data-state='active']");
+    const content = panel?.querySelector<HTMLElement>(".inspector-content");
+    const contentStyle = content ? getComputedStyle(content) : null;
     return {
       width: inspector.clientWidth,
-      overflow: panel ? panel.scrollWidth - panel.clientWidth : Number.POSITIVE_INFINITY
+      overflow: panel ? panel.scrollWidth - panel.clientWidth : Number.POSITIVE_INFINITY,
+      paddingLeft: contentStyle ? Number.parseFloat(contentStyle.paddingLeft) : 0,
+      paddingRight: contentStyle ? Number.parseFloat(contentStyle.paddingRight) : 0
     };
   });
-  expect(inspectorLayout.width).toBeGreaterThanOrEqual(329);
+  expect(inspectorLayout.width).toBeGreaterThanOrEqual(349);
   expect(inspectorLayout.overflow).toBeLessThanOrEqual(0);
+  expect(inspectorLayout.paddingLeft).toBeGreaterThanOrEqual(20);
+  expect(inspectorLayout.paddingRight).toBe(inspectorLayout.paddingLeft);
 
   const automation = (await body<{ job: { id: string } }>(await request.post("/api/automation", {
     headers: apiHeaders,
