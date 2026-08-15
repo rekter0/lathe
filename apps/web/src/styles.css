@@ -42,14 +42,29 @@ code, pre { font-family: var(--mono); }
 .icon-button { display: grid; place-items: center; width: 32px; height: 32px; margin-left: 8px; border: 1px solid var(--line); border-radius: 5px; }
 .icon-button:hover { border-color: #47554f; background: var(--surface-2); }
 .security-banner { min-height: 28px; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 5px 12px; color: #d7b873; background: #1e190d; border-bottom: 1px solid #3f3318; font: 10px/1.4 var(--mono); }
-.body-shell { min-height: 0; display: grid; grid-template-columns: 196px 1fr; }
-.project-rail { display: flex; min-height: 0; flex-direction: column; border-right: 1px solid var(--line); background: #0d1210; padding: 18px 10px 12px; }
-.rail-heading { padding: 0 10px 10px; color: #64716c; font: 9px var(--mono); letter-spacing: .18em; text-transform: uppercase; }
+.body-shell { min-height: 0; display: grid; grid-template-columns: 196px minmax(0, 1fr); }
+.body-shell.project-rail-collapsed { grid-template-columns: 48px minmax(0, 1fr); }
+.project-rail { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--line); background: #0d1210; padding: 12px 10px; }
+.rail-header { display: flex; align-items: center; gap: 6px; min-height: 30px; margin-bottom: 6px; }
+.rail-heading { flex: 1; min-width: 0; padding-left: 10px; color: #64716c; font: 9px var(--mono); letter-spacing: .18em; text-transform: uppercase; overflow: hidden; }
+.rail-toggle { flex: 0 0 auto; display: grid; place-items: center; width: 28px; height: 28px; padding: 0; color: #77847e; background: transparent; border: 1px solid transparent; border-radius: 4px; cursor: pointer; }
+.rail-toggle:hover, .rail-toggle:focus-visible { color: var(--green); background: var(--surface-2); border-color: var(--line); outline: none; }
 .project-rail nav { display: grid; gap: 3px; overflow: auto; }
 .project-link { display: flex; align-items: center; gap: 9px; padding: 8px; border-radius: 5px; color: #aeb9b4; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .project-link:hover { color: var(--text); background: var(--surface-2); }
-.project-link > span { flex: 0 0 auto; display: grid; place-items: center; width: 22px; height: 22px; color: var(--green); background: #1d2c1d; border: 1px solid #34452e; border-radius: 4px; font: 700 10px var(--mono); }
+.project-link:focus-visible { color: var(--text); background: var(--surface-2); outline: 1px solid var(--green); outline-offset: -1px; }
+.project-avatar { flex: 0 0 auto; display: grid; place-items: center; width: 22px; height: 22px; color: var(--green); background: #1d2c1d; border: 1px solid #34452e; border-radius: 4px; font: 700 10px var(--mono); }
+.project-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .rail-footer { margin-top: auto; padding: 10px; color: #46514d; font: 9px var(--mono); }
+.project-rail-collapsed .project-rail { padding-inline: 7px; }
+.project-rail-collapsed .rail-header { justify-content: center; }
+.project-rail-collapsed .rail-heading, .project-rail-collapsed .project-name, .project-rail-collapsed .rail-footer { display: none; }
+.project-rail-collapsed .project-link { justify-content: center; gap: 0; padding: 7px 0; }
+.project-rail-collapsed .project-rail nav { overflow-x: hidden; }
+@media (prefers-reduced-motion: no-preference) {
+  .body-shell { transition: grid-template-columns .18s ease; }
+  .project-rail { transition: padding .18s ease; }
+}
 .main-stage { min-width: 0; min-height: 0; overflow: auto; }
 
 .home-view, .settings-view { width: min(1120px, calc(100% - 64px)); margin: 0 auto; padding: 42px 0 70px; }

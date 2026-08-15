@@ -37,6 +37,15 @@ test("protects the local API and creates a persistent workbench", async ({ page,
 
   await expect(page).toHaveURL(/\?project=/);
   await expect(page.getByRole("heading", { name: projectName })).toBeVisible();
+
+  await page.getByRole("button", { name: "Collapse projects sidebar" }).click();
+  await expect(page.getByRole("button", { name: "Expand projects sidebar" })).toBeVisible();
+  await expect(page.getByRole("link", { name: projectName })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Expand projects sidebar" })).toBeVisible();
+  await page.getByRole("button", { name: "Expand projects sidebar" }).click();
+  await expect(page.getByRole("button", { name: "Collapse projects sidebar" })).toBeVisible();
+
   await page.getByPlaceholder("Tool result injection").fill(sessionName);
   await page.getByRole("button", { name: /Open workbench/ }).click();
 
