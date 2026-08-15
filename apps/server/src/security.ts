@@ -257,3 +257,79 @@ export function sanitizeProvider<T extends { credential: string; headers: Record
     hasCredential: credential.length > 0
   };
 }
+
+interface ProviderRevisionSecretFields {
+  baseUrl?: string;
+  endpointOverride?: string | null;
+  headers?: Record<string, string>;
+  extraBody?: JsonObject;
+}
+
+interface StoredProviderSecretFields {
+  credential: string;
+  baseUrl: string;
+  endpointOverride: string | null;
+  headers: Record<string, string>;
+  extraBody: JsonObject;
+}
+
+function sameJson(left: JsonValue | undefined, right: JsonValue | undefined): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function restoreSanitizedJson(input: JsonValue, stored: JsonValue | undefined, sanitized: JsonValue | undefined): JsonValue {
+  if (stored !== undefined && sanitized !== undefined && sameJson(input, sanitized)) return structuredClone(stored);
+  if (Array.isArray(input)) {
+    const storedItems = Array.isArray(stored) ? stored : [];
+    const sanitizedItems = Array.isArray(sanitized) ? sanitized : [];
+    return input.map((item, index) => restoreSanitizedJson(item, storedItems[index], sanitizedItems[index]));
+  }
+  if (isJsonObject(input)) {
+    const storedObject = isJsonObject(stored) ? stored : {};
+    const sanitizedObject = isJsonObject(sanitized) ? sanitized : {};
+    return Object.fromEntries(Object.entries(input).map(([key, value]) => [
+      key,
+      restoreSanitizedJson(value, storedObject[key], sanitizedObject[key])
+    ]));
+  }
+  return input;
+}
+
+function restoreSanitizedUrl(input: string | null, stored: string | null, sanitized: string | null): string | null {
+  if (input === sanitized) return stored;
+  if (input === null || stored === null || sanitized === null) return input;
+  try {
+    const inputUrl = new URL(input);
+    const storedUrl = new URL(stored);
+    const sanitizedUrl = new URL(sanitized);
+    const occurrences = new Map<string, number>();
+    const restoredEntries = [...inputUrl.searchParams].map(([name, value]) => {
+      const index = occurrences.get(name) ?? 0;
+      occurrences.set(name, index + 1);
+      const sanitizedValue = sanitizedUrl.searchParams.getAll(name)[index];
+      const storedValue = storedUrl.searchParams.getAll(name)[index];
+      return [name, value === sanitizedValue && storedValue !== undefined ? storedValue : value] as const;
+    });
+    inputUrl.search = "";
+    for (const [name, value] of restoredEntries) inputUrl.searchParams.append(name, value);
+    return inputUrl.toString();
+  } catch {
+    return input;
+  }
+}
+
+/** Restore values represented by API redaction markers before creating a revision. */
+export function restoreProviderRevisionSecrets<T extends ProviderRevisionSecretFields>(input: T, stored: StoredProviderSecretFields): T {
+  const sanitized = sanitizeProvider(stored);
+  const restored = { ...input };
+  if (input.baseUrl !== undefined) restored.baseUrl = restoreSanitizedUrl(input.baseUrl, stored.baseUrl, sanitized.baseUrl) ?? input.baseUrl;
+  if (input.endpointOverride !== undefined) restored.endpointOverride = restoreSanitizedUrl(input.endpointOverride, stored.endpointOverride, sanitized.endpointOverride);
+  if (input.headers !== undefined) {
+    restored.headers = Object.fromEntries(Object.entries(input.headers).map(([name, value]) => [
+      name,
+      value === sanitized.headers[name] && stored.headers[name] !== undefined ? stored.headers[name] : value
+    ]));
+  }
+  if (input.extraBody !== undefined) restored.extraBody = restoreSanitizedJson(input.extraBody, stored.extraBody, sanitized.extraBody) as JsonObject;
+  return restored;
+}

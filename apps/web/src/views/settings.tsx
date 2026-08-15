@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as Tabs from "@radix-ui/react-tabs";
 import CodeMirror from "@uiw/react-codemirror";
 import { json } from "@codemirror/lang-json";
-import { Braces, Cable, Download, KeyRound, Library, PackageOpen, Plus, RefreshCw, ShieldCheck, TerminalSquare, Upload } from "lucide-react";
+import { Braces, Cable, Download, KeyRound, Library, PackageOpen, Pencil, Plus, RefreshCw, ShieldCheck, TerminalSquare, Upload, X } from "lucide-react";
 import { api, downloadApiFile, jsonBody } from "../api.js";
 import { Button, Field, Input, Select, Textarea } from "../components/forms.js";
 import type { AssetRevision, SafeProvider } from "../types.js";
@@ -48,6 +48,7 @@ export function SettingsPage() {
 function ProviderSettings() {
   const queryClient = useQueryClient();
   const providers = useQuery({ queryKey: ["providers"], queryFn: () => api<{ providers: SafeProvider[] }>("/api/providers") });
+  const [editingProvider, setEditingProvider] = useState<SafeProvider | null>(null);
   const [label, setLabel] = useState("");
   const [protocol, setProtocol] = useState<SafeProvider["protocol"]>("openai-responses");
   const [baseUrl, setBaseUrl] = useState("https://api.openai.com");
@@ -56,17 +57,48 @@ function ProviderSettings() {
   const [modelId, setModelId] = useState("");
   const [headers, setHeaders] = useState("{}");
   const [extraBody, setExtraBody] = useState("{}");
-  const create = useMutation({
-    mutationFn: () => api("/api/providers", {
+  const [clearCredential, setClearCredential] = useState(false);
+
+  const resetFields = () => {
+    setEditingProvider(null);
+    setLabel("");
+    setProtocol("openai-responses");
+    setBaseUrl("https://api.openai.com");
+    setEndpointOverride("");
+    setCredential("");
+    setModelId("");
+    setHeaders("{}");
+    setExtraBody("{}");
+    setClearCredential(false);
+  };
+
+  const saveProvider = useMutation({
+    mutationFn: () => {
+      const normalizedModelId = modelId.trim();
+      const models = editingProvider
+        ? normalizedModelId && !editingProvider.models.some((model) => model.id === normalizedModelId)
+          ? [...editingProvider.models, { id: normalizedModelId, label: normalizedModelId, discovered: false, capabilities: defaultDiscoveredCapabilities }]
+          : undefined
+        : normalizedModelId
+          ? [{ id: normalizedModelId, label: normalizedModelId, discovered: false, capabilities: defaultDiscoveredCapabilities }]
+          : [];
+      const body: Record<string, unknown> = {
+        label,
+        protocol,
+        baseUrl,
+        endpointOverride: endpointOverride || null,
+        headers: JSON.parse(headers),
+        extraBody: JSON.parse(extraBody)
+      };
+      if (models !== undefined) body.models = models;
+      if (!editingProvider || credential || clearCredential) body.credential = clearCredential ? "" : credential;
+      return api(editingProvider ? `/api/providers/${editingProvider.id}/revisions` : "/api/providers", {
       method: "POST",
-      ...jsonBody({
-        label, protocol, baseUrl, endpointOverride: endpointOverride || null, credential,
-        headers: JSON.parse(headers), extraBody: JSON.parse(extraBody),
-        models: modelId ? [{ id: modelId, label: modelId, discovered: false, capabilities: { streaming: true, tools: true, images: false, files: false, jsonMode: false, maxContextTokens: null } }] : []
-      })
-    }),
+        ...jsonBody(body)
+      });
+    },
     onSuccess: () => {
-      setLabel(""); setCredential(""); setModelId(""); setEndpointOverride("");
+      resetFields();
       void queryClient.invalidateQueries({ queryKey: ["providers"] });
     }
   });
@@ -85,15 +117,32 @@ function ProviderSettings() {
     }),
     onSuccess: () => {
       discover.reset();
+      resetFields();
       void queryClient.invalidateQueries({ queryKey: ["providers"] });
     }
   });
-  const submit = (event: FormEvent) => { event.preventDefault(); create.mutate(); };
+
+  const beginEdit = (provider: SafeProvider) => {
+    saveProvider.reset();
+    setEditingProvider(provider);
+    setLabel(provider.label);
+    setProtocol(provider.protocol);
+    setBaseUrl(provider.baseUrl);
+    setEndpointOverride(provider.endpointOverride ?? "");
+    setCredential("");
+    setModelId("");
+    setHeaders(JSON.stringify(provider.headers, null, 2));
+    setExtraBody(JSON.stringify(provider.extraBody, null, 2));
+    setClearCredential(false);
+  };
+  const cancelEdit = () => { saveProvider.reset(); resetFields(); };
+  const submit = (event: FormEvent) => { event.preventDefault(); saveProvider.mutate(); };
+
   return <div className="settings-grid">
     <section className="panel library-list">
       <div className="panel-title"><KeyRound size={16} /> Saved providers</div>
-      {providers.data?.providers.map((provider) => <article className="library-card" key={provider.id}>
-        <div><strong>{provider.label}</strong><small>{provider.protocol}</small></div><Button variant="ghost" onClick={() => discover.mutate(provider.id)} title="Discover compatible models" disabled={discover.isPending && discover.variables === provider.id}><RefreshCw size={13} className={discover.isPending && discover.variables === provider.id ? "spin-icon" : ""} /></Button>
+      {providers.data?.providers.map((provider) => <article className={`library-card${editingProvider?.id === provider.id ? " editing" : ""}`} key={provider.id}>
+        <div><strong>{provider.label}</strong><small>{provider.protocol} · revision {provider.revision}</small></div><div className="library-actions"><Button variant="ghost" onClick={() => beginEdit(provider)} title="Edit provider as a new revision" aria-label={`Edit ${provider.label}`}><Pencil size={13} /></Button><Button variant="ghost" onClick={() => discover.mutate(provider.id)} title="Discover compatible models" aria-label={`Discover models for ${provider.label}`} disabled={discover.isPending && discover.variables === provider.id}><RefreshCw size={13} className={discover.isPending && discover.variables === provider.id ? "spin-icon" : ""} /></Button></div>
         <code>{provider.baseUrl}</code>
         <p>{provider.models.length} models · credential {provider.hasCredential ? "stored" : "not set"}</p>
         {discover.variables === provider.id && discover.data && <div className="discovery-result"><strong>{discover.data.models.length} models discovered</strong>{discover.data.models.slice(0, 12).map((model) => <code key={model.id}>{model.id}</code>)}{discover.data.models.length > 12 && <small>+{discover.data.models.length - 12} more</small>}{discover.data.warnings.map((warning) => <small className="warning" key={warning}>{warning}</small>)}<Button variant="secondary" onClick={() => saveCatalog.mutate({ providerId: provider.id, models: discover.data.models })} disabled={discover.data.models.length === 0 || saveCatalog.isPending}><SaveCatalogIcon />{saveCatalog.isPending ? "Saving revision…" : "Save discovered catalog"}</Button>{saveCatalog.error && <div className="form-error">{saveCatalog.error.message}</div>}</div>}
@@ -101,7 +150,7 @@ function ProviderSettings() {
       {providers.data?.providers.length === 0 && <p className="quiet">No provider profiles yet.</p>}
     </section>
     <section className="panel editor-panel">
-      <div className="panel-title"><Plus size={16} /> New provider profile</div>
+      <div className="panel-title">{editingProvider ? <Pencil size={16} /> : <Plus size={16} />}{editingProvider ? `Edit provider · revision ${editingProvider.revision}` : "New provider profile"}{editingProvider && <Button type="button" variant="ghost" className="panel-title-action" onClick={cancelEdit} title="Cancel editing" aria-label="Cancel provider editing"><X size={13} /></Button>}</div>
       <form onSubmit={submit}>
         <div className="two-fields"><Field label="Label"><Input value={label} onChange={(event) => setLabel(event.target.value)} required /></Field>
           <Field label="Protocol"><Select value={protocol} onChange={(event) => setProtocol(event.target.value as SafeProvider["protocol"])}>
@@ -109,12 +158,14 @@ function ProviderSettings() {
           </Select></Field></div>
         <Field label="Base URL"><Input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required /></Field>
         <Field label="Generation endpoint override" hint="Optional full path/URL for compatible gateways with a non-standard generation endpoint."><Input value={endpointOverride} onChange={(event) => setEndpointOverride(event.target.value)} placeholder="https://gateway.example/v1/responses" /></Field>
-        <div className="two-fields"><Field label="API credential"><Input type="password" value={credential} onChange={(event) => setCredential(event.target.value)} autoComplete="off" /></Field>
-          <Field label="Initial model ID"><Input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="model-id" /></Field></div>
-        <Field label="Custom headers (JSON)"><CodeMirror value={headers} onChange={setHeaders} extensions={[json()]} height="88px" theme="dark" /></Field>
-        <Field label="Extra request body (JSON)" hint="Core model/input/tools/stream fields are protected."><CodeMirror value={extraBody} onChange={setExtraBody} extensions={[json()]} height="88px" theme="dark" /></Field>
-        {create.error && <div className="form-error">{create.error.message}</div>}
-        <Button disabled={!label || !baseUrl || create.isPending}>Save provider</Button>
+        <div className="two-fields"><Field label="API credential" hint={editingProvider ? "Leave blank to keep the stored credential." : undefined}><Input type="password" value={credential} onChange={(event) => { setCredential(event.target.value); if (event.target.value) setClearCredential(false); }} autoComplete="off" disabled={clearCredential} /></Field>
+          <Field label={editingProvider ? "Add model ID" : "Initial model ID"} hint={editingProvider ? `Leave blank to keep the ${editingProvider.models.length}-model catalog.` : undefined}><Input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="model-id" /></Field></div>
+        {editingProvider?.hasCredential && <label className="credential-clear"><input type="checkbox" checked={clearCredential} onChange={(event) => { setClearCredential(event.target.checked); if (event.target.checked) setCredential(""); }} /> Clear the stored credential in the new revision</label>}
+        <Field label="Custom headers (JSON)" hint={editingProvider ? "Redacted values are preserved. Remove a key to delete it, or replace its marker to update it." : undefined}><CodeMirror value={headers} onChange={setHeaders} extensions={[json()]} height="88px" theme="dark" /></Field>
+        <Field label="Extra request body (JSON)" hint={editingProvider ? "Redacted values are preserved. Core model/input/tools/stream fields remain protected." : "Core model/input/tools/stream fields are protected."}><CodeMirror value={extraBody} onChange={setExtraBody} extensions={[json()]} height="88px" theme="dark" /></Field>
+        {editingProvider && <p className="warning provider-revision-note">Saving creates a new immutable revision. Existing sessions remain pinned to revision {editingProvider.revision} until you select the new one.</p>}
+        {saveProvider.error && <div className="form-error">{saveProvider.error.message}</div>}
+        <Button disabled={!label || !baseUrl || saveProvider.isPending}>{saveProvider.isPending ? "Saving…" : editingProvider ? "Save new revision" : "Save provider"}</Button>
       </form>
     </section>
   </div>;

@@ -31,6 +31,7 @@ import {
   UnsafeAssetCredentialError,
   assertSafeAssetCredentials,
   localSecurity,
+  restoreProviderRevisionSecrets,
   sanitizeAssetRevision,
   sanitizeProvider
 } from "./security.js";
@@ -167,7 +168,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       throw new HTTPException(400, { message: "Provider and model must either both be selected or both be cleared" });
     }
     if (body.providerProfileId && body.modelId) {
-      const provider = (await repository.listProviderProfiles()).find((item) => item.id === body.providerProfileId);
+      const provider = await repository.getProviderProfile(body.providerProfileId);
       if (!provider) throw new HTTPException(404, { message: "Provider profile not found" });
       if (provider.models.length > 0 && !provider.models.some((model) => model.id === body.modelId)) {
         throw new HTTPException(409, { message: "Model is not present in the selected provider catalog" });
@@ -256,7 +257,7 @@ export function createApp(dependencies: AppDependencies): Hono {
   });
 
   app.get("/api/providers", async (context) => {
-    const providers = await repository.listProviderProfiles();
+    const providers = await repository.listProviderProfiles(context.req.query("includeArchived") === "true");
     return context.json({ providers: providers.map(sanitizeProvider) });
   });
   app.get("/api/secrets", async (context) => context.json({ secrets: await repository.listSecrets() }));
@@ -291,11 +292,14 @@ export function createApp(dependencies: AppDependencies): Hono {
     });
   });
   app.post("/api/providers/:id/revisions", async (context) => {
+    const prior = await repository.getProviderProfile(context.req.param("id"));
+    if (!prior || prior.archivedAt) throw new HTTPException(404, { message: "Provider profile revision not found" });
     let raw: unknown;
     try { raw = await context.req.raw.json(); } catch { throw new HTTPException(400, { message: "Expected a JSON request body" }); }
     const input = createProviderProfileSchema.partial().parse(raw);
     const supplied = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
-    const changes = Object.fromEntries(Object.entries(input).filter(([key, value]) => Object.hasOwn(supplied, key) && value !== undefined)) as Parameters<typeof repository.createProviderRevision>[1];
+    const parsedChanges = Object.fromEntries(Object.entries(input).filter(([key, value]) => Object.hasOwn(supplied, key) && value !== undefined)) as Parameters<typeof repository.createProviderRevision>[1];
+    const changes = restoreProviderRevisionSecrets(parsedChanges, prior);
     const provider = await repository.createProviderRevision(context.req.param("id"), changes);
     if (!provider) throw new HTTPException(404, { message: "Provider profile revision not found" });
     return context.json({ provider: sanitizeProvider(provider) }, 201);

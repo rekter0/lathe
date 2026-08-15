@@ -274,7 +274,7 @@ function ConfigInspector({ data, onChanged }: { data: WorkbenchData; onChanged()
   const [promptRevisionId, setPromptRevisionId] = useState("");
   const [toolRevisionId, setToolRevisionId] = useState("");
   const compiledPrompt = useMemo(() => draft.promptBlocks.filter((block) => block.enabled).toSorted((left, right) => left.order - right.order).map((block) => block.content).join("\n\n"), [draft.promptBlocks]);
-  const providers = useQuery({ queryKey: ["providers"], queryFn: () => api<{ providers: SafeProvider[] }>("/api/providers") });
+  const providers = useQuery({ queryKey: ["providers", "with-current-revision"], queryFn: () => api<{ providers: SafeProvider[] }>("/api/providers?includeArchived=true") });
   const prompts = useQuery({ queryKey: ["assets", "prompt"], queryFn: () => api<{ assets: AssetRevision[] }>("/api/assets?kind=prompt") });
   const toolSpecs = useQuery({ queryKey: ["assets", "tool-spec"], queryFn: () => api<{ assets: AssetRevision[] }>("/api/assets?kind=tool-spec") });
   const implementations = useQuery({ queryKey: ["assets", "tool-implementation"], queryFn: () => api<{ assets: AssetRevision[] }>("/api/assets?kind=tool-implementation") });
@@ -317,8 +317,9 @@ function ConfigInspector({ data, onChanged }: { data: WorkbenchData; onChanged()
     setDraft({ ...draft, tools: [...draft.tools, { toolRevisionId: asset.id, implementationRevisionId: null, name: value.name, description: value.description, inputSchema: value.inputSchema, enabled: true, mode: "manual", targetId: null, mcpServerId: null }] });
     setToolRevisionId("");
   };
+  const selectableProviders = providers.data?.providers.filter((provider) => !provider.archivedAt || provider.id === data.session.providerProfileId) ?? [];
   return <div className="inspector-content">
-    <Field label="Provider / model"><Select value={selection} onChange={(event) => setSelection(event.target.value)}><option value="">Not selected</option>{providers.data?.providers.flatMap((provider) => provider.models.map((model) => <option key={`${provider.id}:${model.id}`} value={`${provider.id}::${model.id}`}>{provider.label} · {model.label}</option>))}</Select></Field>
+    <Field label="Provider / model"><Select value={selection} onChange={(event) => setSelection(event.target.value)}><option value="">Not selected</option>{selectableProviders.flatMap((provider) => provider.models.map((model) => <option key={`${provider.id}:${model.id}`} value={`${provider.id}::${model.id}`}>{provider.label} · {model.label}{provider.archivedAt ? ` · revision ${provider.revision} (historical)` : ""}</option>))}</Select></Field>
     <div className="two-fields compact"><Field label="Temperature"><Input type="number" min="0" max="2" step="0.1" value={draft.temperature ?? ""} onChange={(event) => setDraft({ ...draft, temperature: event.target.value === "" ? null : Number(event.target.value) })} /></Field>
       <Field label="Max output"><Input type="number" min="1" value={draft.maxOutputTokens ?? ""} onChange={(event) => setDraft({ ...draft, maxOutputTokens: event.target.value === "" ? null : Number(event.target.value) })} /></Field></div>
     <div className="continuation-control"><label><input type="checkbox" checked={autoContinueTools} onChange={(event) => setAutoContinueTools(event.target.checked)} /><span><strong>Automatic tool continuation</strong><small>Continue after approved tool results until the model stops.</small></span></label><Field label="Turn limit" hint="Hard limit: 32"><Input type="number" min="1" max="32" value={autoContinueLimit} onChange={(event) => setAutoContinueLimit(Math.max(1, Math.min(32, Number(event.target.value) || 1)))} disabled={!autoContinueTools} /></Field></div>

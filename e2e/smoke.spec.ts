@@ -28,6 +28,42 @@ test("protects the local API and creates a persistent workbench", async ({ page,
   const suffix = `${Date.now()}-${test.info().retry}`;
   const projectName = `Playwright project ${suffix}`;
   const sessionName = `Branch smoke ${suffix}`;
+  const providerLabel = `Editable provider ${suffix}`;
+  const revisedProviderLabel = `${providerLabel} revised`;
+
+  const providerResponse = await request.post("/api/providers", {
+    headers: { Authorization: `Bearer ${E2E_TOKEN}`, Origin: "http://127.0.0.1:4318" },
+    data: {
+      label: providerLabel,
+      protocol: "openai-chat",
+      baseUrl: "https://fixture.invalid/v1",
+      credential: `credential-${suffix}`,
+      headers: { "x-fixture-secret": `header-${suffix}` },
+      extraBody: { api_key: `body-${suffix}`, stable: true },
+      models: [{
+        id: "fixture-model",
+        label: "fixture-model",
+        discovered: false,
+        capabilities: { streaming: true, tools: true, images: false, files: false, jsonMode: false, maxContextTokens: null }
+      }]
+    }
+  });
+  expect(providerResponse.status()).toBe(201);
+
+  await page.goto("/settings");
+  await page.getByRole("button", { name: `Edit ${providerLabel}` }).click();
+  const providerEditor = page.locator(".editor-panel");
+  await expect(providerEditor.getByText("Edit provider · revision 1")).toBeVisible();
+  await providerEditor.getByLabel("Label").fill(revisedProviderLabel);
+  await providerEditor.getByRole("button", { name: "Save new revision" }).click();
+  await expect(page.getByRole("button", { name: `Edit ${revisedProviderLabel}` })).toBeVisible();
+  const activeProviders = await request.get("/api/providers", { headers: { Authorization: `Bearer ${E2E_TOKEN}` } });
+  expect(activeProviders.status()).toBe(200);
+  const activeProvidersText = await activeProviders.text();
+  expect(activeProvidersText).not.toContain(`credential-${suffix}`);
+  expect(JSON.parse(activeProvidersText)).toMatchObject({ providers: expect.arrayContaining([expect.objectContaining({ label: revisedProviderLabel, revision: 2, hasCredential: true })]) });
+
+  await page.goto("/");
 
   await page.getByRole("button", { name: "New project" }).click();
   const dialog = page.getByRole("dialog", { name: "Create a project" });

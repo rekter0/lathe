@@ -234,6 +234,7 @@ describe("Lathe API", () => {
       });
       const providerList = await app.request("/api/providers", { headers });
       const providerListText = await providerList.text();
+      const safeProvider = (JSON.parse(providerListText) as { providers: Array<{ baseUrl: string; endpointOverride: string | null; headers: Record<string, string>; extraBody: Record<string, unknown> }> }).providers[0]!;
       expect(providerListText).not.toContain("provider-secret");
       expect(providerListText).not.toContain("header-secret");
       expect(providerListText).not.toContain("body-secret");
@@ -247,14 +248,33 @@ describe("Lathe API", () => {
       expect(JSON.stringify(discoveryBody)).not.toContain("provider-secret");
 
       const revisionResponse = await app.request(`/api/providers/${provider.id}/revisions`, {
-        method: "POST", headers, body: JSON.stringify({ label: "Fixture r2" })
+        method: "POST", headers, body: JSON.stringify({
+          label: "Fixture r2",
+          baseUrl: safeProvider.baseUrl,
+          endpointOverride: safeProvider.endpointOverride,
+          headers: safeProvider.headers,
+          extraBody: { ...safeProvider.extraBody, neutral: "updated-neutral" }
+        })
       });
       expect(revisionResponse.status).toBe(201);
       const revisionBody = await revisionResponse.json() as { provider: { id: string; revision: number; hasCredential: boolean; credential?: string } };
       expect(revisionBody.provider).toMatchObject({ revision: 2, hasCredential: true });
       expect(revisionBody.provider.id).not.toBe(provider.id);
       expect(revisionBody.provider).not.toHaveProperty("credential");
+      const storedRevision = await persistence.repository.getProviderProfile(revisionBody.provider.id);
+      expect(storedRevision).toMatchObject({
+        credential: "provider-secret",
+        headers: { "x-private-header": "header-secret" },
+        extraBody: { api_key: "body-secret", neutral: "updated-neutral" }
+      });
+      expect(storedRevision?.baseUrl).toContain("url-secret");
+      expect(storedRevision?.endpointOverride).toContain("endpoint-secret");
       expect((await persistence.repository.listProviderProfiles()).map((item) => item.id)).toEqual([revisionBody.provider.id]);
+      const allRevisions = await app.request("/api/providers?includeArchived=true", { headers });
+      const allRevisionsText = await allRevisions.text();
+      expect((JSON.parse(allRevisionsText) as { providers: unknown[] }).providers).toHaveLength(2);
+      expect(allRevisionsText).not.toContain("provider-secret");
+      expect(allRevisionsText).not.toContain("header-secret");
       expect((await persistence.repository.getProviderProfile(provider.id))?.archivedAt).not.toBeNull();
       expect((await app.request(`/api/providers/${provider.id}/revisions`, {
         method: "POST", headers, body: JSON.stringify({ label: "Invalid fork" })
@@ -262,6 +282,11 @@ describe("Lathe API", () => {
 
       const project = await persistence.repository.createProject({ name: "Project" });
       const { session, branch } = await persistence.repository.createSession({ projectId: project.id, name: "Session" });
+      const historicalModel = await app.request(`/api/sessions/${session.id}/model`, {
+        method: "PATCH", headers, body: JSON.stringify({ providerProfileId: provider.id, modelId: "fixture-model" })
+      });
+      expect(historicalModel.status).toBe(200);
+      expect(await historicalModel.json()).toMatchObject({ session: { providerProfileId: provider.id, modelId: "fixture-model" } });
       const continuation = await app.request(`/api/sessions/${session.id}/continuation`, {
         method: "PATCH", headers, body: JSON.stringify({ enabled: true, limit: 4 })
       });
