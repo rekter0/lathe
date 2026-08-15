@@ -105,9 +105,48 @@ describe("Lathe API", () => {
         })
       });
       expect(trusted.status).toBe(201);
-      expect(await trusted.text()).not.toContain("target-environment-secret");
+      const trustedText = await trusted.text();
+      expect(trustedText).not.toContain("target-environment-secret");
+      const trustedRevision = (JSON.parse(trustedText) as { asset: AssetRevision }).asset;
+      const edited = await app.request("/api/library/assets", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          assetId: trustedRevision.assetId,
+          baseRevisionId: trustedRevision.id,
+          kind: "target",
+          name: "Edited target",
+          description: trustedRevision.description,
+          tags: trustedRevision.tags,
+          provenance: { ...trustedRevision.provenance, editedFromRevisionId: trustedRevision.id },
+          value: { ...trustedRevision.value, label: "Edited target", container: "lathe-edited" },
+          trusted: true
+        })
+      });
+      expect(edited.status).toBe(201);
+      expect(await edited.text()).not.toContain("target-environment-secret");
       const revisions = (await persistence.repository.listAssetRevisions("target")).filter((item) => item.assetId === target.assetId);
       expect(revisions.find((item) => item.revision === 2)?.value).toMatchObject({ environment: { VISIBLE_NAME: "target-environment-secret" } });
+      expect(revisions.find((item) => item.revision === 3)?.value).toMatchObject({
+        label: "Edited target",
+        container: "lathe-edited",
+        environment: { VISIBLE_NAME: "target-environment-secret" }
+      });
+
+      const staleEdit = await app.request("/api/library/assets", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          assetId: trustedRevision.assetId,
+          baseRevisionId: trustedRevision.id,
+          kind: "target",
+          name: "Stale edit",
+          value: trustedRevision.value,
+          trusted: true
+        })
+      });
+      expect(staleEdit.status).toBe(409);
+      expect(await staleEdit.text()).toContain("reload before saving");
     } finally {
       await persistence.repository.close();
     }

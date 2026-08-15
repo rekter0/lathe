@@ -70,6 +70,29 @@ export function sanitizeAssetRevision<T extends AssetRevision>(asset: T): T {
   return safe;
 }
 
+/**
+ * Restore server-only target environment values when an operator edits the
+ * sanitized DTO. Removing a key still removes it; only the exact public
+ * redaction marker preserves the corresponding value from the base revision.
+ */
+export function restoreAssetRevisionRedactions(
+  kind: AssetKind,
+  nextValue: JsonValue,
+  priorValue: JsonValue,
+): JsonValue {
+  const restored = structuredClone(nextValue);
+  if (kind !== "target" || !isJsonObject(restored) || !isJsonObject(priorValue)) return restored;
+  const nextEnvironment = restored.environment;
+  const priorEnvironment = priorValue.environment;
+  if (!isJsonObject(nextEnvironment) || !isJsonObject(priorEnvironment)) return restored;
+  for (const [name, value] of Object.entries(nextEnvironment)) {
+    if (value === REDACTED_ASSET_VALUE && Object.hasOwn(priorEnvironment, name)) {
+      nextEnvironment[name] = structuredClone(priorEnvironment[name]!);
+    }
+  }
+  return restored;
+}
+
 function credentialValuesFromUrl(value: string): string[] {
   let url: URL;
   try {

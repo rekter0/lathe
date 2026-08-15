@@ -31,6 +31,7 @@ import {
   UnsafeAssetCredentialError,
   assertSafeAssetCredentials,
   localSecurity,
+  restoreAssetRevisionRedactions,
   restoreProviderRevisionSecrets,
   sanitizeAssetRevision,
   sanitizeProvider
@@ -317,6 +318,7 @@ export function createApp(dependencies: AppDependencies): Hono {
   app.post("/api/library/assets", async (context) => {
     const body = await parseBody(context.req.raw, z.object({
       assetId: z.string().optional(),
+      baseRevisionId: z.string().optional(),
       kind: z.enum(["prompt", "tool-spec", "tool-implementation", "harness", "target", "mcp-server"]),
       name: z.string().trim().min(1).max(120),
       description: z.string().max(4_000).default(""),
@@ -329,8 +331,20 @@ export function createApp(dependencies: AppDependencies): Hono {
     const prior = body.assetId
       ? kindRevisions.filter((item) => item.assetId === body.assetId).toSorted((left, right) => right.revision - left.revision)[0]
       : undefined;
+    const baseRevision = body.baseRevisionId
+      ? kindRevisions.find((item) => item.id === body.baseRevisionId)
+      : undefined;
+    if (body.baseRevisionId && !body.assetId) {
+      throw new HTTPException(400, { message: "Asset revision editing requires the immutable asset ID" });
+    }
+    if (body.baseRevisionId && (!baseRevision || baseRevision.assetId !== body.assetId || baseRevision.kind !== body.kind)) {
+      throw new HTTPException(409, { message: "Base revision does not belong to this immutable asset" });
+    }
+    if (baseRevision && prior?.id !== baseRevision.id) {
+      throw new HTTPException(409, { message: "Asset was revised after editing began; reload before saving" });
+    }
     const assetId = body.assetId ?? uuidv7();
-    const trustedFromRevisionId = typeof body.provenance.trustedFromRevisionId === "string"
+    const trustedFromRevisionId = !baseRevision && typeof body.provenance.trustedFromRevisionId === "string"
       ? body.provenance.trustedFromRevisionId
       : null;
     const trustedSource = body.trusted && trustedFromRevisionId
@@ -341,7 +355,10 @@ export function createApp(dependencies: AppDependencies): Hono {
     }
     // Trusting an imported target/MCP revision copies its server-side value so
     // redacted API DTOs never need to round-trip credential-bearing fields.
-    const value = trustedSource?.value ?? body.value;
+    const value = trustedSource?.value
+      ?? (baseRevision ? restoreAssetRevisionRedactions(body.kind, body.value, baseRevision.value) : body.value);
+    const provenance = structuredClone(body.provenance);
+    if (baseRevision) delete provenance.trustedFromRevisionId;
     validateAssetCredentials(body.kind, value);
     const asset = await repository.saveAssetRevision({
       id: uuidv7(),
@@ -351,7 +368,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       name: body.name,
       description: body.description,
       tags: body.tags,
-      provenance: body.provenance,
+      provenance,
       value,
       contentHash: sha256Json(value),
       trusted: body.trusted,

@@ -30,6 +30,15 @@ test("protects the local API and creates a persistent workbench", async ({ page,
   const sessionName = `Branch smoke ${suffix}`;
   const providerLabel = `Editable provider ${suffix}`;
   const revisedProviderLabel = `${providerLabel} revised`;
+  const promptLabel = `Editable prompt ${suffix}`;
+  const toolLabel = `Editable tool ${suffix}`;
+  const implementationLabel = `Editable implementation ${suffix}`;
+  const revisedImplementationLabel = `${implementationLabel} revised`;
+  const targetLabel = `Editable target ${suffix}`;
+  const revisedTargetLabel = `${targetLabel} revised`;
+  const mcpLabel = `Editable MCP ${suffix}`;
+  const revisedMcpLabel = `${mcpLabel} revised`;
+  const apiHeaders = { Authorization: `Bearer ${E2E_TOKEN}`, Origin: "http://127.0.0.1:4318" };
 
   const providerResponse = await request.post("/api/providers", {
     headers: { Authorization: `Bearer ${E2E_TOKEN}`, Origin: "http://127.0.0.1:4318" },
@@ -62,6 +71,56 @@ test("protects the local API and creates a persistent workbench", async ({ page,
   const activeProvidersText = await activeProviders.text();
   expect(activeProvidersText).not.toContain(`credential-${suffix}`);
   expect(JSON.parse(activeProvidersText)).toMatchObject({ providers: expect.arrayContaining([expect.objectContaining({ label: revisedProviderLabel, revision: 2, hasCredential: true })]) });
+
+  const assetPayloads = [
+    { kind: "prompt", name: promptLabel, description: "Prompt before edit", tags: [], provenance: { operatorAuthored: true }, trusted: true, value: { content: "Prompt before edit" } },
+    { kind: "tool-spec", name: toolLabel, description: "Tool before edit", tags: [], provenance: { operatorAuthored: true }, trusted: true, value: { name: toolLabel, description: "Tool before edit", inputSchema: { type: "object", properties: {} } } },
+    { kind: "tool-implementation", name: implementationLabel, description: "Implementation before edit", tags: ["real"], provenance: { operatorAuthored: true }, trusted: true, value: { source: "function build() { return { program: '/bin/true' }; } function formatResult(result) { return { status: result.status }; }" } },
+    { kind: "target", name: targetLabel, description: "Target before edit", tags: [], provenance: { operatorAuthored: true }, trusted: true, value: { id: `target-${suffix}`, label: targetLabel, kind: "container", runtime: "docker", container: "fixture", environment: { FIXTURE_SECRET: `target-secret-${suffix}` } } },
+    { kind: "mcp-server", name: mcpLabel, description: "MCP before edit", tags: ["stdio"], provenance: { operatorAuthored: true }, trusted: true, value: { id: `mcp-${suffix}`, revision: "1", name: mcpLabel, transport: { kind: "stdio", command: "/bin/false", args: ["--version"] }, roots: [] } }
+  ];
+  for (const data of assetPayloads) {
+    const response = await request.post("/api/library/assets", { headers: apiHeaders, data });
+    expect(response.status(), await response.text()).toBe(201);
+  }
+
+  await page.getByRole("tab", { name: "Prompts" }).click();
+  await page.getByRole("button", { name: `Edit ${promptLabel}` }).click();
+  await page.getByLabel("System prompt").fill("Prompt after edit");
+  await page.getByRole("button", { name: "Save new revision" }).click();
+  await expect(page.getByRole("button", { name: `Edit ${promptLabel}` })).toBeVisible();
+
+  await page.getByRole("tab", { name: "Tools" }).click();
+  await page.getByRole("button", { name: `Edit ${toolLabel}` }).click();
+  await page.locator(".editor-panel").getByLabel("Description").fill("Tool after edit");
+  await page.locator(".editor-panel").getByRole("button", { name: "Save new revision" }).click();
+  await expect(page.getByRole("button", { name: `Edit ${toolLabel}` })).toBeVisible();
+  await page.getByRole("button", { name: `Edit ${implementationLabel} implementation` }).click();
+  await page.locator(".implementation-panel form").getByLabel("Label").fill(revisedImplementationLabel);
+  await page.locator(".implementation-panel form").getByRole("button", { name: "Save new revision" }).click();
+  await expect(page.getByRole("button", { name: `Edit ${revisedImplementationLabel} implementation` })).toBeVisible();
+
+  await page.getByRole("tab", { name: "Targets & MCP" }).click();
+  await page.getByRole("button", { name: `Edit ${targetLabel} target` }).click();
+  await page.getByLabel("Target label").fill(revisedTargetLabel);
+  await page.getByRole("button", { name: "Save new revision" }).click();
+  await expect(page.getByRole("button", { name: `Edit ${revisedTargetLabel} target` })).toBeVisible();
+  await page.getByRole("button", { name: `Edit ${mcpLabel} MCP profile` }).click();
+  await page.getByLabel("Server label").fill(revisedMcpLabel);
+  await page.getByRole("button", { name: "Save new revision" }).click();
+  await expect(page.getByRole("button", { name: `Edit ${revisedMcpLabel} MCP profile` })).toBeVisible();
+
+  const revisedAssetsResponse = await request.get("/api/assets", { headers: apiHeaders });
+  expect(revisedAssetsResponse.status()).toBe(200);
+  const revisedAssets = (await revisedAssetsResponse.json() as { assets: Array<{ kind: string; name: string; revision: number; value: unknown }> }).assets;
+  expect(revisedAssets).toEqual(expect.arrayContaining([
+    expect.objectContaining({ kind: "prompt", name: promptLabel, revision: 2, value: { content: "Prompt after edit" } }),
+    expect.objectContaining({ kind: "tool-spec", name: toolLabel, revision: 2, value: expect.objectContaining({ description: "Tool after edit" }) }),
+    expect.objectContaining({ kind: "tool-implementation", name: revisedImplementationLabel, revision: 2 }),
+    expect.objectContaining({ kind: "target", name: revisedTargetLabel, revision: 2 }),
+    expect.objectContaining({ kind: "mcp-server", name: revisedMcpLabel, revision: 2, value: expect.objectContaining({ name: revisedMcpLabel, revision: "2" }) })
+  ]));
+  expect(JSON.stringify(revisedAssets)).not.toContain(`target-secret-${suffix}`);
 
   await page.goto("/");
 

@@ -25,6 +25,14 @@ const defaultDiscoveredCapabilities: ModelCapabilities = {
   maxContextTokens: null
 };
 
+function parseObjectJson(source: string, label: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(source);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be a JSON object`);
+  }
+  return value as Record<string, unknown>;
+}
+
 export function SettingsPage() {
   return <div className="settings-view">
     <div className="page-heading"><span className="eyebrow">GLOBAL LIBRARY</span><h1>Workbench settings</h1><p>Providers and versioned assets are shared across projects. Secrets never appear again after saving.</p></div>
@@ -176,31 +184,57 @@ function SaveCatalogIcon() { return <span aria-hidden="true">↳</span>; }
 function AssetSettings({ kind }: { kind: "prompt" | "tool-spec" }) {
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["assets", kind], queryFn: () => api<{ assets: AssetRevision[] }>(`/api/assets?kind=${kind}`) });
+  const [editingAsset, setEditingAsset] = useState<AssetRevision | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [content, setContent] = useState("");
   const [schema, setSchema] = useState('{\n  "type": "object",\n  "properties": {}\n}');
-  const create = useMutation({
+  const resetFields = () => {
+    setEditingAsset(null);
+    setName("");
+    setDescription("");
+    setContent("");
+    setSchema('{\n  "type": "object",\n  "properties": {}\n}');
+  };
+  const save = useMutation({
     mutationFn: () => api("/api/library/assets", {
       method: "POST",
       ...jsonBody({
-        kind, name, description, tags: [], trusted: true, provenance: { operatorAuthored: true },
+        ...(editingAsset ? { assetId: editingAsset.assetId, baseRevisionId: editingAsset.id } : {}),
+        kind, name, description, tags: editingAsset?.tags ?? [], trusted: true,
+        provenance: editingAsset
+          ? { ...editingAsset.provenance, operatorAuthored: true, editedFromRevisionId: editingAsset.id, operatorEditedAt: new Date().toISOString() }
+          : { operatorAuthored: true },
         value: kind === "prompt" ? { content } : { name, description, inputSchema: JSON.parse(schema) }
       })
     }),
-    onSuccess: () => { setName(""); setDescription(""); setContent(""); void queryClient.invalidateQueries({ queryKey: ["assets", kind] }); }
+    onSuccess: () => { resetFields(); void queryClient.invalidateQueries({ queryKey: ["assets", kind] }); }
   });
+  const beginEdit = (asset: AssetRevision) => {
+    const value = asset.value && typeof asset.value === "object" && !Array.isArray(asset.value) ? asset.value : {};
+    save.reset();
+    setEditingAsset(asset);
+    setName(asset.name);
+    setDescription(asset.description);
+    if (kind === "prompt") setContent(typeof value.content === "string" ? value.content : "");
+    else setSchema(JSON.stringify(value.inputSchema ?? { type: "object", properties: {} }, null, 2));
+  };
   return <><div className="settings-grid">
     <section className="panel library-list"><div className="panel-title"><Library size={16} /> Versioned {kind === "prompt" ? "prompts" : "tool specifications"}</div>
-      {query.data?.assets.map((asset) => <article className="library-card" key={asset.id}><div><strong>{asset.name}</strong><small>revision {asset.revision}</small></div><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "trusted" : "disabled"}</span><p>{asset.description || "No description"}</p><code>{asset.contentHash.slice(0, 16)}…</code></article>)}
+      {query.data?.assets.map((asset) => {
+        const latest = query.data.assets.filter((candidate) => candidate.assetId === asset.assetId).toSorted((left, right) => right.revision - left.revision)[0];
+        const mayEdit = latest?.id === asset.id;
+        return <article className={`library-card${editingAsset?.id === asset.id ? " editing" : ""}`} key={asset.id}><div><strong>{asset.name}</strong><small>revision {asset.revision}</small></div><div className="library-actions"><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "trusted" : "disabled"}</span>{mayEdit && <Button variant="ghost" onClick={() => beginEdit(asset)} title="Edit as a new immutable revision" aria-label={`Edit ${asset.name}`}><Pencil size={13} /></Button>}</div><p>{asset.description || "No description"}</p><code>{asset.contentHash.slice(0, 16)}…</code></article>;
+      })}
     </section>
-    <section className="panel editor-panel"><div className="panel-title"><Plus size={16} /> New {kind === "prompt" ? "prompt" : "tool"}</div>
-      <form onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
+    <section className="panel editor-panel"><div className="panel-title">{editingAsset ? <Pencil size={16} /> : <Plus size={16} />}{editingAsset ? `Edit ${kind === "prompt" ? "prompt" : "tool"} · revision ${editingAsset.revision}` : `New ${kind === "prompt" ? "prompt" : "tool"}`}{editingAsset && <Button type="button" variant="ghost" className="panel-title-action" onClick={() => { save.reset(); resetFields(); }} title="Cancel editing" aria-label={`Cancel ${kind} editing`}><X size={13} /></Button>}</div>
+      <form onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
         <Field label="Label"><Input value={name} onChange={(event) => setName(event.target.value)} required /></Field>
         <Field label="Description"><Input value={description} onChange={(event) => setDescription(event.target.value)} /></Field>
         {kind === "prompt" ? <Field label="System prompt"><Textarea value={content} onChange={(event) => setContent(event.target.value)} rows={12} required /></Field>
           : <Field label="JSON Schema"><CodeMirror value={schema} onChange={setSchema} extensions={[json()]} height="260px" theme="dark" /></Field>}
-        {create.error && <div className="form-error">{create.error.message}</div>}<Button disabled={!name || create.isPending}>Save immutable revision</Button>
+        {editingAsset && <p className="warning provider-revision-note">Saving creates revision {editingAsset.revision + 1}. Existing harnesses and sessions remain pinned to revision {editingAsset.revision}.</p>}
+        {save.error && <div className="form-error">{save.error.message}</div>}<Button disabled={!name || save.isPending}>{save.isPending ? "Saving…" : editingAsset ? "Save new revision" : "Save immutable revision"}</Button>
       </form>
     </section>
   </div>{kind === "tool-spec" && <ToolImplementationEditor />}</>;
@@ -209,17 +243,32 @@ function AssetSettings({ kind }: { kind: "prompt" | "tool-spec" }) {
 function ToolImplementationEditor() {
   const queryClient = useQueryClient();
   const implementations = useQuery({ queryKey: ["assets", "tool-implementation"], queryFn: () => api<{ assets: AssetRevision[] }>("/api/assets?kind=tool-implementation") });
+  const defaultSource = `function build(input) {\n  return { program: "/usr/bin/printf", args: ["%s", String(input.arguments.value)] };\n}\n\nfunction formatResult(result) {\n  return { output: result.stdout.text, exitCode: result.exitCode };\n}`;
+  const [editingAsset, setEditingAsset] = useState<AssetRevision | null>(null);
   const [name, setName] = useState("");
   const [mode, setMode] = useState<"real" | "mock">("real");
-  const [source, setSource] = useState(`function build(input) {\n  return { program: "/usr/bin/printf", args: ["%s", String(input.arguments.value)] };\n}\n\nfunction formatResult(result) {\n  return { output: result.stdout.text, exitCode: result.exitCode };\n}`);
+  const [source, setSource] = useState(defaultSource);
   const [mockResult, setMockResult] = useState('{\n  "ok": true\n}');
-  const create = useMutation({
+  const resetFields = () => {
+    setEditingAsset(null);
+    setName("");
+    setMode("real");
+    setSource(defaultSource);
+    setMockResult('{\n  "ok": true\n}');
+  };
+  const save = useMutation({
     mutationFn: () => api("/api/library/assets", { method: "POST", ...jsonBody({
-      kind: "tool-implementation", name, description: mode === "real" ? "QuickJS command handler" : "Deterministic mock response",
-      tags: [mode], provenance: { operatorAuthored: true }, trusted: true,
+      ...(editingAsset ? { assetId: editingAsset.assetId, baseRevisionId: editingAsset.id } : {}),
+      kind: "tool-implementation", name,
+      description: editingAsset?.description ?? (mode === "real" ? "QuickJS command handler" : "Deterministic mock response"),
+      tags: editingAsset ? [...editingAsset.tags.filter((tag) => tag !== "real" && tag !== "mock"), mode] : [mode],
+      provenance: editingAsset
+        ? { ...editingAsset.provenance, operatorAuthored: true, editedFromRevisionId: editingAsset.id, operatorEditedAt: new Date().toISOString() }
+        : { operatorAuthored: true },
+      trusted: editingAsset?.trusted ?? true,
       value: mode === "real" ? { source } : { result: JSON.parse(mockResult) }
     }) }),
-    onSuccess: () => { setName(""); void queryClient.invalidateQueries({ queryKey: ["assets", "tool-implementation"] }); }
+    onSuccess: () => { resetFields(); void queryClient.invalidateQueries({ queryKey: ["assets", "tool-implementation"] }); }
   });
   const trust = useMutation({
     mutationFn: (asset: AssetRevision) => api("/api/library/assets", { method: "POST", ...jsonBody({
@@ -234,14 +283,27 @@ function ToolImplementationEditor() {
     }) }),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["assets", "tool-implementation"] })
   });
+  const beginEdit = (asset: AssetRevision) => {
+    const value = asset.value && typeof asset.value === "object" && !Array.isArray(asset.value) ? asset.value : {};
+    const nextMode = typeof value.source === "string" ? "real" : "mock";
+    save.reset();
+    setEditingAsset(asset);
+    setName(asset.name);
+    setMode(nextMode);
+    setSource(typeof value.source === "string" ? value.source : defaultSource);
+    setMockResult(JSON.stringify(value.result ?? {}, null, 2));
+  };
   return <section className="panel implementation-panel"><div className="panel-title"><Braces size={16} /> Tool implementations</div><div className="implementation-layout"><div className="library-list compact-list">{implementations.data?.assets.map((asset) => {
     const latest = implementations.data.assets.filter((candidate) => candidate.assetId === asset.assetId).toSorted((left, right) => right.revision - left.revision)[0];
     const mayTrust = !asset.trusted && latest?.id === asset.id;
-    return <article className="library-card" key={asset.id}><div><strong>{asset.name}</strong><small>{asset.tags.join(" · ") || "implementation"} · revision {asset.revision}</small></div><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "enabled" : "disabled"}</span><code>{asset.contentHash.slice(0, 16)}…</code>{mayTrust && <Button variant="danger" className="trust-action" onClick={() => { if (window.confirm(`Create a new trusted revision of ${asset.name}? Its handler may prepare commands, but every real execution still requires operator approval.`)) trust.mutate(asset); }} disabled={trust.isPending}><ShieldCheck size={12} /> Trust as new revision</Button>}</article>;
-  })}{trust.error && <div className="form-error implementation-error">{trust.error.message}</div>}</div><form onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
+    const mayEdit = latest?.id === asset.id;
+    return <article className={`library-card${editingAsset?.id === asset.id ? " editing" : ""}`} key={asset.id}><div><strong>{asset.name}</strong><small>{asset.tags.join(" · ") || "implementation"} · revision {asset.revision}</small></div><div className="library-actions"><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "enabled" : "disabled"}</span>{mayEdit && <Button variant="ghost" onClick={() => beginEdit(asset)} title="Edit implementation as a new revision" aria-label={`Edit ${asset.name} implementation`}><Pencil size={13} /></Button>}</div><code>{asset.contentHash.slice(0, 16)}…</code>{mayTrust && <Button variant="danger" className="trust-action" onClick={() => { if (window.confirm(`Create a new trusted revision of ${asset.name}? Its handler may prepare commands, but every real execution still requires operator approval.`)) trust.mutate(asset); }} disabled={trust.isPending}><ShieldCheck size={12} /> Trust as new revision</Button>}</article>;
+  })}{trust.error && <div className="form-error implementation-error">{trust.error.message}</div>}</div><form onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
+    {editingAsset && <div className="editor-context"><span>Edit implementation · revision {editingAsset.revision}</span><Button type="button" variant="ghost" onClick={() => { save.reset(); resetFields(); }} aria-label="Cancel implementation editing"><X size={13} /> Cancel</Button></div>}
     <div className="two-fields"><Field label="Label"><Input value={name} onChange={(event) => setName(event.target.value)} required /></Field><Field label="Mode"><Select value={mode} onChange={(event) => setMode(event.target.value as "real" | "mock")}><option value="real">Real command handler</option><option value="mock">Deterministic mock</option></Select></Field></div>
     {mode === "real" ? <Field label="Synchronous QuickJS source" hint="Expose build(input) and formatResult(result). No imports, filesystem, network, process, or environment access."><CodeMirror value={source} onChange={setSource} height="260px" theme="dark" /></Field> : <Field label="Mock JSON result"><CodeMirror value={mockResult} onChange={setMockResult} extensions={[json()]} height="160px" theme="dark" /></Field>}
-    {create.error && <div className="form-error">{create.error.message}</div>}<Button disabled={!name || create.isPending}>Save implementation revision</Button>
+    {editingAsset && <p className="warning provider-revision-note">Saving creates revision {editingAsset.revision + 1}. Existing session bindings remain pinned to revision {editingAsset.revision}.</p>}
+    {save.error && <div className="form-error">{save.error.message}</div>}<Button disabled={!name || save.isPending}>{save.isPending ? "Saving…" : editingAsset ? "Save new revision" : "Save implementation revision"}</Button>
   </form></div></section>;
 }
 
@@ -250,25 +312,62 @@ function ConnectionSettings() {
   const targets = useQuery({ queryKey: ["assets", "target"], queryFn: () => api<{ assets: AssetRevision[] }>("/api/assets?kind=target") });
   const servers = useQuery({ queryKey: ["assets", "mcp-server"], queryFn: () => api<{ assets: AssetRevision[] }>("/api/assets?kind=mcp-server") });
   const secrets = useQuery({ queryKey: ["secrets"], queryFn: () => api<{ secrets: SecretMetadata[] }>("/api/secrets") });
+  const defaultTargetJson = '{\n  "id": "container",\n  "label": "Existing container",\n  "kind": "container",\n  "runtime": "docker",\n  "container": "container-name"\n}';
   const [secretLabel, setSecretLabel] = useState("");
   const [secretValue, setSecretValue] = useState("");
+  const [editingTarget, setEditingTarget] = useState<AssetRevision | null>(null);
   const [targetName, setTargetName] = useState("");
-  const [targetJson, setTargetJson] = useState('{\n  "id": "container",\n  "label": "Existing container",\n  "kind": "container",\n  "runtime": "docker",\n  "container": "container-name"\n}');
+  const [targetJson, setTargetJson] = useState(defaultTargetJson);
+  const [editingMcp, setEditingMcp] = useState<AssetRevision | null>(null);
   const [mcpName, setMcpName] = useState("");
   const [mcpKind, setMcpKind] = useState<"stdio" | "streamableHttp">("stdio");
   const [mcpAddress, setMcpAddress] = useState("");
   const [mcpTargetId, setMcpTargetId] = useState("");
   const [mcpRoots, setMcpRoots] = useState("[]");
+  const [mcpJson, setMcpJson] = useState("{}");
   const [secretId, setSecretId] = useState("");
   const createSecret = useMutation({ mutationFn: () => api("/api/secrets", { method: "POST", ...jsonBody({ label: secretLabel, value: secretValue }) }), onSuccess: () => { setSecretLabel(""); setSecretValue(""); void queryClient.invalidateQueries({ queryKey: ["secrets"] }); } });
-  const createTarget = useMutation({ mutationFn: () => api("/api/library/assets", { method: "POST", ...jsonBody({ kind: "target", name: targetName, description: "Operator-authored execution target", tags: [], provenance: { operatorAuthored: true }, trusted: true, value: JSON.parse(targetJson) }) }), onSuccess: () => { setTargetName(""); void queryClient.invalidateQueries({ queryKey: ["assets", "target"] }); } });
-  const createMcp = useMutation({ mutationFn: () => {
+  const saveTarget = useMutation({ mutationFn: () => {
+    const value = parseObjectJson(targetJson, "Target JSON");
+    return api("/api/library/assets", { method: "POST", ...jsonBody({
+      ...(editingTarget ? { assetId: editingTarget.assetId, baseRevisionId: editingTarget.id } : {}),
+      kind: "target", name: targetName,
+      description: editingTarget?.description ?? "Operator-authored execution target",
+      tags: editingTarget?.tags ?? [],
+      provenance: editingTarget
+        ? { ...editingTarget.provenance, operatorAuthored: true, editedFromRevisionId: editingTarget.id, operatorEditedAt: new Date().toISOString() }
+        : { operatorAuthored: true },
+      trusted: editingTarget?.trusted ?? true,
+      value
+    }) });
+  }, onSuccess: () => {
+    setEditingTarget(null); setTargetName(""); setTargetJson(defaultTargetJson);
+    void queryClient.invalidateQueries({ queryKey: ["assets", "target"] });
+  } });
+  const saveMcp = useMutation({ mutationFn: () => {
+    if (editingMcp) {
+      const value = parseObjectJson(mcpJson, "MCP profile JSON");
+      return api("/api/library/assets", { method: "POST", ...jsonBody({
+        assetId: editingMcp.assetId,
+        baseRevisionId: editingMcp.id,
+        kind: "mcp-server",
+        name: mcpName,
+        description: editingMcp.description,
+        tags: editingMcp.tags,
+        provenance: { ...editingMcp.provenance, operatorAuthored: true, editedFromRevisionId: editingMcp.id, operatorEditedAt: new Date().toISOString() },
+        trusted: editingMcp.trusted,
+        value: { ...value, name: mcpName, revision: String(editingMcp.revision + 1) }
+      }) });
+    }
     const id = crypto.randomUUID();
     const transport = mcpKind === "stdio"
       ? { kind: "stdio", command: mcpAddress, args: [], ...(mcpTargetId ? { executionTargetId: mcpTargetId } : {}), ...(secretId ? { env: { LATHE_MCP_TOKEN: { kind: "secret", secretId } } } : {}) }
       : { kind: "streamableHttp", url: mcpAddress, ...(secretId ? { headers: { Authorization: { kind: "secret", secretId, prefix: "Bearer " } } } : {}) };
     return api("/api/library/assets", { method: "POST", ...jsonBody({ kind: "mcp-server", name: mcpName, description: "Operator-authored MCP server", tags: [mcpKind], provenance: { operatorAuthored: true }, trusted: true, value: { id, revision: "1", name: mcpName, transport, roots: JSON.parse(mcpRoots) } }) });
-  }, onSuccess: () => { setMcpName(""); setMcpAddress(""); setMcpTargetId(""); setMcpRoots("[]"); void queryClient.invalidateQueries({ queryKey: ["assets", "mcp-server"] }); } });
+  }, onSuccess: () => {
+    setEditingMcp(null); setMcpName(""); setMcpAddress(""); setMcpTargetId(""); setMcpRoots("[]"); setMcpJson("{}"); setSecretId("");
+    void queryClient.invalidateQueries({ queryKey: ["assets", "mcp-server"] });
+  } });
   const inspectMcp = useMutation({ mutationFn: (revisionId: string) => api<{ snapshot: unknown; traceHash: string }>(`/api/mcp/${revisionId}/capabilities`, { method: "POST" }) });
   const trustConnection = useMutation({
     mutationFn: (asset: AssetRevision) => {
@@ -286,20 +385,46 @@ function ConnectionSettings() {
     },
     onSuccess: (_result, asset) => void queryClient.invalidateQueries({ queryKey: ["assets", asset.kind] })
   });
+  const beginTargetEdit = (asset: AssetRevision) => {
+    saveTarget.reset();
+    setEditingTarget(asset);
+    setTargetName(asset.name);
+    setTargetJson(JSON.stringify(asset.value, null, 2));
+  };
+  const cancelTargetEdit = () => {
+    saveTarget.reset();
+    setEditingTarget(null);
+    setTargetName("");
+    setTargetJson(defaultTargetJson);
+  };
+  const beginMcpEdit = (asset: AssetRevision) => {
+    saveMcp.reset();
+    setEditingMcp(asset);
+    setMcpName(asset.name);
+    setMcpJson(JSON.stringify(asset.value, null, 2));
+  };
+  const cancelMcpEdit = () => {
+    saveMcp.reset();
+    setEditingMcp(null);
+    setMcpName("");
+    setMcpJson("{}");
+  };
   return <><div className="connection-grid">
     <section className="panel"><div className="panel-title"><TerminalSquare size={16} /> Execution targets</div><p className="quiet">Host execution is built in. Container and SSH targets are versioned global assets and always require approval by default.</p>
       {targets.data?.assets.map((asset) => {
         const latest = targets.data.assets.filter((candidate) => candidate.assetId === asset.assetId).toSorted((left, right) => right.revision - left.revision)[0];
         const mayTrust = !asset.trusted && latest?.id === asset.id;
-        return <article className="library-card" key={asset.id}><div><strong>{asset.name}</strong><small>revision {asset.revision}</small></div><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "enabled" : "disabled"}</span><code>{JSON.stringify(asset.value)}</code>{mayTrust && <Button variant="danger" className="trust-action" onClick={() => { if (window.confirm(`Create a new trusted revision of ${asset.name}? This target may launch host, container, or SSH commands after per-call approval.`)) trustConnection.mutate(asset); }} disabled={trustConnection.isPending}><ShieldCheck size={12} /> Trust as new revision</Button>}</article>;
-      })}<form className="connection-form" onSubmit={(event) => { event.preventDefault(); createTarget.mutate(); }}><Field label="Target label"><Input value={targetName} onChange={(event) => setTargetName(event.target.value)} required /></Field><Field label="Target JSON"><CodeMirror value={targetJson} onChange={setTargetJson} extensions={[json()]} height="175px" theme="dark" /></Field><Button disabled={!targetName}>Save target</Button></form></section>
+        const mayEdit = latest?.id === asset.id;
+        return <article className={`library-card${editingTarget?.id === asset.id ? " editing" : ""}`} key={asset.id}><div><strong>{asset.name}</strong><small>revision {asset.revision}</small></div><div className="library-actions"><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "enabled" : "disabled"}</span>{mayEdit && <Button variant="ghost" onClick={() => beginTargetEdit(asset)} title="Edit target as a new revision" aria-label={`Edit ${asset.name} target`}><Pencil size={13} /></Button>}</div><code>{JSON.stringify(asset.value)}</code>{mayTrust && <Button variant="danger" className="trust-action" onClick={() => { if (window.confirm(`Create a new trusted revision of ${asset.name}? This target may launch host, container, or SSH commands after per-call approval.`)) trustConnection.mutate(asset); }} disabled={trustConnection.isPending}><ShieldCheck size={12} /> Trust as new revision</Button>}</article>;
+      })}<form className="connection-form" onSubmit={(event) => { event.preventDefault(); saveTarget.mutate(); }}>{editingTarget && <div className="editor-context"><span>Edit target · revision {editingTarget.revision}</span><Button type="button" variant="ghost" onClick={cancelTargetEdit} aria-label="Cancel target editing"><X size={13} /> Cancel</Button></div>}<Field label="Target label"><Input value={targetName} onChange={(event) => setTargetName(event.target.value)} required /></Field><Field label="Target JSON" hint={editingTarget ? "Redacted environment values are preserved. Replace a marker to update it, or delete the key to remove it." : undefined}><CodeMirror value={targetJson} onChange={setTargetJson} extensions={[json()]} height="175px" theme="dark" /></Field>{editingTarget && <p className="warning provider-revision-note">Saving creates revision {editingTarget.revision + 1}. Existing session bindings remain pinned to revision {editingTarget.revision}.</p>}{saveTarget.error && <div className="form-error">{saveTarget.error.message}</div>}<Button disabled={!targetName || saveTarget.isPending}>{saveTarget.isPending ? "Saving…" : editingTarget ? "Save new revision" : "Save target"}</Button></form></section>
     <section className="panel"><div className="panel-title"><Cable size={16} /> MCP servers</div><p className="quiet">Stdio and Streamable HTTP are supported. Prompts and resources remain untrusted until explicitly imported.</p>
       {servers.data?.assets.map((asset) => {
         const latest = servers.data.assets.filter((candidate) => candidate.assetId === asset.assetId).toSorted((left, right) => right.revision - left.revision)[0];
         const mayTrust = !asset.trusted && latest?.id === asset.id;
-        return <article className="library-card" key={asset.id}><div><strong>{asset.name}</strong><small>{asset.tags.join(" · ")} · revision {asset.revision}</small></div><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "enabled" : "disabled"}</span><Button variant="ghost" onClick={() => inspectMcp.mutate(asset.id)} title="Inspect capabilities" disabled={!asset.trusted}><Cable size={13} /></Button><code>{asset.contentHash.slice(0, 16)}…</code>{mayTrust && <Button variant="danger" className="trust-action" onClick={() => { if (window.confirm(`Create a new trusted revision of ${asset.name}? Inspecting or using it may connect to a server or launch its stdio command.`)) trustConnection.mutate(asset); }} disabled={trustConnection.isPending}><ShieldCheck size={12} /> Trust as new revision</Button>}</article>;
-      })}<form className="connection-form" onSubmit={(event) => { event.preventDefault(); createMcp.mutate(); }}><div className="two-fields"><Field label="Server label"><Input value={mcpName} onChange={(event) => setMcpName(event.target.value)} required /></Field><Field label="Transport"><Select value={mcpKind} onChange={(event) => setMcpKind(event.target.value as typeof mcpKind)}><option value="stdio">stdio</option><option value="streamableHttp">Streamable HTTP</option></Select></Field></div><Field label={mcpKind === "stdio" ? "Command" : "URL"}><Input value={mcpAddress} onChange={(event) => setMcpAddress(event.target.value)} required /></Field>{mcpKind === "stdio" && <Field label="Execution target" hint="Host is the default. Select a trusted revision to launch stdio through Docker, Podman, or SSH."><Select value={mcpTargetId} onChange={(event) => setMcpTargetId(event.target.value)}><option value="">Host process</option>{targets.data?.assets.filter((asset) => asset.trusted).map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · r{asset.revision}</option>)}</Select></Field>}<Field label="Optional credential"><Select value={secretId} onChange={(event) => setSecretId(event.target.value)}><option value="">None</option>{secrets.data?.secrets.map((secret) => <option key={secret.id} value={secret.id}>{secret.label}</option>)}</Select></Field><Field label="Roots (JSON array)" hint="Roots default to none. Adding one explicitly exposes that URI and its contents to the MCP server."><CodeMirror value={mcpRoots} onChange={setMcpRoots} extensions={[json()]} height="85px" theme="dark" /></Field><Button disabled={!mcpName || !mcpAddress}>Save MCP profile</Button></form>{trustConnection.error && <div className="form-error">{trustConnection.error.message}</div>}{inspectMcp.error && <div className="form-error">{inspectMcp.error.message}</div>}{inspectMcp.data && <pre className="capability-result">{JSON.stringify(inspectMcp.data, null, 2)}</pre>}</section>
-    <section className="panel boundary-card"><Braces size={22} /><h3>Raw configuration API</h3><p>Target and MCP profile creation is available through the typed asset API while the guided editors mature. Imported scripts are disabled until trusted.</p></section>
+        const mayEdit = latest?.id === asset.id;
+        return <article className={`library-card${editingMcp?.id === asset.id ? " editing" : ""}`} key={asset.id}><div><strong>{asset.name}</strong><small>{asset.tags.join(" · ")} · revision {asset.revision}</small></div><div className="library-actions"><span className={`pill ${asset.trusted ? "pill-safe" : ""}`}>{asset.trusted ? "enabled" : "disabled"}</span><Button variant="ghost" onClick={() => inspectMcp.mutate(asset.id)} title="Inspect capabilities" aria-label={`Inspect ${asset.name} capabilities`} disabled={!asset.trusted}><Cable size={13} /></Button>{mayEdit && <Button variant="ghost" onClick={() => beginMcpEdit(asset)} title="Edit MCP profile as a new revision" aria-label={`Edit ${asset.name} MCP profile`}><Pencil size={13} /></Button>}</div><code>{asset.contentHash.slice(0, 16)}…</code>{mayTrust && <Button variant="danger" className="trust-action" onClick={() => { if (window.confirm(`Create a new trusted revision of ${asset.name}? Inspecting or using it may connect to a server or launch its stdio command.`)) trustConnection.mutate(asset); }} disabled={trustConnection.isPending}><ShieldCheck size={12} /> Trust as new revision</Button>}</article>;
+      })}<form className="connection-form" onSubmit={(event) => { event.preventDefault(); saveMcp.mutate(); }}>{editingMcp && <div className="editor-context"><span>Edit MCP profile · revision {editingMcp.revision}</span><Button type="button" variant="ghost" onClick={cancelMcpEdit} aria-label="Cancel MCP profile editing"><X size={13} /> Cancel</Button></div>}{editingMcp ? <><Field label="Server label"><Input value={mcpName} onChange={(event) => setMcpName(event.target.value)} required /></Field><Field label="Profile JSON" hint="Secret references remain symbolic. Saving updates the embedded profile revision automatically."><CodeMirror value={mcpJson} onChange={setMcpJson} extensions={[json()]} height="260px" theme="dark" /></Field><p className="warning provider-revision-note">Saving creates revision {editingMcp.revision + 1}. Existing session bindings remain pinned to revision {editingMcp.revision}.</p></> : <><div className="two-fields"><Field label="Server label"><Input value={mcpName} onChange={(event) => setMcpName(event.target.value)} required /></Field><Field label="Transport"><Select value={mcpKind} onChange={(event) => setMcpKind(event.target.value as typeof mcpKind)}><option value="stdio">stdio</option><option value="streamableHttp">Streamable HTTP</option></Select></Field></div><Field label={mcpKind === "stdio" ? "Command" : "URL"}><Input value={mcpAddress} onChange={(event) => setMcpAddress(event.target.value)} required /></Field>{mcpKind === "stdio" && <Field label="Execution target" hint="Host is the default. Select a trusted revision to launch stdio through Docker, Podman, or SSH."><Select value={mcpTargetId} onChange={(event) => setMcpTargetId(event.target.value)}><option value="">Host process</option>{targets.data?.assets.filter((asset) => asset.trusted).map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · r{asset.revision}</option>)}</Select></Field>}<Field label="Optional credential"><Select value={secretId} onChange={(event) => setSecretId(event.target.value)}><option value="">None</option>{secrets.data?.secrets.map((secret) => <option key={secret.id} value={secret.id}>{secret.label}</option>)}</Select></Field><Field label="Roots (JSON array)" hint="Roots default to none. Adding one explicitly exposes that URI and its contents to the MCP server."><CodeMirror value={mcpRoots} onChange={setMcpRoots} extensions={[json()]} height="85px" theme="dark" /></Field></>}{saveMcp.error && <div className="form-error">{saveMcp.error.message}</div>}<Button disabled={!mcpName || (!editingMcp && !mcpAddress) || saveMcp.isPending}>{saveMcp.isPending ? "Saving…" : editingMcp ? "Save new revision" : "Save MCP profile"}</Button></form>{trustConnection.error && <div className="form-error">{trustConnection.error.message}</div>}{inspectMcp.error && <div className="form-error">{inspectMcp.error.message}</div>}{inspectMcp.data && <pre className="capability-result">{JSON.stringify(inspectMcp.data, null, 2)}</pre>}</section>
+    <section className="panel boundary-card"><Braces size={22} /><h3>Immutable connection revisions</h3><p>Editing creates a new target or MCP profile revision. Existing sessions stay pinned until the operator explicitly selects the new revision. Imported executable profiles remain disabled until trusted.</p></section>
   </div><section className="panel secret-panel"><div className="panel-title"><KeyRound size={16} /> Secret references</div><p className="quiet">Values are stored plaintext in v1 but are never returned after saving. MCP profiles reference only secret IDs.</p><div className="secret-list">{secrets.data?.secrets.map((secret) => <span className="pill" key={secret.id}>{secret.label}</span>)}</div><form className="connection-form inline-secret" onSubmit={(event) => { event.preventDefault(); createSecret.mutate(); }}><Field label="Label"><Input value={secretLabel} onChange={(event) => setSecretLabel(event.target.value)} required /></Field><Field label="Value"><Input type="password" value={secretValue} onChange={(event) => setSecretValue(event.target.value)} required autoComplete="off" /></Field><Button disabled={!secretLabel || !secretValue}>Store secret</Button></form></section></>;
 }
 
