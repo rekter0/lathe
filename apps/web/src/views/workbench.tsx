@@ -15,6 +15,7 @@ import { isComposerSubmitKey } from "../components/composer-keys.js";
 import { McpApprovalResolver } from "../components/mcp-approval.js";
 import { useOperatorDialog } from "../components/operator-dialog.js";
 import { PayloadWorkbench } from "../components/payload-workbench.js";
+import { WorkbenchSplit } from "../components/workbench-split.js";
 import { useUiStore } from "../store.js";
 import type { AssetRevision, Attachment, AutomationJob, BranchRef, Finding, MessageNode, ModelRun, SafeProvider, WorkbenchData } from "../types.js";
 
@@ -74,18 +75,18 @@ export function WorkbenchPage() {
         <BranchActions data={data} branch={branch} selectedNode={selectedNode} onChanged={() => void workbench.refetch()} />
       </div>
     </div>
-    <div className="workbench-grid">
-      <aside className="tree-pane">
+    <WorkbenchSplit
+      left={<>
         <div className="pane-label"><GitBranch size={14} /> CONVERSATION TREE <span>{data.nodes.length}</span></div>
         <TreeOverview nodes={data.nodes} runs={data.runs} branches={data.branches} activeBranchId={branch.id} selectedNodeId={selectedNode?.id ?? null} onSelect={setSelectedNodeId} />
         <div className="branch-legend">{data.branches.map((item) => <button key={item.id} onClick={() => setBranchId(item.id)} className={item.id === branch.id ? "active" : ""}><span />{item.name}</button>)}</div>
-      </aside>
-      <section className="transcript-pane">
+      </>}
+      center={<>
         {comparisonBranches.length > 0 ? <ComparisonView nodes={data.nodes} runs={data.runs} branches={[branch, ...comparisonBranches]} /> : <Transcript nodes={path} runs={data.runs} data={data} branchId={branch.id} sessionId={data.session.id} liveRunId={transcriptRunId} {...(transcriptRun ? { liveRun: transcriptRun } : {})} onBranchCreated={(id) => { setBranchId(id); void workbench.refetch(); }} onRunStarted={onRunStarted} onSelectRun={useUiStore.getState().setSelectedRunId} />}
         {comparisonBranches.length === 0 && <Composer data={data} branch={branch} onRunStarted={onRunStarted} onChanged={() => void workbench.refetch()} />}
-      </section>
-      <aside className="inspector-pane"><Inspector data={data} branch={branch} selectedNode={selectedNode} onChanged={() => void workbench.refetch()} /></aside>
-    </div>
+      </>}
+      right={<Inspector data={data} branch={branch} selectedNode={selectedNode} onChanged={() => void workbench.refetch()} />}
+    />
   </div>;
 }
 

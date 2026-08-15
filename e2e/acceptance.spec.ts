@@ -253,6 +253,38 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
 
   await page.goto(`/projects/${project.id}/sessions/${sessionId}?token=${encodeURIComponent(E2E_TOKEN)}`);
   await expect(page.getByRole("heading", { name: sessionName })).toBeVisible();
+  const treePane = page.getByRole("complementary", { name: "Conversation tree panel" });
+  const inspectorPane = page.getByRole("complementary", { name: "Inspector panel" });
+  const transcriptPane = page.locator(".transcript-pane");
+  const leftResizeHandle = page.getByRole("separator", { name: "Resize conversation tree panel" });
+  const rightResizeHandle = page.getByRole("separator", { name: "Resize inspector panel" });
+  const initialTreeWidth = await treePane.evaluate((element) => element.getBoundingClientRect().width);
+  const leftHandleBox = await leftResizeHandle.boundingBox();
+  if (!leftHandleBox) throw new Error("Conversation tree resize handle is not visible");
+  await page.mouse.move(leftHandleBox.x + leftHandleBox.width / 2, leftHandleBox.y + 80);
+  await page.mouse.down();
+  await page.mouse.move(leftHandleBox.x - 36, leftHandleBox.y + 80, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(() => treePane.evaluate((element) => element.getBoundingClientRect().width)).toBeLessThan(initialTreeWidth - 20);
+  const resizedTreeWidth = await treePane.evaluate((element) => element.getBoundingClientRect().width);
+
+  const initialRightWidth = Number(await rightResizeHandle.getAttribute("aria-valuenow"));
+  await rightResizeHandle.press("ArrowRight");
+  await expect(rightResizeHandle).toHaveAttribute("aria-valuenow", String(initialRightWidth - 16));
+  const transcriptBeforeCollapse = await transcriptPane.evaluate((element) => element.getBoundingClientRect().width);
+  await page.getByRole("button", { name: "Collapse conversation tree panel" }).click();
+  await page.getByRole("button", { name: "Collapse inspector panel" }).click();
+  await expect(treePane).toHaveAttribute("data-collapsed", "true");
+  await expect(inspectorPane).toHaveAttribute("data-collapsed", "true");
+  await expect.poll(() => transcriptPane.evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThan(transcriptBeforeCollapse + 300);
+
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Expand conversation tree panel" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Expand inspector panel" })).toBeVisible();
+  await page.getByRole("button", { name: "Expand conversation tree panel" }).click();
+  await page.getByRole("button", { name: "Expand inspector panel" }).click();
+  await expect.poll(async () => Math.abs(await treePane.evaluate((element) => element.getBoundingClientRect().width) - resizedTreeWidth)).toBeLessThan(2);
+
   await page.getByLabel("Active branch").selectOption({ label: redBranchName });
   await expect(page.locator(".tree-branch-name", { hasText: redBranchName })).toBeVisible();
   await expect(page.locator(".tree-branch-name", { hasText: blueBranchName })).toBeVisible();
