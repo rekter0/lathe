@@ -30,7 +30,7 @@ button { color: inherit; }
 a { color: inherit; text-decoration: none; }
 code, pre { font-family: var(--mono); }
 
-.app-shell { height: 100%; display: grid; grid-template-rows: 58px auto 1fr; background: radial-gradient(circle at 60% -30%, #1c2e25 0, transparent 40%), var(--bg); }
+.app-shell { height: 100%; display: grid; grid-template-rows: 58px 1fr; background: radial-gradient(circle at 60% -30%, #1c2e25 0, transparent 40%), var(--bg); }
 .topbar { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); padding: 0 18px; background: rgba(11,15,14,.9); backdrop-filter: blur(14px); z-index: 10; }
 .brand { display: flex; align-items: center; gap: 11px; letter-spacing: .08em; }
 .brand-mark { display: inline-grid; place-items: center; width: 31px; height: 31px; color: #0c130e; background: var(--green); font: 900 18px/1 var(--mono); transform: skew(-5deg); box-shadow: 0 0 24px rgba(164,237,78,.15); }
@@ -41,7 +41,6 @@ code, pre { font-family: var(--mono); }
 .status-dot { width: 7px; height: 7px; background: var(--green); border-radius: 50%; box-shadow: 0 0 8px rgba(164,237,78,.8); }
 .icon-button { display: grid; place-items: center; width: 32px; height: 32px; margin-left: 8px; border: 1px solid var(--line); border-radius: 5px; }
 .icon-button:hover { border-color: #47554f; background: var(--surface-2); }
-.security-banner { min-height: 28px; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 5px 12px; color: #d7b873; background: #1e190d; border-bottom: 1px solid #3f3318; font: 10px/1.4 var(--mono); }
 .body-shell { min-height: 0; display: grid; grid-template-columns: 196px minmax(0, 1fr); }
 .body-shell.project-rail-collapsed { grid-template-columns: 48px minmax(0, 1fr); }
 .project-rail { display: flex; min-width: 0; min-height: 0; flex-direction: column; border-right: 1px solid var(--line); background: #0d1210; padding: 12px 10px; }
@@ -225,6 +224,5 @@ code, pre { font-family: var(--mono); }
   .body-shell:not(.project-rail-collapsed) .project-rail { position: relative; z-index: 9; width: 196px; box-shadow: 16px 0 30px rgba(0,0,0,.45); }
   .topbar { padding-inline: 10px; }
   .brand small { display: none; }
-  .security-banner { justify-content: flex-start; }
   .two-fields { grid-template-columns: minmax(0, 1fr); }
 }

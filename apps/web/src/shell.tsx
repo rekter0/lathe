@@ -1,7 +1,7 @@
 import { useEffect, useState, type PropsWithChildren, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, PanelLeftClose, PanelLeftOpen, Settings2 } from "lucide-react";
+import { PanelLeftClose, PanelLeftOpen, Settings2 } from "lucide-react";
 import { api, hasLaunchToken } from "./api.js";
 import type { Project } from "./types.js";
 
@@ -9,7 +9,6 @@ interface AppConfig {
   version: string;
   databaseDialect: string;
   dataDirectory: string;
-  warnings: string[];
 }
 
 const PROJECT_RAIL_STORAGE_KEY = "lathe.project-rail-collapsed";
@@ -120,9 +119,6 @@ export function Shell({ children }: PropsWithChildren) {
           <Link to="/settings" className="icon-button" aria-label="Settings"><Settings2 size={17} /></Link>
         </div>
       </header>
-      {config.data?.warnings[0] && (
-        <div className="security-banner"><AlertTriangle size={14} /> {config.data.warnings[0]}</div>
-      )}
       <ProjectRailLayout
         projects={projects.data?.projects ?? []}
         projectsLoading={projects.isLoading}
