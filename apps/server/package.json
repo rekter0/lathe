@@ -1,0 +1,32 @@
+{
+  "name": "@lathe/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node --enable-source-maps dist/index.js",
+    "test": "vitest run test"
+  },
+  "dependencies": {
+    "@hono/node-server": "catalog:",
+    "@lathe/artifacts": "workspace:*",
+    "@lathe/automation": "workspace:*",
+    "@lathe/db": "workspace:*",
+    "@lathe/domain": "workspace:*",
+    "@lathe/execution": "workspace:*",
+    "@lathe/harness": "workspace:*",
+    "@lathe/mcp": "workspace:*",
+    "@lathe/providers": "workspace:*",
+    "hono": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "tsx": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
