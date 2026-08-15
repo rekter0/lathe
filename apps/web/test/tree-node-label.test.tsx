@@ -2,7 +2,7 @@
 
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { treeNodeAlerts, TreeNodeLabel } from "../src/views/workbench.js";
+import { branchContainingNode, treeNodeAlerts, TreeNodeLabel } from "../src/views/workbench.js";
 import type { BranchRef, MessageNode, ModelRun } from "../src/types.js";
 
 const timestamp = "2026-08-15T00:00:00.000Z";
@@ -111,5 +111,31 @@ describe("conversation tree run alerts", () => {
     expect(alerts.has(assistant.id)).toBe(false);
     expect(alerts.get(tool.id)).toEqual({ kind: "error", label: "Run error · tool-failure" });
     expect(alerts.has(cancelledPrompt.id)).toBe(false);
+  });
+});
+
+describe("conversation tree jump branch selection", () => {
+  const graph = [
+    node({ id: "root", role: "user" }),
+    node({ id: "shared", role: "assistant", parentId: "root" }),
+    node({ id: "main-head", role: "user", parentId: "shared" }),
+    node({ id: "alternate-head", role: "user", parentId: "shared" }),
+    node({ id: "orphan", role: "assistant", parentId: "root" })
+  ];
+  const graphBranches: BranchRef[] = [
+    { id: "main", sessionId: "session-1", name: "main", headNodeId: "main-head", createdAt: timestamp, updatedAt: timestamp },
+    { id: "alternate", sessionId: "session-1", name: "alternate", headNodeId: "alternate-head", createdAt: timestamp, updatedAt: timestamp }
+  ];
+
+  it("keeps the active branch when it already contains the node", () => {
+    expect(branchContainingNode(graph, graphBranches, "main", "shared")?.id).toBe("main");
+  });
+
+  it("selects the branch whose head is the requested node", () => {
+    expect(branchContainingNode(graph, graphBranches, "main", "alternate-head")?.id).toBe("alternate");
+  });
+
+  it("does not mutate a branch to reach an unreferenced historical node", () => {
+    expect(branchContainingNode(graph, graphBranches, "main", "orphan")).toBeNull();
   });
 });

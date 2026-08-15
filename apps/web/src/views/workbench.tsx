@@ -7,9 +7,10 @@ import { json } from "@codemirror/lang-json";
 import { Background, Controls, ReactFlow, type Edge, type Node } from "@xyflow/react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
-import { Activity, Archive, ArrowLeft, Check, ChevronDown, CircleStop, Code2, Download, Eye, FilePlus2, GitBranch, GitCompare, Paperclip, Play, RotateCcw, Save, ShieldAlert, SlidersHorizontal, Split, Wrench } from "lucide-react";
+import { Activity, Archive, ArrowLeft, Check, ChevronDown, CircleStop, Code2, Download, Eye, FilePlus2, GitBranch, GitCompare, LocateFixed, Paperclip, Play, RotateCcw, Save, ShieldAlert, SlidersHorizontal, Split, Wrench } from "lucide-react";
 import { pathToRoot, type JsonObject, type JsonValue, type MessagePart, type ResolvedConfig } from "@lathe/domain";
 import { api, consumeEvents, downloadApiFile, jsonBody } from "../api.js";
+import { ContextMenu, type ContextMenuPoint } from "../components/context-menu.js";
 import { Button, Field, Input, Select, Textarea } from "../components/forms.js";
 import { isComposerSubmitKey } from "../components/composer-keys.js";
 import { McpApprovalResolver } from "../components/mcp-approval.js";
@@ -19,9 +20,23 @@ import { WorkbenchSplit } from "../components/workbench-split.js";
 import { useUiStore } from "../store.js";
 import type { AssetRevision, Attachment, AutomationJob, BranchRef, Finding, MessageNode, ModelRun, SafeProvider, WorkbenchData } from "../types.js";
 
+interface GraphContextMenuState extends ContextMenuPoint {
+  nodeId: string;
+}
+
+export function branchContainingNode(nodes: MessageNode[], branches: BranchRef[], activeBranchId: string, nodeId: string): BranchRef | null {
+  const containsNode = (candidate: BranchRef) => pathToRoot(nodes, candidate.headNodeId).some((node) => node.id === nodeId);
+  const active = branches.find((candidate) => candidate.id === activeBranchId);
+  if (active && containsNode(active)) return active;
+  return branches.find((candidate) => candidate.headNodeId === nodeId)
+    ?? branches.find(containsNode)
+    ?? null;
+}
+
 export function WorkbenchPage() {
   const { projectId, sessionId } = useParams({ from: "/projects/$projectId/sessions/$sessionId" });
   const queryClient = useQueryClient();
+  const dialogs = useOperatorDialog();
   const workbench = useQuery({
     queryKey: ["workbench", sessionId],
     queryFn: () => api<WorkbenchData>(`/api/sessions/${sessionId}`),
@@ -30,8 +45,14 @@ export function WorkbenchPage() {
   const [branchId, setBranchId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [liveRunId, setLiveRunId] = useState<string | null>(null);
+  const [graphContextMenu, setGraphContextMenu] = useState<GraphContextMenuState | null>(null);
+  const [pendingJumpNodeId, setPendingJumpNodeId] = useState<string | null>(null);
   const compareBranchIds = useUiStore((state) => state.compareBranchIds);
   const setCompareBranchIds = useUiStore((state) => state.setCompareBranchIds);
+  const forkGraphNode = useMutation({
+    mutationFn: ({ nodeId, name }: { nodeId: string; name: string }) => api<{ branch: BranchRef }>("/api/branches", { method: "POST", ...jsonBody({ sessionId, name, headNodeId: nodeId }) }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["workbench", sessionId] })
+  });
 
   useEffect(() => {
     if (!branchId && workbench.data) setBranchId(workbench.data.session.activeBranchId ?? workbench.data.branches[0]?.id ?? null);
@@ -47,6 +68,21 @@ export function WorkbenchPage() {
     const hasResultNode = workbench.data.nodes.some((node) => node.sourceRunId === liveRunId);
     if (hasResultNode || (run && ["failed", "cancelled", "interrupted"].includes(run.status))) setLiveRunId(null);
   }, [liveRunId, workbench.data]);
+  useEffect(() => {
+    if (!pendingJumpNodeId || !workbench.data) return;
+    const frame = window.requestAnimationFrame(() => {
+      const message = document.querySelector<HTMLElement>(`.transcript-pane > .transcript-scroll [data-message-node-id="${pendingJumpNodeId}"]`);
+      if (!message) {
+        setPendingJumpNodeId(null);
+        return;
+      }
+      message.scrollIntoView({ behavior: "smooth", block: "center" });
+      message.classList.add("message-jump-target");
+      setPendingJumpNodeId(null);
+      window.setTimeout(() => message.classList.remove("message-jump-target"), 1_600);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [branchId, pendingJumpNodeId, workbench.data]);
 
   if (workbench.isLoading) return <div className="loading-view"><span className="spinner" /> Loading workbench…</div>;
   if (workbench.error || !workbench.data) return <div className="error-view"><h2>Workbench unavailable</h2><p>{workbench.error?.message}</p></div>;
@@ -59,9 +95,32 @@ export function WorkbenchPage() {
   const fallbackLiveRun = data.runs.find((run) => run.branchId === branch.id && ["queued", "streaming"].includes(run.status));
   const transcriptRunId = liveRunId ?? fallbackLiveRun?.id ?? null;
   const transcriptRun = transcriptRunId ? data.runs.find((run) => run.id === transcriptRunId) : undefined;
+  const graphContextNode = graphContextMenu ? data.nodes.find((node) => node.id === graphContextMenu.nodeId) ?? null : null;
+  const graphContextBranch = graphContextNode ? branchContainingNode(data.nodes, data.branches, branch.id, graphContextNode.id) : null;
   const onRunStarted = (runId: string) => {
     setLiveRunId(runId);
     useUiStore.getState().setSelectedRunId(runId);
+  };
+  const jumpToGraphNode = () => {
+    if (!graphContextNode || !graphContextBranch) return;
+    setCompareBranchIds([]);
+    setBranchId(graphContextBranch.id);
+    setSelectedNodeId(graphContextNode.id);
+    setPendingJumpNodeId(graphContextNode.id);
+    setGraphContextMenu(null);
+  };
+  const requestGraphFork = async () => {
+    if (!graphContextNode) return;
+    const node = graphContextNode;
+    setGraphContextMenu(null);
+    const name = await dialogs.prompt({
+      title: "Fork conversation",
+      description: `Create a new branch from this ${node.role} message (${node.id.slice(0, 8)}). The current branch stays unchanged.`,
+      label: "Branch name",
+      defaultValue: `variation-${data.branches.length}`,
+      confirmLabel: "Create branch"
+    });
+    if (name?.trim()) forkGraphNode.mutate({ nodeId: node.id, name: name.trim() });
   };
 
   return <div className="workbench">
@@ -78,7 +137,7 @@ export function WorkbenchPage() {
     <WorkbenchSplit
       left={<>
         <div className="pane-label"><GitBranch size={14} /> CONVERSATION TREE <span>{data.nodes.length}</span></div>
-        <TreeOverview nodes={data.nodes} runs={data.runs} branches={data.branches} activeBranchId={branch.id} selectedNodeId={selectedNode?.id ?? null} onSelect={setSelectedNodeId} />
+        <TreeOverview nodes={data.nodes} runs={data.runs} branches={data.branches} activeBranchId={branch.id} selectedNodeId={selectedNode?.id ?? null} onSelect={setSelectedNodeId} onContextMenu={(nodeId, point) => { forkGraphNode.reset(); setSelectedNodeId(nodeId); setGraphContextMenu({ nodeId, ...point }); }} />
         <div className="branch-legend">{data.branches.map((item) => <button key={item.id} onClick={() => setBranchId(item.id)} className={item.id === branch.id ? "active" : ""}><span />{item.name}</button>)}</div>
       </>}
       center={<>
@@ -87,6 +146,12 @@ export function WorkbenchPage() {
       </>}
       right={<Inspector data={data} branch={branch} selectedNode={selectedNode} onChanged={() => void workbench.refetch()} />}
     />
+    {graphContextMenu && graphContextNode && <ContextMenu point={graphContextMenu} label="Conversation node actions" onClose={() => setGraphContextMenu(null)}>
+      <div className="context-menu-heading"><span>{graphContextNode.role === "assistant" ? "MODEL" : graphContextNode.role === "tool" ? "TOOL RESULT" : "OPERATOR"}</span><code>{graphContextNode.id.slice(0, 8)}</code></div>
+      <button type="button" role="menuitem" onClick={jumpToGraphNode} disabled={!graphContextBranch} title={graphContextBranch ? `Switch to ${graphContextBranch.name} and reveal this message` : "No branch currently contains this message"}><LocateFixed size={14} /><span><strong>Jump here</strong><small>{graphContextBranch ? `Open ${graphContextBranch.name} and reveal message` : "No branch currently reaches this node"}</small></span></button>
+      <button type="button" role="menuitem" onClick={() => void requestGraphFork()} disabled={forkGraphNode.isPending}><GitBranch size={14} /><span><strong>Fork</strong><small>Create a branch from this message</small></span></button>
+      {forkGraphNode.error && <p className="context-menu-error">{forkGraphNode.error.message}</p>}
+    </ContextMenu>}
   </div>;
 }
 
@@ -129,7 +194,7 @@ export function treeNodeAlerts(nodes: MessageNode[], runs: ModelRun[]): Map<stri
   return alerts;
 }
 
-function TreeOverview({ nodes, runs, branches, activeBranchId, selectedNodeId, onSelect }: { nodes: MessageNode[]; runs: ModelRun[]; branches: BranchRef[]; activeBranchId: string; selectedNodeId: string | null; onSelect(id: string): void }) {
+function TreeOverview({ nodes, runs, branches, activeBranchId, selectedNodeId, onSelect, onContextMenu }: { nodes: MessageNode[]; runs: ModelRun[]; branches: BranchRef[]; activeBranchId: string; selectedNodeId: string | null; onSelect(id: string): void; onContextMenu(id: string, point: ContextMenuPoint): void }) {
   const layout = useMemo(() => {
     const alerts = treeNodeAlerts(nodes, runs);
     const children = new Map<string | null, MessageNode[]>();
@@ -158,7 +223,7 @@ function TreeOverview({ nodes, runs, branches, activeBranchId, selectedNodeId, o
     const flowEdges: Edge[] = nodes.filter((node) => node.parentId).map((node) => ({ id: `${node.parentId}-${node.id}`, source: node.parentId!, target: node.id, className: `tree-edge${alerts.has(node.id) ? " tree-edge-alert" : ""}` }));
     return { flowNodes, flowEdges };
   }, [activeBranchId, branches, nodes, runs, selectedNodeId]);
-  return <ReactFlow nodes={layout.flowNodes} edges={layout.flowEdges} fitView minZoom={0.15} maxZoom={1.6} nodesDraggable={false} nodesConnectable={false} elementsSelectable onNodeClick={(_, node) => onSelect(node.id)}>
+  return <ReactFlow nodes={layout.flowNodes} edges={layout.flowEdges} fitView minZoom={0.15} maxZoom={1.6} nodesDraggable={false} nodesConnectable={false} elementsSelectable onNodeClick={(_, node) => onSelect(node.id)} onNodeContextMenu={(event, node) => { event.preventDefault(); onContextMenu(node.id, { x: event.clientX, y: event.clientY }); }}>
     <Background color="#24312d" gap={18} size={1} /><Controls showInteractive={false} position="bottom-left" />
   </ReactFlow>;
 }
@@ -200,7 +265,7 @@ export function TranscriptMessage({ node, run, data, onBranchCreated, onRunStart
   const [raw, setRaw] = useState(false);
   const reasoning = reasoningFromRun(run);
   const providerOutcome = providerOutcomeFromRun(run);
-  return <article className={`message message-${node.role}`}>
+  return <article className={`message message-${node.role}`} data-message-node-id={node.id}>
     <header>
       <span>{node.role === "assistant" ? "MODEL" : node.role === "tool" ? "TOOL RESULT" : "OPERATOR"}</span>
       <time>{new Date(node.createdAt).toLocaleTimeString()}</time>

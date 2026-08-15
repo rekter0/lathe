@@ -258,6 +258,11 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
   const transcriptPane = page.locator(".transcript-pane");
   const leftResizeHandle = page.getByRole("separator", { name: "Resize conversation tree panel" });
   const rightResizeHandle = page.getByRole("separator", { name: "Resize inspector panel" });
+  await expect.poll(async () => {
+    const rendered = await treePane.evaluate((element) => element.getBoundingClientRect().width);
+    const fitted = Number(await leftResizeHandle.getAttribute("aria-valuenow"));
+    return Math.abs(rendered - fitted);
+  }).toBeLessThan(1);
   const initialTreeWidth = await treePane.evaluate((element) => element.getBoundingClientRect().width);
   const leftHandleBox = await leftResizeHandle.boundingBox();
   if (!leftHandleBox) throw new Error("Conversation tree resize handle is not visible");
@@ -288,6 +293,36 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
   await page.getByLabel("Active branch").selectOption({ label: redBranchName });
   await expect(page.locator(".tree-branch-name", { hasText: redBranchName })).toBeVisible();
   await expect(page.locator(".tree-branch-name", { hasText: blueBranchName })).toBeVisible();
+  const blueGraphNode = page.locator(`.react-flow__node[data-id="${blueHead}"]`);
+  await blueGraphNode.click({ button: "right" });
+  const graphMenu = page.getByRole("menu", { name: "Conversation node actions" });
+  await expect(graphMenu).toBeVisible();
+  await expect(graphMenu).toContainText(blueHead!.slice(0, 8));
+  await graphMenu.getByRole("menuitem", { name: /Jump here/ }).click();
+  await expect(page.getByLabel("Active branch")).toHaveValue(blueBranch.id);
+  const jumpedMessage = page.locator(`[data-message-node-id="${blueHead}"]`);
+  await expect.poll(() => jumpedMessage.evaluate((element) => {
+    const scroller = element.closest(".transcript-scroll");
+    if (!scroller) return false;
+    const messageBounds = element.getBoundingClientRect();
+    const scrollBounds = scroller.getBoundingClientRect();
+    return messageBounds.top >= scrollBounds.top && messageBounds.bottom <= scrollBounds.bottom;
+  })).toBe(true);
+
+  const contextForkName = `context-path-${suffix}`;
+  await blueGraphNode.click({ button: "right" });
+  await page.getByRole("menu", { name: "Conversation node actions" }).getByRole("menuitem", { name: /Fork/ }).click();
+  const contextForkDialog = page.getByRole("dialog", { name: "Fork conversation" });
+  await expect(contextForkDialog).toContainText(blueHead!.slice(0, 8));
+  await contextForkDialog.getByLabel("Branch name").fill(contextForkName);
+  await contextForkDialog.getByRole("button", { name: "Create branch" }).click();
+  await expect(page.locator(".tree-branch-name", { hasText: contextForkName })).toBeVisible();
+  await expect.poll(async () => {
+    const latest = await getWorkbench(request, sessionId);
+    return latest.branches.find((candidate) => candidate.name === contextForkName)?.headNodeId;
+  }).toBe(blueHead);
+
+  await page.getByLabel("Active branch").selectOption({ label: redBranchName });
   const uiForkName = `ui-path-${suffix}`;
   await page.getByRole("button", { name: "Fork selected node" }).click();
   const forkDialog = page.getByRole("dialog", { name: "Fork conversation" });
@@ -373,7 +408,7 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
   if (!blockedRun?.resultNodeId) throw new Error("Blocked fixture run did not retain a graph result node");
   const blockedGraphNode = page.locator(`.react-flow__node[data-id="${blockedRun.resultNodeId}"]`);
   await expect(blockedGraphNode).toHaveClass(/tree-node-blocked/);
-  await expect(blockedGraphNode).toHaveCSS("border-color", "rgb(255, 117, 109)");
+  await expect(blockedGraphNode).toHaveCSS("border-color", "rgb(228, 93, 85)");
   await expect(blockedGraphNode.getByLabel("Provider blocked this turn · content-policy")).toBeVisible();
 
   await composer.fill(`[fable-continue] verify recovered policy output ${suffix}`);
