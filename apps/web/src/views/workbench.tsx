@@ -11,6 +11,7 @@ import { Activity, Archive, ArrowLeft, Check, ChevronDown, CircleStop, Download,
 import { pathToRoot, type JsonObject, type JsonValue, type MessagePart, type ResolvedConfig } from "@lathe/domain";
 import { api, consumeEvents, downloadApiFile, jsonBody } from "../api.js";
 import { Button, Field, Input, Select, Textarea } from "../components/forms.js";
+import { isComposerSubmitKey } from "../components/composer-keys.js";
 import { McpApprovalResolver } from "../components/mcp-approval.js";
 import { useUiStore } from "../store.js";
 import type { AssetRevision, Attachment, AutomationJob, BranchRef, Finding, MessageNode, ModelRun, SafeProvider, WorkbenchData } from "../types.js";
@@ -197,13 +198,19 @@ function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchDa
     const form = new FormData(); form.set("file", file);
     return api<{ attachment: Attachment }>(`/api/projects/${data.session.projectId}/attachments`, { method: "POST", body: form });
   }, onSuccess: ({ attachment }) => { setAttachmentIds((ids) => [...ids, attachment.id]); onChanged(); } });
+  const canSend = message.trim().length > 0 && !send.isPending && Boolean(data.session.providerProfileId);
   return <div className="composer">
     {data.attachments.length > 0 && <div className="attachment-picker">{data.attachments.map((attachment) => <label key={attachment.id}><input type="checkbox" checked={attachmentIds.includes(attachment.id)} onChange={(event) => setAttachmentIds((ids) => event.target.checked ? [...ids, attachment.id] : ids.filter((id) => id !== attachment.id))} />{attachment.fileName}</label>)}</div>}
-    <form onSubmit={(event) => { event.preventDefault(); send.mutate(); }}>
+    <form onSubmit={(event) => { event.preventDefault(); if (canSend) send.mutate(); }}>
       <label className="attach-button"><Paperclip size={17} /><input type="file" onChange={(event) => { const file = event.target.files?.[0]; if (file) upload.mutate(file); }} /></label>
-      <Textarea value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Enter the next operator payload…" rows={2} required />
-      <Button disabled={!message || send.isPending || !data.session.providerProfileId}>{send.isPending ? <span className="spinner small" /> : <Play size={16} />} Run</Button>
+      <Textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => {
+        if (!isComposerSubmitKey({ key: event.key, shiftKey: event.shiftKey, isComposing: event.nativeEvent.isComposing })) return;
+        event.preventDefault();
+        if (canSend) event.currentTarget.form?.requestSubmit();
+      }} placeholder="Enter the next operator payload…" rows={2} required aria-keyshortcuts="Enter Shift+Enter" />
+      <Button disabled={!canSend}>{send.isPending ? <span className="spinner small" /> : <Play size={16} />} Run</Button>
     </form>
+    <small className="composer-shortcut">Enter to run · Shift+Enter for a new line</small>
     {!data.session.providerProfileId && <small className="composer-hint">Select a provider and model in the inspector before running.</small>}
     {send.error && <div className="form-error">{send.error.message}</div>}
   </div>;

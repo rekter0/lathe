@@ -262,6 +262,20 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
   await expect(comparisonView).toContainText(restoredPayload);
   await expect(comparisonView).toContainText(bluePayload);
 
+  await page.getByRole("checkbox", { name: blueBranchName }).uncheck();
+  const keyboardPayload = `keyboard first line ${suffix}\nkeyboard second line ${suffix}`;
+  const composer = page.getByPlaceholder("Enter the next operator payload…");
+  await composer.fill(`keyboard first line ${suffix}`);
+  await composer.press("Shift+Enter");
+  await composer.pressSequentially(`keyboard second line ${suffix}`);
+  await expect(composer).toHaveValue(keyboardPayload);
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("");
+  await expect.poll(async () => {
+    const keyboardWorkbench = await getWorkbench(request, sessionId);
+    return keyboardWorkbench.nodes.some((node) => node.parts.some((part) => part.text === keyboardPayload));
+  }).toBe(true);
+
   const automation = (await body<{ job: { id: string } }>(await request.post("/api/automation", {
     headers: apiHeaders,
     data: {
