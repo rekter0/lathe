@@ -77,7 +77,7 @@ export function WorkbenchPage() {
     <div className="workbench-grid">
       <aside className="tree-pane">
         <div className="pane-label"><GitBranch size={14} /> CONVERSATION TREE <span>{data.nodes.length}</span></div>
-        <TreeOverview nodes={data.nodes} branches={data.branches} activeBranchId={branch.id} selectedNodeId={selectedNode?.id ?? null} onSelect={setSelectedNodeId} />
+        <TreeOverview nodes={data.nodes} runs={data.runs} branches={data.branches} activeBranchId={branch.id} selectedNodeId={selectedNode?.id ?? null} onSelect={setSelectedNodeId} />
         <div className="branch-legend">{data.branches.map((item) => <button key={item.id} onClick={() => setBranchId(item.id)} className={item.id === branch.id ? "active" : ""}><span />{item.name}</button>)}</div>
       </aside>
       <section className="transcript-pane">
@@ -89,8 +89,48 @@ export function WorkbenchPage() {
   </div>;
 }
 
-function TreeOverview({ nodes, branches, activeBranchId, selectedNodeId, onSelect }: { nodes: MessageNode[]; branches: BranchRef[]; activeBranchId: string; selectedNodeId: string | null; onSelect(id: string): void }) {
+export interface TreeNodeAlert {
+  kind: "blocked" | "error";
+  label: string;
+}
+
+function alertFromRun(run: ModelRun): TreeNodeAlert | null {
+  const outcome = providerOutcomeFromRun(run);
+  const classification = run.classification ?? outcome?.errorClassification;
+  const blocked = classification === "content-policy" || outcome?.terminalPolicyBlock === true || outcome?.status === "blocked";
+  if (blocked) return { kind: "blocked", label: `Provider blocked this turn${classification ? ` · ${classification}` : ""}` };
+  if (run.status === "cancelled" || classification === "cancelled") return null;
+  if (outcome?.status === "incomplete") return { kind: "error", label: `Run incomplete${outcome.incompleteReason ? ` · ${outcome.incompleteReason}` : ""}` };
+  const error = run.status === "failed" || run.status === "interrupted" || Boolean(classification) || outcome?.status === "error";
+  if (!error) return null;
+  return { kind: "error", label: `Run error${classification ? ` · ${classification}` : run.status === "interrupted" ? " · interrupted" : ""}` };
+}
+
+export function treeNodeAlerts(nodes: MessageNode[], runs: ModelRun[]): Map<string, TreeNodeAlert> {
+  const alerts = new Map<string, TreeNodeAlert>();
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const nodesByRun = new Map<string, MessageNode[]>();
+  for (const node of nodes) {
+    if (!node.sourceRunId) continue;
+    nodesByRun.set(node.sourceRunId, [...(nodesByRun.get(node.sourceRunId) ?? []), node]);
+  }
+  for (const run of runs) {
+    const alert = alertFromRun(run);
+    if (!alert) continue;
+    const runNodes = nodesByRun.get(run.id) ?? [];
+    const target = run.classification === "tool-failure"
+      ? [...runNodes].reverse().find((node) => node.role === "tool") ?? null
+      : run.resultNodeId
+        ? nodeById.get(run.resultNodeId) ?? null
+        : runNodes.at(-1) ?? (run.contextNodeId ? nodeById.get(run.contextNodeId) ?? null : null);
+    if (target) alerts.set(target.id, alert);
+  }
+  return alerts;
+}
+
+function TreeOverview({ nodes, runs, branches, activeBranchId, selectedNodeId, onSelect }: { nodes: MessageNode[]; runs: ModelRun[]; branches: BranchRef[]; activeBranchId: string; selectedNodeId: string | null; onSelect(id: string): void }) {
   const layout = useMemo(() => {
+    const alerts = treeNodeAlerts(nodes, runs);
     const children = new Map<string | null, MessageNode[]>();
     for (const node of nodes) children.set(node.parentId, [...(children.get(node.parentId) ?? []), node]);
     let leaf = 0;
@@ -104,25 +144,27 @@ function TreeOverview({ nodes, branches, activeBranchId, selectedNodeId, onSelec
     for (const root of children.get(null) ?? []) place(root, 0);
     const flowNodes: Node[] = nodes.map((node) => {
       const headBranches = branches.filter((branch) => branch.headNodeId === node.id);
+      const alert = alerts.get(node.id);
       return {
         id: node.id,
         position: positions.get(node.id) ?? { x: 0, y: 0 },
-        data: { label: <TreeNodeLabel role={node.role} branches={headBranches} activeBranchId={activeBranchId} /> },
-        className: `tree-node tree-node-${node.role} ${selectedNodeId === node.id ? "selected" : ""}`,
+        data: { label: <TreeNodeLabel role={node.role} branches={headBranches} activeBranchId={activeBranchId} {...(alert ? { alert } : {})} /> },
+        className: `tree-node tree-node-${node.role}${alert ? ` tree-node-${alert.kind}` : ""}${selectedNodeId === node.id ? " selected" : ""}`,
+        ...(alert ? { ariaLabel: `${node.role} message. ${alert.label}` } : {}),
         style: { width: headBranches.length > 0 ? 100 : 64, height: headBranches.length > 0 ? 46 : 32 }
       };
     });
-    const flowEdges: Edge[] = nodes.filter((node) => node.parentId).map((node) => ({ id: `${node.parentId}-${node.id}`, source: node.parentId!, target: node.id, className: "tree-edge" }));
+    const flowEdges: Edge[] = nodes.filter((node) => node.parentId).map((node) => ({ id: `${node.parentId}-${node.id}`, source: node.parentId!, target: node.id, className: `tree-edge${alerts.has(node.id) ? " tree-edge-alert" : ""}` }));
     return { flowNodes, flowEdges };
-  }, [activeBranchId, branches, nodes, selectedNodeId]);
+  }, [activeBranchId, branches, nodes, runs, selectedNodeId]);
   return <ReactFlow nodes={layout.flowNodes} edges={layout.flowEdges} fitView minZoom={0.15} maxZoom={1.6} nodesDraggable={false} nodesConnectable={false} elementsSelectable onNodeClick={(_, node) => onSelect(node.id)}>
     <Background color="#24312d" gap={18} size={1} /><Controls showInteractive={false} position="bottom-left" />
   </ReactFlow>;
 }
 
-export function TreeNodeLabel({ role, branches, activeBranchId }: { role: MessageNode["role"]; branches: BranchRef[]; activeBranchId: string }) {
+export function TreeNodeLabel({ role, branches, activeBranchId, alert }: { role: MessageNode["role"]; branches: BranchRef[]; activeBranchId: string; alert?: TreeNodeAlert }) {
   const roleLabel = role === "assistant" ? "AI" : role === "tool" ? "TOOL" : "YOU";
-  return <div className="tree-node-label"><span>{roleLabel}</span>{branches.length > 0 && <span className="tree-branch-names" title={branches.map((branch) => branch.name).join(", ")}>{branches.map((branch) => <span className={`tree-branch-name${branch.id === activeBranchId ? " active" : ""}`} key={branch.id}>{branch.name}</span>)}</span>}</div>;
+  return <div className="tree-node-label" title={alert?.label}><span>{roleLabel}</span>{alert && <span className="tree-node-alert-mark" aria-label={alert.label}>!</span>}{branches.length > 0 && <span className="tree-branch-names" title={branches.map((branch) => branch.name).join(", ")}>{branches.map((branch) => <span className={`tree-branch-name${branch.id === activeBranchId ? " active" : ""}`} key={branch.id}>{branch.name}</span>)}</span>}</div>;
 }
 
 function Transcript({ nodes, runs, data, branchId, sessionId, liveRunId = null, liveRun, onBranchCreated, onRunStarted, onSelectRun }: { nodes: MessageNode[]; runs: ModelRun[]; data?: WorkbenchData; branchId?: string; sessionId?: string; liveRunId?: string | null; liveRun?: ModelRun; onBranchCreated?(id: string): void; onRunStarted?(id: string): void; onSelectRun(id: string): void }) {

@@ -32,6 +32,7 @@ interface Branch {
 interface Run {
   id: string;
   status: string;
+  classification: string | null;
   resultNodeId: string | null;
   normalizedOutput: Record<string, unknown> | null;
 }
@@ -335,6 +336,13 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
   await page.getByRole("tab", { name: "Run", exact: true }).click();
   await expect(page.locator(".run-inspector")).toContainText("content-policy");
   await expect(page.locator(".run-inspector .provider-outcome")).toContainText("Provider blocked this generation");
+  const blockedWorkbench = await getWorkbench(request, sessionId);
+  const blockedRun = [...blockedWorkbench.runs].reverse().find((run) => run.classification === "content-policy");
+  if (!blockedRun?.resultNodeId) throw new Error("Blocked fixture run did not retain a graph result node");
+  const blockedGraphNode = page.locator(`.react-flow__node[data-id="${blockedRun.resultNodeId}"]`);
+  await expect(blockedGraphNode).toHaveClass(/tree-node-blocked/);
+  await expect(blockedGraphNode).toHaveCSS("border-color", "rgb(255, 117, 109)");
+  await expect(blockedGraphNode.getByLabel("Provider blocked this turn · content-policy")).toBeVisible();
 
   await composer.fill(`[fable-continue] verify recovered policy output ${suffix}`);
   await composer.press("Enter");
