@@ -7,7 +7,7 @@ import { json } from "@codemirror/lang-json";
 import { Background, Controls, ReactFlow, type Edge, type Node } from "@xyflow/react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
-import { Activity, Archive, ArrowLeft, Check, ChevronDown, CircleStop, Download, FilePlus2, GitBranch, GitCompare, Paperclip, Play, RotateCcw, Save, SlidersHorizontal, Split, Wrench } from "lucide-react";
+import { Activity, Archive, ArrowLeft, Check, ChevronDown, CircleStop, Code2, Download, Eye, FilePlus2, GitBranch, GitCompare, Paperclip, Play, RotateCcw, Save, SlidersHorizontal, Split, Wrench } from "lucide-react";
 import { pathToRoot, type JsonObject, type JsonValue, type MessagePart, type ResolvedConfig } from "@lathe/domain";
 import { api, consumeEvents, downloadApiFile, jsonBody } from "../api.js";
 import { Button, Field, Input, Select, Textarea } from "../components/forms.js";
@@ -65,7 +65,7 @@ export function WorkbenchPage() {
         <div className="branch-legend">{data.branches.map((item) => <button key={item.id} onClick={() => setBranchId(item.id)} className={item.id === branch.id ? "active" : ""}><span />{item.name}</button>)}</div>
       </aside>
       <section className="transcript-pane">
-        {comparisonBranches.length > 0 ? <ComparisonView nodes={data.nodes} branches={[branch, ...comparisonBranches]} /> : <Transcript nodes={path} runs={data.runs} data={data} onBranchCreated={(id) => { setBranchId(id); void workbench.refetch(); }} onRunStarted={useUiStore.getState().setSelectedRunId} onSelectRun={useUiStore.getState().setSelectedRunId} />}
+        {comparisonBranches.length > 0 ? <ComparisonView nodes={data.nodes} runs={data.runs} branches={[branch, ...comparisonBranches]} /> : <Transcript nodes={path} runs={data.runs} data={data} onBranchCreated={(id) => { setBranchId(id); void workbench.refetch(); }} onRunStarted={useUiStore.getState().setSelectedRunId} onSelectRun={useUiStore.getState().setSelectedRunId} />}
         {comparisonBranches.length === 0 && <Composer data={data} branch={branch} onRunStarted={useUiStore.getState().setSelectedRunId} onChanged={() => void workbench.refetch()} />}
       </section>
       <aside className="inspector-pane"><Inspector data={data} branch={branch} selectedNode={selectedNode} onChanged={() => void workbench.refetch()} /></aside>
@@ -106,13 +106,35 @@ function Transcript({ nodes, runs, data, onBranchCreated, onRunStarted, onSelect
     {nodes.length === 0 && <div className="transcript-empty"><Split size={28} /><h2>The branch starts here</h2><p>Send a payload below. Every response becomes a forkable node.</p></div>}
     {nodes.map((node) => {
       const run = node.sourceRunId ? runs.find((item) => item.id === node.sourceRunId) : undefined;
-      return <article key={node.id} className={`message message-${node.role}`}>
-        <header><span>{node.role === "assistant" ? "MODEL" : node.role === "tool" ? "TOOL RESULT" : "OPERATOR"}</span><time>{new Date(node.createdAt).toLocaleTimeString()}</time>{run && <button onClick={() => onSelectRun(run.id)}>inspect run</button>}{node.role === "user" && data && <ResendAction node={node} data={data} {...(onBranchCreated ? { onBranchCreated } : {})} {...(onRunStarted ? { onRunStarted } : {})} />}</header>
-        <div className="message-body">{node.parts.map((part, index) => <MessagePartView key={`${node.id}-${index}`} part={part} />)}</div>
-        <footer><code>{node.id.slice(0, 8)}</code>{node.configSnapshotId && <span>config {node.configSnapshotId.slice(0, 8)}</span>}</footer>
-      </article>;
+      return <TranscriptMessage key={node.id} node={node} {...(run ? { run } : {})} {...(data ? { data } : {})} {...(onBranchCreated ? { onBranchCreated } : {})} {...(onRunStarted ? { onRunStarted } : {})} onSelectRun={onSelectRun} />;
     })}
   </div>;
+}
+
+export function TranscriptMessage({ node, run, data, onBranchCreated, onRunStarted, onSelectRun }: { node: MessageNode; run?: ModelRun; data?: WorkbenchData; onBranchCreated?(id: string): void; onRunStarted?(id: string): void; onSelectRun(id: string): void }) {
+  const [raw, setRaw] = useState(false);
+  const reasoning = reasoningFromRun(run);
+  const toggleLabel = raw ? "Show rendered message" : "Show raw message text";
+  return <article className={`message message-${node.role}`}>
+    <header>
+      <span>{node.role === "assistant" ? "MODEL" : node.role === "tool" ? "TOOL RESULT" : "OPERATOR"}</span>
+      <time>{new Date(node.createdAt).toLocaleTimeString()}</time>
+      {run && <button onClick={() => onSelectRun(run.id)}>inspect run</button>}
+      <button className="message-view-toggle" type="button" aria-label={toggleLabel} aria-pressed={raw} onClick={() => setRaw((current) => !current)}>{raw ? <Eye size={10} /> : <Code2 size={10} />}{raw ? "rendered" : "raw"}</button>
+      {node.role === "user" && data && <ResendAction node={node} data={data} {...(onBranchCreated ? { onBranchCreated } : {})} {...(onRunStarted ? { onRunStarted } : {})} />}
+    </header>
+    <div className={`message-body${raw ? " is-raw" : ""}`}>
+      {reasoning && <details className="message-reasoning" open><summary><Activity size={12} /> Reasoning <span>{reasoning.length} chars</span></summary><div>{raw ? <RawText text={reasoning} /> : <RenderedText text={reasoning} />}</div></details>}
+      {node.parts.map((part, index) => <MessagePartView key={`${node.id}-${index}`} part={part} raw={raw} />)}
+    </div>
+    <footer><code>{node.id.slice(0, 8)}</code>{node.configSnapshotId && <span>config {node.configSnapshotId.slice(0, 8)}</span>}</footer>
+  </article>;
+}
+
+function reasoningFromRun(run?: ModelRun): string | null {
+  if (!run?.normalizedOutput || typeof run.normalizedOutput !== "object" || Array.isArray(run.normalizedOutput)) return null;
+  const reasoning = run.normalizedOutput.reasoning;
+  return typeof reasoning === "string" && reasoning.length > 0 ? reasoning : null;
 }
 
 function ResendAction({ node, data, onBranchCreated, onRunStarted }: { node: MessageNode; data: WorkbenchData; onBranchCreated?(id: string): void; onRunStarted?(id: string): void }) {
@@ -135,8 +157,17 @@ function ResendAction({ node, data, onBranchCreated, onRunStarted }: { node: Mes
   return <button className="message-resend" onClick={() => resend.mutate()} disabled={resend.isPending} title={resend.error?.message ?? "Edit this operator turn and resend it on a new sibling branch"}><RotateCcw size={10} />{resend.isPending ? "branching…" : "edit / resend"}</button>;
 }
 
-function MessagePartView({ part }: { part: MessagePart }) {
-  if (part.type === "text") return <ReactMarkdown skipHtml rehypePlugins={[rehypeSanitize]}>{part.text}</ReactMarkdown>;
+function RenderedText({ text }: { text: string }) {
+  return <ReactMarkdown skipHtml rehypePlugins={[rehypeSanitize]}>{text}</ReactMarkdown>;
+}
+
+function RawText({ text }: { text: string }) {
+  return <pre className="message-raw">{text}</pre>;
+}
+
+function MessagePartView({ part, raw }: { part: MessagePart; raw: boolean }) {
+  if (raw) return <RawText text={part.type === "text" ? part.text : JSON.stringify(part, null, 2)} />;
+  if (part.type === "text") return <RenderedText text={part.text} />;
   if (part.type === "attachment") return <div className="attachment-chip"><Paperclip size={13} />{part.name}<small>{part.mediaType}</small></div>;
   if (part.type === "tool-call") return <div className="tool-call"><Wrench size={14} /><strong>{part.name}</strong><code>{JSON.stringify(part.arguments, null, 2)}</code></div>;
   return <div className={`tool-result ${part.isError ? "is-error" : ""}`}><Check size={14} /><strong>{part.name}</strong><code>{JSON.stringify(part.result, null, 2)}</code></div>;
@@ -150,14 +181,14 @@ function ComparisonPicker({ branches, activeBranch, selectedIds, onChange }: { b
   })}{candidates.length === 0 && <small>No other branches yet.</small>}</div></details>;
 }
 
-function ComparisonView({ nodes, branches }: { nodes: MessageNode[]; branches: BranchRef[] }) {
+function ComparisonView({ nodes, runs, branches }: { nodes: MessageNode[]; runs: ModelRun[]; branches: BranchRef[] }) {
   const paths = branches.map((branch) => pathToRoot(nodes, branch.headNodeId));
   let sharedLength = 0;
   while (paths.every((path) => path[sharedLength]?.id === paths[0]?.[sharedLength]?.id) && paths[0]?.[sharedLength]) sharedLength += 1;
   const ancestor = paths[0]?.[sharedLength - 1] ?? null;
   return <div className="comparison-view">
     <div className="comparison-summary"><GitCompare size={16} /> Common ancestor: {ancestor?.id.slice(0, 8) ?? "none"} · {sharedLength} shared nodes · {branches.length} paths</div>
-    <div className="comparison-columns" style={{ gridTemplateColumns: `repeat(${branches.length}, minmax(0, 1fr))` }}>{branches.map((branch, index) => <section key={branch.id}><h3>{branch.name}</h3><Transcript nodes={paths[index]?.slice(sharedLength) ?? []} runs={[]} onSelectRun={() => undefined} /></section>)}</div>
+    <div className="comparison-columns" style={{ gridTemplateColumns: `repeat(${branches.length}, minmax(0, 1fr))` }}>{branches.map((branch, index) => <section key={branch.id}><h3>{branch.name}</h3><Transcript nodes={paths[index]?.slice(sharedLength) ?? []} runs={runs} onSelectRun={() => undefined} /></section>)}</div>
   </div>;
 }
 

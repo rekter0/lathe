@@ -123,7 +123,11 @@ const server = createServer(async (request, response) => {
         model: "fixture-model",
         choices: [{
           index: 0,
-          delta: { role: "assistant", content: `Fixture response: ${prompt}` },
+          delta: {
+            role: "assistant",
+            reasoning: `Fixture **reasoning** for: ${prompt}`,
+            content: `Fixture **response**: ${prompt}`
+          },
           finish_reason: null
         }]
       },

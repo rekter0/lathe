@@ -275,6 +275,17 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
     const keyboardWorkbench = await getWorkbench(request, sessionId);
     return keyboardWorkbench.nodes.some((node) => node.parts.some((part) => part.text === keyboardPayload));
   }).toBe(true);
+  const latestModelMessage = page.locator("article.message-assistant").last();
+  await expect(latestModelMessage).toContainText(keyboardPayload);
+  await expect(latestModelMessage.locator(".message-reasoning > summary")).toContainText("Reasoning");
+  await expect(latestModelMessage.locator(".message-reasoning strong")).toHaveText("reasoning");
+  await expect(latestModelMessage.locator(".message-body > p strong")).toHaveText("response");
+  await latestModelMessage.getByRole("button", { name: "Show raw message text" }).click();
+  await expect(latestModelMessage.getByRole("button", { name: "Show rendered message" })).toBeVisible();
+  await expect(latestModelMessage.locator("pre.message-raw")).toContainText([
+    "Fixture **reasoning** for:",
+    "Fixture **response**:"
+  ]);
 
   const automation = (await body<{ job: { id: string } }>(await request.post("/api/automation", {
     headers: apiHeaders,
