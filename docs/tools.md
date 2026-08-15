@@ -63,7 +63,7 @@ function formatResult(input) {
 
 The QuickJS handler only builds an execution request and formats the result. It has no filesystem, network, process, environment, or import access. `/bin/bash` must exist inside the selected container.
 
-Create a container target under **Settings → Targets & MCP**:
+Create a container target under **Settings → Targets**:
 
 ```json
 {

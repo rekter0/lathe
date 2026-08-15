@@ -100,11 +100,12 @@ test("protects the local API and creates a persistent workbench", async ({ page,
   await page.locator(".implementation-panel form").getByRole("button", { name: "Save new revision" }).click();
   await expect(page.getByRole("button", { name: `Edit ${revisedImplementationLabel} implementation` })).toBeVisible();
 
-  await page.getByRole("tab", { name: "Targets & MCP" }).click();
+  await page.getByRole("tab", { name: "Targets" }).click();
   await page.getByRole("button", { name: `Edit ${targetLabel} target` }).click();
   await page.getByLabel("Target label").fill(revisedTargetLabel);
   await page.getByRole("button", { name: "Save new revision" }).click();
   await expect(page.getByRole("button", { name: `Edit ${revisedTargetLabel} target` })).toBeVisible();
+  await page.getByRole("tab", { name: "MCP", exact: true }).click();
   await page.getByRole("button", { name: `Edit ${mcpLabel} MCP profile` }).click();
   await page.getByLabel("Server label").fill(revisedMcpLabel);
   await page.getByRole("button", { name: "Save new revision" }).click();
