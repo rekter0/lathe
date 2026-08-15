@@ -179,7 +179,7 @@ test("protects the local API and creates a persistent workbench", async ({ page,
 
   await page.getByRole("button", { name: "New project" }).click();
   const dialog = page.getByRole("dialog", { name: "Create a project" });
-  await dialog.getByLabel("Name").fill(projectName);
+  await dialog.getByLabel("Name", { exact: true }).fill(projectName);
   await dialog.getByLabel("Description").fill("Playwright acceptance fixture");
   await dialog.getByRole("button", { name: "Create project" }).click();
 

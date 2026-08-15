@@ -15,9 +15,10 @@ Lathe is deliberately not an autonomous agent or a scanner. The operator chooses
 - Manual and deterministic mock tools, QuickJS-authored command builders/formatters, and host, existing Docker/Podman container, or system OpenSSH targets.
 - MCP client support through the official TypeScript SDK over stdio and Streamable HTTP, with negotiated capability snapshots and explicit approval gates.
 - Redacted raw provider/MCP traces, content-addressed attachments, persisted automation jobs, and checksum-verified `.lathe-harness` and `.lathe-finding` bundles.
+- A Payload Workbench for deterministic transforms and pipelines, context-aware helper-model generation, independent candidate comparison/refinement, and immutable payload history.
 - SQLite by default or PostgreSQL selected at startup, both behind the same repository contract.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for package boundaries, persistence rules, and run flow, and [docs/tools.md](./docs/tools.md) for tool, Bash, container-user, target, and execution-permission examples.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for package boundaries and persistence rules, [docs/tools.md](./docs/tools.md) for tool and execution-target examples, and [docs/payload-workbench.md](./docs/payload-workbench.md) for generator setup and the Transform/Generate/History workflow.
 
 ## Quick start
 
@@ -88,6 +89,18 @@ SQLite and PostgreSQL migrations run automatically at server startup.
 7. Save a reusable harness or record a finding and export its reproducible bundle.
 
 Provider profile body/header overrides cannot replace Lathe-owned request fields such as the model, messages/input, tools, or streaming flag. Lathe does not retry provider requests automatically, and stream failures after an HTTP 200 remain classified failures with their preceding trace evidence.
+
+## Payload Workbench
+
+The magic-wand button beside the session composer opens three explicit, non-executing workflows:
+
+- **Transform** applies allowlisted encoders, text transforms, framing helpers, variables, or a saved deterministic pipeline. Each persisted step is an immutable payload revision.
+- **Generate** asks a separately configured helper model for one to four candidates. Project/session briefings, active-branch context, target configuration, reusable instructions, and ordered techniques are independently selectable and previewable.
+- **History** restores prior generation and refinement groups without rewriting the conversation tree.
+
+The separate **Payload Workbench settings** wand in the global toolbar is available on every page. It manages generator profiles, reusable instructions, techniques, pipelines, and defaults. HTTP generator profiles reuse existing provider revisions and secret handling. Codex App Server profiles reuse an installed Codex executable and its existing ChatGPT login; Lathe neither stores Codex tokens nor exposes the helper run as a target-model conversation turn.
+
+Generated or partially generated text never runs automatically. **Use as next prompt** only copies the selected revision into the composer, where the operator can inspect or edit it before pressing **Run**. Read the complete setup, context-budget, subscription-backend, and provenance guide in [docs/payload-workbench.md](./docs/payload-workbench.md).
 
 ## Tools and MCP
 
