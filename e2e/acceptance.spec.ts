@@ -272,9 +272,25 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
 
   await page.getByRole("checkbox", { name: blueBranchName }).uncheck();
   await page.locator(".comparison-picker > summary").click();
+  const workbenchDraft = `probe path / ${suffix}`;
+  const composer = page.getByPlaceholder("Enter the next operator payload…");
+  await composer.fill(workbenchDraft);
+  await page.getByRole("button", { name: "Open payload workbench" }).click();
+  const payloadDialog = page.getByRole("dialog", { name: "Payload workbench" });
+  const payloadEditor = payloadDialog.getByRole("textbox", { name: "Next prompt" });
+  await expect(payloadEditor).toHaveValue(workbenchDraft);
+  await payloadDialog.getByRole("button", { name: "URL encode" }).click();
+  await expect(payloadEditor).toHaveValue(encodeURIComponent(workbenchDraft));
+  await payloadDialog.getByRole("button", { name: "Undo" }).click();
+  await payloadDialog.getByRole("button", { name: "XML payload" }).click();
+  const framedDraft = `<payload>\n${workbenchDraft}\n</payload>`;
+  await expect(payloadEditor).toHaveValue(framedDraft);
+  await payloadDialog.getByRole("button", { name: "Use as next prompt" }).click();
+  await expect(payloadDialog).toHaveCount(0);
+  await expect(composer).toHaveValue(framedDraft);
+
   const keyboardFirstLine = `[stream-chat] keyboard first line ${suffix}`;
   const keyboardPayload = `${keyboardFirstLine}\nkeyboard second line ${suffix}`;
-  const composer = page.getByPlaceholder("Enter the next operator payload…");
   await composer.fill(keyboardFirstLine);
   await composer.press("Shift+Enter");
   await composer.pressSequentially(`keyboard second line ${suffix}`);

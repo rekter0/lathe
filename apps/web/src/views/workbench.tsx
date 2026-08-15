@@ -14,6 +14,7 @@ import { Button, Field, Input, Select, Textarea } from "../components/forms.js";
 import { isComposerSubmitKey } from "../components/composer-keys.js";
 import { McpApprovalResolver } from "../components/mcp-approval.js";
 import { useOperatorDialog } from "../components/operator-dialog.js";
+import { PayloadWorkbench } from "../components/payload-workbench.js";
 import { useUiStore } from "../store.js";
 import type { AssetRevision, Attachment, AutomationJob, BranchRef, Finding, MessageNode, ModelRun, SafeProvider, WorkbenchData } from "../types.js";
 
@@ -420,7 +421,10 @@ function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchDa
         event.preventDefault();
         if (canSend) event.currentTarget.form?.requestSubmit();
       }} placeholder="Enter the next operator payload…" rows={2} required aria-keyshortcuts="Enter Shift+Enter" />
-      <Button disabled={!canSend}>{send.isPending ? <span className="spinner small" /> : <Play size={16} />} Run</Button>
+      <div className="composer-actions">
+        <PayloadWorkbench value={message} onUse={setMessage} />
+        <Button disabled={!canSend}>{send.isPending ? <span className="spinner small" /> : <Play size={16} />} Run</Button>
+      </div>
     </form>
     <small className="composer-shortcut">Enter to run · Shift+Enter for a new line</small>
     {!data.session.providerProfileId && <small className="composer-hint">Select a provider and model in the inspector before running.</small>}
