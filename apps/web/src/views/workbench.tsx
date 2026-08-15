@@ -33,6 +33,23 @@ export function branchContainingNode(nodes: MessageNode[], branches: BranchRef[]
     ?? null;
 }
 
+function randomBranchSuffix(): string {
+  return globalThis.crypto.randomUUID().replaceAll("-", "").slice(0, 8);
+}
+
+export function suggestedForkBranchName(branches: readonly Pick<BranchRef, "name">[], createSuffix: () => string = randomBranchSuffix): string {
+  const existingNames = new Set(branches.map((branch) => branch.name));
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const suffix = createSuffix().toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 8);
+    if (!suffix) continue;
+    const candidate = `variation-${suffix}`;
+    if (!existingNames.has(candidate)) return candidate;
+  }
+  let fallback = `variation-${Date.now().toString(36)}`;
+  while (existingNames.has(fallback)) fallback += "x";
+  return fallback;
+}
+
 export function WorkbenchPage() {
   const { projectId, sessionId } = useParams({ from: "/projects/$projectId/sessions/$sessionId" });
   const queryClient = useQueryClient();
@@ -117,7 +134,7 @@ export function WorkbenchPage() {
       title: "Fork conversation",
       description: `Create a new branch from this ${node.role} message (${node.id.slice(0, 8)}). The current branch stays unchanged.`,
       label: "Branch name",
-      defaultValue: `variation-${data.branches.length}`,
+      defaultValue: suggestedForkBranchName(data.branches),
       confirmLabel: "Create branch"
     });
     if (name?.trim()) forkGraphNode.mutate({ nodeId: node.id, name: name.trim() });
@@ -487,7 +504,7 @@ function BranchActions({ data, branch, selectedNode, onChanged }: { data: Workbe
   const rewind = useMutation({ mutationFn: () => api(`/api/branches/${branch.id}/head`, { method: "PATCH", ...jsonBody({ headNodeId: selectedNode?.id ?? null }) }), onSuccess: onChanged });
   const checkpoint = useMutation({ mutationFn: (name: string) => api(`/api/sessions/${data.session.id}/checkpoints`, { method: "POST", ...jsonBody({ name, nodeId: selectedNode?.id ?? branch.headNodeId }) }), onSuccess: onChanged });
   const requestFork = async () => {
-    const name = await dialogs.prompt({ title: "Fork conversation", description: "Create a new branch from the selected node without changing the current path.", label: "Branch name", defaultValue: `variation-${data.branches.length}`, confirmLabel: "Create branch" });
+    const name = await dialogs.prompt({ title: "Fork conversation", description: "Create a new branch from the selected node without changing the current path.", label: "Branch name", defaultValue: suggestedForkBranchName(data.branches), confirmLabel: "Create branch" });
     if (name?.trim()) fork.mutate(name.trim());
   };
   const requestCheckpoint = async () => {

@@ -2,7 +2,7 @@
 
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { branchContainingNode, treeNodeAlerts, TreeNodeLabel } from "../src/views/workbench.js";
+import { branchContainingNode, suggestedForkBranchName, treeNodeAlerts, TreeNodeLabel } from "../src/views/workbench.js";
 import type { BranchRef, MessageNode, ModelRun } from "../src/types.js";
 
 const timestamp = "2026-08-15T00:00:00.000Z";
@@ -137,5 +137,20 @@ describe("conversation tree jump branch selection", () => {
 
   it("does not mutate a branch to reach an unreferenced historical node", () => {
     expect(branchContainingNode(graph, graphBranches, "main", "orphan")).toBeNull();
+  });
+});
+
+describe("fork branch suggestions", () => {
+  it("uses a compact randomized suffix", () => {
+    expect(suggestedForkBranchName([], () => "A1B2-C3D4-extra")).toBe("variation-a1b2c3d4");
+  });
+
+  it("retries when a generated name already exists", () => {
+    const existing: BranchRef[] = [
+      { id: "existing", sessionId: "session-1", name: "variation-deadbeef", headNodeId: null, createdAt: timestamp, updatedAt: timestamp }
+    ];
+    const suffixes = ["deadbeef", "cafe1234"];
+
+    expect(suggestedForkBranchName(existing, () => suffixes.shift() ?? "unused00")).toBe("variation-cafe1234");
   });
 });

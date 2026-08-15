@@ -314,7 +314,9 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
   await page.getByRole("menu", { name: "Conversation node actions" }).getByRole("menuitem", { name: /Fork/ }).click();
   const contextForkDialog = page.getByRole("dialog", { name: "Fork conversation" });
   await expect(contextForkDialog).toContainText(blueHead!.slice(0, 8));
-  await contextForkDialog.getByLabel("Branch name").fill(contextForkName);
+  const contextForkInput = contextForkDialog.getByLabel("Branch name");
+  await expect(contextForkInput).toHaveValue(/^variation-[a-z0-9]{8}$/);
+  await contextForkInput.fill(contextForkName);
   await contextForkDialog.getByRole("button", { name: "Create branch" }).click();
   await expect(page.locator(".tree-branch-name", { hasText: contextForkName })).toBeVisible();
   await expect.poll(async () => {
@@ -326,7 +328,9 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
   const uiForkName = `ui-path-${suffix}`;
   await page.getByRole("button", { name: "Fork selected node" }).click();
   const forkDialog = page.getByRole("dialog", { name: "Fork conversation" });
-  await forkDialog.getByLabel("Branch name").fill(uiForkName);
+  const toolbarForkInput = forkDialog.getByLabel("Branch name");
+  await expect(toolbarForkInput).toHaveValue(/^variation-[a-z0-9]{8}$/);
+  await toolbarForkInput.fill(uiForkName);
   await forkDialog.getByRole("button", { name: "Create branch" }).click();
   await expect(page.locator(".tree-branch-name", { hasText: uiForkName })).toBeVisible();
   await page.locator("details.comparison-picker > summary").click();
