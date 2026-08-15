@@ -35,13 +35,16 @@ function lastUserText(body) {
   return textContent(message?.content);
 }
 
-function sendSse(response, frames) {
+async function sendSse(response, frames, delayMs = 0) {
   response.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-cache",
     connection: "keep-alive"
   });
-  for (const frame of frames) response.write(`data: ${JSON.stringify(frame)}\n\n`);
+  for (const frame of frames) {
+    response.write(`data: ${JSON.stringify(frame)}\n\n`);
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
   response.end("data: [DONE]\n\n");
 }
 
@@ -86,7 +89,7 @@ const server = createServer(async (request, response) => {
     const prompt = lastUserText(body);
     if (prompt.includes("[call-tool]")) {
       const callId = `fixture-call-${responseSequence}`;
-      sendSse(response, [
+      await sendSse(response, [
         {
           id: `chatcmpl-${responseSequence}`,
           model: "fixture-model",
@@ -117,7 +120,41 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    sendSse(response, [
+    if (prompt.includes("[stream-chat]")) {
+      await sendSse(response, [
+        {
+          id: `chatcmpl-${responseSequence}`,
+          model: "fixture-model",
+          choices: [{
+            index: 0,
+            delta: {
+              role: "assistant",
+              reasoning: "Streaming **reasoning**: ",
+              content: "Streaming **answer**: "
+            },
+            finish_reason: null
+          }]
+        },
+        {
+          id: `chatcmpl-${responseSequence}`,
+          model: "fixture-model",
+          choices: [{
+            index: 0,
+            delta: { reasoning: prompt, content: prompt },
+            finish_reason: null
+          }]
+        },
+        {
+          id: `chatcmpl-${responseSequence}`,
+          model: "fixture-model",
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }
+        }
+      ], 600);
+      return;
+    }
+
+    await sendSse(response, [
       {
         id: `chatcmpl-${responseSequence}`,
         model: "fixture-model",

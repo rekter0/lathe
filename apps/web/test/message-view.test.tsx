@@ -2,7 +2,7 @@
 
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { TranscriptMessage } from "../src/views/workbench.js";
+import { streamOutputFromEvents, TranscriptMessage, type RunEventEnvelope } from "../src/views/workbench.js";
 import type { MessageNode, ModelRun } from "../src/types.js";
 
 const createdAt = "2026-08-15T12:00:00.000Z";
@@ -79,5 +79,29 @@ describe("transcript message views", () => {
     expect(within(messages[0]!).getByRole("button", { name: "Show rendered message" })).not.toBeNull();
     expect(within(messages[1]!).getByRole("button", { name: "Show raw message text" })).not.toBeNull();
     expect(within(messages[1]!).getByText("second").tagName).toBe("STRONG");
+  });
+
+  it("reconstructs fragmented reasoning and answer text from run SSE envelopes", () => {
+    const event = (id: number, type: string, data: RunEventEnvelope["data"]): RunEventEnvelope => ({
+      id,
+      channel: "run:run-1",
+      type,
+      timestamp: createdAt,
+      data
+    });
+
+    expect(streamOutputFromEvents([
+      event(1, "run.started", { runId: "run-1" }),
+      event(2, "reasoning.delta", { type: "reasoning.delta", text: "check ", index: 0 }),
+      event(3, "provider.trace", { ignored: true }),
+      event(4, "reasoning.delta", { type: "reasoning.delta", text: "constraints", index: 0 }),
+      event(5, "content.delta", { type: "content.delta", text: "final ", index: 0 }),
+      event(6, "content.delta", { type: "content.delta", text: "answer", index: 0 }),
+      event(7, "response.completed", { type: "response.completed" })
+    ])).toEqual({
+      text: "final answer",
+      reasoning: "check constraints",
+      phase: "finalizing"
+    });
   });
 });

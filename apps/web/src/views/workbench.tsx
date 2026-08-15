@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import * as Tabs from "@radix-ui/react-tabs";
@@ -26,6 +26,7 @@ export function WorkbenchPage() {
   });
   const [branchId, setBranchId] = useState<string | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [liveRunId, setLiveRunId] = useState<string | null>(null);
   const compareBranchIds = useUiStore((state) => state.compareBranchIds);
   const setCompareBranchIds = useUiStore((state) => state.setCompareBranchIds);
 
@@ -37,6 +38,12 @@ export function WorkbenchPage() {
     void consumeEvents(`session:${sessionId}`, controller.signal, () => void queryClient.invalidateQueries({ queryKey: ["workbench", sessionId] })).catch(() => undefined);
     return () => controller.abort();
   }, [queryClient, sessionId]);
+  useEffect(() => {
+    if (!liveRunId || !workbench.data) return;
+    const run = workbench.data.runs.find((item) => item.id === liveRunId);
+    const hasResultNode = workbench.data.nodes.some((node) => node.sourceRunId === liveRunId);
+    if (hasResultNode || (run && ["failed", "cancelled", "interrupted"].includes(run.status))) setLiveRunId(null);
+  }, [liveRunId, workbench.data]);
 
   if (workbench.isLoading) return <div className="loading-view"><span className="spinner" /> Loading workbench…</div>;
   if (workbench.error || !workbench.data) return <div className="error-view"><h2>Workbench unavailable</h2><p>{workbench.error?.message}</p></div>;
@@ -46,6 +53,13 @@ export function WorkbenchPage() {
   const path = pathToRoot(data.nodes, branch.headNodeId);
   const selectedNode = data.nodes.find((node) => node.id === selectedNodeId) ?? path.at(-1) ?? null;
   const comparisonBranches = compareBranchIds.flatMap((id) => data.branches.find((item) => item.id === id) ?? []);
+  const fallbackLiveRun = data.runs.find((run) => run.branchId === branch.id && ["queued", "streaming"].includes(run.status));
+  const transcriptRunId = liveRunId ?? fallbackLiveRun?.id ?? null;
+  const transcriptRun = transcriptRunId ? data.runs.find((run) => run.id === transcriptRunId) : undefined;
+  const onRunStarted = (runId: string) => {
+    setLiveRunId(runId);
+    useUiStore.getState().setSelectedRunId(runId);
+  };
 
   return <div className="workbench">
     <div className="workbench-header">
@@ -65,8 +79,8 @@ export function WorkbenchPage() {
         <div className="branch-legend">{data.branches.map((item) => <button key={item.id} onClick={() => setBranchId(item.id)} className={item.id === branch.id ? "active" : ""}><span />{item.name}</button>)}</div>
       </aside>
       <section className="transcript-pane">
-        {comparisonBranches.length > 0 ? <ComparisonView nodes={data.nodes} runs={data.runs} branches={[branch, ...comparisonBranches]} /> : <Transcript nodes={path} runs={data.runs} data={data} onBranchCreated={(id) => { setBranchId(id); void workbench.refetch(); }} onRunStarted={useUiStore.getState().setSelectedRunId} onSelectRun={useUiStore.getState().setSelectedRunId} />}
-        {comparisonBranches.length === 0 && <Composer data={data} branch={branch} onRunStarted={useUiStore.getState().setSelectedRunId} onChanged={() => void workbench.refetch()} />}
+        {comparisonBranches.length > 0 ? <ComparisonView nodes={data.nodes} runs={data.runs} branches={[branch, ...comparisonBranches]} /> : <Transcript nodes={path} runs={data.runs} data={data} branchId={branch.id} sessionId={data.session.id} liveRunId={transcriptRunId} {...(transcriptRun ? { liveRun: transcriptRun } : {})} onBranchCreated={(id) => { setBranchId(id); void workbench.refetch(); }} onRunStarted={onRunStarted} onSelectRun={useUiStore.getState().setSelectedRunId} />}
+        {comparisonBranches.length === 0 && <Composer data={data} branch={branch} onRunStarted={onRunStarted} onChanged={() => void workbench.refetch()} />}
       </section>
       <aside className="inspector-pane"><Inspector data={data} branch={branch} selectedNode={selectedNode} onChanged={() => void workbench.refetch()} /></aside>
     </div>
@@ -101,34 +115,72 @@ function TreeOverview({ nodes, branches, selectedNodeId, onSelect }: { nodes: Me
   </ReactFlow>;
 }
 
-function Transcript({ nodes, runs, data, onBranchCreated, onRunStarted, onSelectRun }: { nodes: MessageNode[]; runs: ModelRun[]; data?: WorkbenchData; onBranchCreated?(id: string): void; onRunStarted?(id: string): void; onSelectRun(id: string): void }) {
-  return <div className="transcript-scroll">
+function Transcript({ nodes, runs, data, branchId, sessionId, liveRunId = null, liveRun, onBranchCreated, onRunStarted, onSelectRun }: { nodes: MessageNode[]; runs: ModelRun[]; data?: WorkbenchData; branchId?: string; sessionId?: string; liveRunId?: string | null; liveRun?: ModelRun; onBranchCreated?(id: string): void; onRunStarted?(id: string): void; onSelectRun(id: string): void }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const followOutput = useRef(true);
+  const previousRunId = useRef<string | null>(null);
+  const events = useTranscriptRunEvents(liveRunId, sessionId);
+  const streamed = useMemo(() => streamOutputFromEvents(events), [events]);
+  const hasResultNode = liveRunId ? nodes.some((node) => node.sourceRunId === liveRunId) : false;
+  const belongsToTranscript = !liveRun || !branchId || liveRun.branchId === branchId;
+  const showLiveMessage = Boolean(liveRunId && !hasResultNode && belongsToTranscript && (!liveRun || ["queued", "streaming", "awaiting-tool"].includes(liveRun.status)));
+  useEffect(() => {
+    if (liveRunId && liveRunId !== previousRunId.current) followOutput.current = true;
+    previousRunId.current = liveRunId;
+    if (followOutput.current && scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [liveRunId, nodes.length, showLiveMessage, streamed.reasoning.length, streamed.text.length]);
+  return <div className="transcript-scroll" ref={scrollRef} onScroll={(event) => {
+    if (liveRunId) return;
+    const element = event.currentTarget;
+    followOutput.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+  }}>
     {nodes.length === 0 && <div className="transcript-empty"><Split size={28} /><h2>The branch starts here</h2><p>Send a payload below. Every response becomes a forkable node.</p></div>}
     {nodes.map((node) => {
       const run = node.sourceRunId ? runs.find((item) => item.id === node.sourceRunId) : undefined;
       return <TranscriptMessage key={node.id} node={node} {...(run ? { run } : {})} {...(data ? { data } : {})} {...(onBranchCreated ? { onBranchCreated } : {})} {...(onRunStarted ? { onRunStarted } : {})} onSelectRun={onSelectRun} />;
     })}
+    {showLiveMessage && liveRunId && <StreamingTranscriptMessage key={liveRunId} runId={liveRunId} output={streamed} onSelectRun={onSelectRun} />}
   </div>;
 }
 
 export function TranscriptMessage({ node, run, data, onBranchCreated, onRunStarted, onSelectRun }: { node: MessageNode; run?: ModelRun; data?: WorkbenchData; onBranchCreated?(id: string): void; onRunStarted?(id: string): void; onSelectRun(id: string): void }) {
   const [raw, setRaw] = useState(false);
   const reasoning = reasoningFromRun(run);
-  const toggleLabel = raw ? "Show rendered message" : "Show raw message text";
   return <article className={`message message-${node.role}`}>
     <header>
       <span>{node.role === "assistant" ? "MODEL" : node.role === "tool" ? "TOOL RESULT" : "OPERATOR"}</span>
       <time>{new Date(node.createdAt).toLocaleTimeString()}</time>
       {run && <button onClick={() => onSelectRun(run.id)}>inspect run</button>}
-      <button className="message-view-toggle" type="button" aria-label={toggleLabel} aria-pressed={raw} onClick={() => setRaw((current) => !current)}>{raw ? <Eye size={10} /> : <Code2 size={10} />}{raw ? "rendered" : "raw"}</button>
+      <MessageViewToggle raw={raw} onToggle={() => setRaw((current) => !current)} />
       {node.role === "user" && data && <ResendAction node={node} data={data} {...(onBranchCreated ? { onBranchCreated } : {})} {...(onRunStarted ? { onRunStarted } : {})} />}
     </header>
     <div className={`message-body${raw ? " is-raw" : ""}`}>
-      {reasoning && <details className="message-reasoning" open><summary><Activity size={12} /> Reasoning <span>{reasoning.length} chars</span></summary><div>{raw ? <RawText text={reasoning} /> : <RenderedText text={reasoning} />}</div></details>}
+      {reasoning && <ReasoningView reasoning={reasoning} raw={raw} />}
       {node.parts.map((part, index) => <MessagePartView key={`${node.id}-${index}`} part={part} raw={raw} />)}
     </div>
     <footer><code>{node.id.slice(0, 8)}</code>{node.configSnapshotId && <span>config {node.configSnapshotId.slice(0, 8)}</span>}</footer>
   </article>;
+}
+
+function StreamingTranscriptMessage({ runId, output, onSelectRun }: { runId: string; output: StreamedRunOutput; onSelectRun(id: string): void }) {
+  const [raw, setRaw] = useState(false);
+  return <article className="message message-assistant message-streaming" aria-label="Streaming model response" aria-live="polite">
+    <header><span>MODEL · LIVE</span><time>{output.phase}</time><button onClick={() => onSelectRun(runId)}>inspect run</button><MessageViewToggle raw={raw} onToggle={() => setRaw((current) => !current)} /></header>
+    <div className={`message-body${raw ? " is-raw" : ""}`}>
+      {output.reasoning && <ReasoningView reasoning={output.reasoning} raw={raw} live />}
+      {output.text ? (raw ? <RawText text={output.text} /> : <RenderedText text={output.text} />) : <p className="streaming-placeholder">Waiting for model output<span aria-hidden="true">…</span></p>}
+    </div>
+    <footer><code>{runId.slice(0, 8)}</code><span className="streaming-state">{output.phase === "completed" ? "finalizing" : output.phase}</span></footer>
+  </article>;
+}
+
+function MessageViewToggle({ raw, onToggle }: { raw: boolean; onToggle(): void }) {
+  const toggleLabel = raw ? "Show rendered message" : "Show raw message text";
+  return <button className="message-view-toggle" type="button" aria-label={toggleLabel} aria-pressed={raw} onClick={onToggle}>{raw ? <Eye size={10} /> : <Code2 size={10} />}{raw ? "rendered" : "raw"}</button>;
+}
+
+function ReasoningView({ reasoning, raw, live = false }: { reasoning: string; raw: boolean; live?: boolean }) {
+  return <details className={`message-reasoning${live ? " is-live" : ""}`} open><summary><Activity size={12} /> Reasoning {live && <span className="reasoning-live">live</span>}<span>{reasoning.length} chars</span></summary><div>{raw ? <RawText text={reasoning} /> : <RenderedText text={reasoning} />}</div></details>;
 }
 
 function reasoningFromRun(run?: ModelRun): string | null {
@@ -247,12 +299,37 @@ function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchDa
   </div>;
 }
 
-interface RunEventEnvelope {
+export interface RunEventEnvelope {
   id: number;
   channel: string;
   type: string;
   timestamp: string;
   data: JsonValue;
+}
+
+export interface StreamedRunOutput {
+  text: string;
+  reasoning: string;
+  phase: "queued" | "streaming" | "finalizing" | "awaiting-tool" | "completed" | "failed" | "cancelled" | "interrupted";
+}
+
+export function streamOutputFromEvents(events: readonly RunEventEnvelope[]): StreamedRunOutput {
+  let text = "";
+  let reasoning = "";
+  let phase: StreamedRunOutput["phase"] = "queued";
+  for (const event of events) {
+    const data = event.data && typeof event.data === "object" && !Array.isArray(event.data) ? event.data : null;
+    if (event.type === "run.started") phase = "streaming";
+    if (event.type === "content.delta" && typeof data?.text === "string") { text += data.text; phase = "streaming"; }
+    if (event.type === "reasoning.delta" && typeof data?.text === "string") { reasoning += data.text; phase = "streaming"; }
+    if (event.type === "response.completed") phase = "finalizing";
+    if (event.type === "run.awaiting-tool" || event.type === "run.awaiting-tool.restored") phase = "awaiting-tool";
+    if (event.type === "run.completed") phase = "completed";
+    if (event.type === "run.failed" || event.type === "provider.error") phase = "failed";
+    if (event.type === "run.cancelled") phase = "cancelled";
+    if (event.type === "run.interrupted") phase = "interrupted";
+  }
+  return { text, reasoning, phase };
 }
 
 const runRefreshEvents = new Set(["run.awaiting-tool", "run.completed", "run.failed", "run.cancelled", "run.interrupted", "provider.error", "tool.continuation.failed", "tool.continuation.limit"]);
@@ -261,6 +338,23 @@ function isRunEventEnvelope(value: unknown): value is RunEventEnvelope {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const event = value as Partial<RunEventEnvelope>;
   return typeof event.id === "number" && typeof event.channel === "string" && typeof event.type === "string" && typeof event.timestamp === "string" && "data" in event;
+}
+
+function useTranscriptRunEvents(runId: string | null, sessionId?: string): RunEventEnvelope[] {
+  const queryClient = useQueryClient();
+  const [events, setEvents] = useState<RunEventEnvelope[]>([]);
+  useEffect(() => {
+    setEvents([]);
+    if (!runId) return;
+    const controller = new AbortController();
+    void consumeEvents(`run:${runId}`, controller.signal, (value) => {
+      if (!isRunEventEnvelope(value)) return;
+      setEvents((prior) => [...prior, value].slice(-500));
+      if (sessionId && runRefreshEvents.has(value.type)) void queryClient.invalidateQueries({ queryKey: ["workbench", sessionId] });
+    }).catch(() => undefined);
+    return () => controller.abort();
+  }, [queryClient, runId, sessionId]);
+  return events;
 }
 
 function Inspector({ data, branch, selectedNode, onChanged }: { data: WorkbenchData; branch: BranchRef; selectedNode: MessageNode | null; onChanged(): void }) {

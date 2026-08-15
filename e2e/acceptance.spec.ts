@@ -263,29 +263,49 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
   await expect(comparisonView).toContainText(bluePayload);
 
   await page.getByRole("checkbox", { name: blueBranchName }).uncheck();
-  const keyboardPayload = `keyboard first line ${suffix}\nkeyboard second line ${suffix}`;
+  await page.locator(".comparison-picker > summary").click();
+  const keyboardFirstLine = `[stream-chat] keyboard first line ${suffix}`;
+  const keyboardPayload = `${keyboardFirstLine}\nkeyboard second line ${suffix}`;
   const composer = page.getByPlaceholder("Enter the next operator payload…");
-  await composer.fill(`keyboard first line ${suffix}`);
+  await composer.fill(keyboardFirstLine);
   await composer.press("Shift+Enter");
   await composer.pressSequentially(`keyboard second line ${suffix}`);
   await expect(composer).toHaveValue(keyboardPayload);
+  const transcript = page.locator(".transcript-scroll");
+  await transcript.evaluate((element) => { element.scrollTop = 0; });
   await composer.press("Enter");
   await expect(composer).toHaveValue("");
+  const streamingMessage = page.getByRole("article", { name: "Streaming model response" });
+  await expect(streamingMessage).toBeVisible();
+  await expect(streamingMessage.locator(".message-reasoning strong")).toHaveText("reasoning");
+  await expect(streamingMessage.locator(".message-body > p strong")).toHaveText("answer");
+  await expect.poll(() => transcript.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThanOrEqual(2);
   await expect.poll(async () => {
     const keyboardWorkbench = await getWorkbench(request, sessionId);
     return keyboardWorkbench.nodes.some((node) => node.parts.some((part) => part.text === keyboardPayload));
   }).toBe(true);
+  await expect(streamingMessage).toHaveCount(0);
   const latestModelMessage = page.locator("article.message-assistant").last();
   await expect(latestModelMessage).toContainText(keyboardPayload);
   await expect(latestModelMessage.locator(".message-reasoning > summary")).toContainText("Reasoning");
   await expect(latestModelMessage.locator(".message-reasoning strong")).toHaveText("reasoning");
-  await expect(latestModelMessage.locator(".message-body > p strong")).toHaveText("response");
+  await expect(latestModelMessage.locator(".message-body > p strong")).toHaveText("answer");
   await latestModelMessage.getByRole("button", { name: "Show raw message text" }).click();
   await expect(latestModelMessage.getByRole("button", { name: "Show rendered message" })).toBeVisible();
   await expect(latestModelMessage.locator("pre.message-raw")).toContainText([
-    "Fixture **reasoning** for:",
-    "Fixture **response**:"
+    "Streaming **reasoning**:",
+    "Streaming **answer**:"
   ]);
+  await page.getByRole("tab", { name: "Run", exact: true }).click();
+  const inspectorLayout = await page.locator(".inspector-pane").evaluate((inspector) => {
+    const panel = inspector.querySelector<HTMLElement>("[role='tabpanel'][data-state='active']");
+    return {
+      width: inspector.clientWidth,
+      overflow: panel ? panel.scrollWidth - panel.clientWidth : Number.POSITIVE_INFINITY
+    };
+  });
+  expect(inspectorLayout.width).toBeGreaterThanOrEqual(329);
+  expect(inspectorLayout.overflow).toBeLessThanOrEqual(0);
 
   const automation = (await body<{ job: { id: string } }>(await request.post("/api/automation", {
     headers: apiHeaders,
