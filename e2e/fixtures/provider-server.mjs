@@ -87,6 +87,53 @@ const server = createServer(async (request, response) => {
     });
 
     const prompt = lastUserText(body);
+    if (prompt.includes("[fable-block]")) {
+      await sendSse(response, [
+        {
+          id: `chatcmpl-${responseSequence}`,
+          model: "anthropic/claude-fable-5",
+          choices: [{ index: 0, delta: { role: "assistant", reasoning: "Classifier is evaluating the request." }, finish_reason: null }]
+        },
+        {
+          id: `chatcmpl-${responseSequence}`,
+          model: "anthropic/claude-fable-5",
+          choices: [{ index: 0, delta: { content: "Partial output before intervention." }, finish_reason: null }]
+        },
+        {
+          id: `chatcmpl-${responseSequence}`,
+          model: "anthropic/claude-fable-5",
+          choices: [{ index: 0, delta: { content: "", refusal: "This request triggered restrictions on violative cyber content." }, finish_reason: null }]
+        },
+        {
+          id: `chatcmpl-${responseSequence}`,
+          model: "anthropic/claude-fable-5",
+          choices: [{ index: 0, delta: { content: "" }, finish_reason: "content_filter", native_finish_reason: "refusal" }]
+        }
+      ], 350);
+      return;
+    }
+
+    if (prompt.includes("[fable-continue]")) {
+      await sendSse(response, [
+        {
+          id: `chatcmpl-${responseSequence}`,
+          model: "anthropic/claude-fable-5",
+          choices: [{ index: 0, delta: { refusal: "Primary model declined this attempt." }, finish_reason: "content_filter", native_finish_reason: "refusal" }]
+        },
+        {
+          id: `chatcmpl-${responseSequence}`,
+          model: "fallback-model",
+          choices: [{ index: 0, delta: { content: "Continued output after the policy signal." }, finish_reason: null }]
+        },
+        {
+          id: `chatcmpl-${responseSequence}`,
+          model: "fallback-model",
+          choices: [{ index: 0, delta: {}, finish_reason: "stop", native_finish_reason: "end_turn" }]
+        }
+      ], 350);
+      return;
+    }
+
     if (prompt.includes("[call-tool]")) {
       const callId = `fixture-call-${responseSequence}`;
       await sendSse(response, [

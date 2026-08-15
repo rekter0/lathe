@@ -7,7 +7,7 @@ import { json } from "@codemirror/lang-json";
 import { Background, Controls, ReactFlow, type Edge, type Node } from "@xyflow/react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
-import { Activity, Archive, ArrowLeft, Check, ChevronDown, CircleStop, Code2, Download, Eye, FilePlus2, GitBranch, GitCompare, Paperclip, Play, RotateCcw, Save, SlidersHorizontal, Split, Wrench } from "lucide-react";
+import { Activity, Archive, ArrowLeft, Check, ChevronDown, CircleStop, Code2, Download, Eye, FilePlus2, GitBranch, GitCompare, Paperclip, Play, RotateCcw, Save, ShieldAlert, SlidersHorizontal, Split, Wrench } from "lucide-react";
 import { pathToRoot, type JsonObject, type JsonValue, type MessagePart, type ResolvedConfig } from "@lathe/domain";
 import { api, consumeEvents, downloadApiFile, jsonBody } from "../api.js";
 import { Button, Field, Input, Select, Textarea } from "../components/forms.js";
@@ -155,6 +155,7 @@ function Transcript({ nodes, runs, data, branchId, sessionId, liveRunId = null, 
 export function TranscriptMessage({ node, run, data, onBranchCreated, onRunStarted, onSelectRun }: { node: MessageNode; run?: ModelRun; data?: WorkbenchData; onBranchCreated?(id: string): void; onRunStarted?(id: string): void; onSelectRun(id: string): void }) {
   const [raw, setRaw] = useState(false);
   const reasoning = reasoningFromRun(run);
+  const providerOutcome = providerOutcomeFromRun(run);
   return <article className={`message message-${node.role}`}>
     <header>
       <span>{node.role === "assistant" ? "MODEL" : node.role === "tool" ? "TOOL RESULT" : "OPERATOR"}</span>
@@ -166,6 +167,7 @@ export function TranscriptMessage({ node, run, data, onBranchCreated, onRunStart
     <div className={`message-body${raw ? " is-raw" : ""}`}>
       {reasoning && <ReasoningView reasoning={reasoning} raw={raw} />}
       {node.parts.map((part, index) => <MessagePartView key={`${node.id}-${index}`} part={part} raw={raw} />)}
+      {providerOutcome && <ProviderOutcomeCard outcome={providerOutcome} raw={raw} />}
     </div>
     <footer><code>{node.id.slice(0, 8)}</code>{node.configSnapshotId && <span>config {node.configSnapshotId.slice(0, 8)}</span>}</footer>
   </article>;
@@ -177,7 +179,8 @@ function StreamingTranscriptMessage({ runId, output, onSelectRun }: { runId: str
     <header><span>MODEL · LIVE</span><time>{output.phase}</time><button onClick={() => onSelectRun(runId)}>inspect run</button><MessageViewToggle raw={raw} onToggle={() => setRaw((current) => !current)} /></header>
     <div className={`message-body${raw ? " is-raw" : ""}`}>
       {output.reasoning && <ReasoningView reasoning={output.reasoning} raw={raw} live />}
-      {output.text ? (raw ? <RawText text={output.text} /> : <RenderedText text={output.text} />) : <p className="streaming-placeholder">Waiting for model output<span aria-hidden="true">…</span></p>}
+      {output.text ? (raw ? <RawText text={output.text} /> : <RenderedText text={output.text} />) : !output.providerOutcome && <p className="streaming-placeholder">Waiting for model output<span aria-hidden="true">…</span></p>}
+      {output.providerOutcome && <ProviderOutcomeCard outcome={output.providerOutcome} raw={raw} live />}
     </div>
     <footer><code>{runId.slice(0, 8)}</code><span className="streaming-state">{output.phase === "completed" ? "finalizing" : output.phase}</span></footer>
   </article>;
@@ -196,6 +199,118 @@ function reasoningFromRun(run?: ModelRun): string | null {
   if (!run?.normalizedOutput || typeof run.normalizedOutput !== "object" || Array.isArray(run.normalizedOutput)) return null;
   const reasoning = run.normalizedOutput.reasoning;
   return typeof reasoning === "string" && reasoning.length > 0 ? reasoning : null;
+}
+
+type ProviderOutcomeStatus = "detected" | "blocked" | "recovered" | "incomplete" | "error";
+
+interface ProviderFallbackView {
+  fromModel?: string;
+  toModel?: string;
+}
+
+export interface ProviderOutcomeView {
+  status: ProviderOutcomeStatus;
+  policyDetected: boolean;
+  terminalPolicyBlock: boolean;
+  recovered: boolean;
+  partialOutput: boolean;
+  continuedAfterBlock: boolean;
+  refusalText?: string;
+  finishReason?: string;
+  nativeFinishReason?: string;
+  incompleteReason?: string;
+  category?: string;
+  errorClassification?: string;
+  errorMessage?: string;
+  stopReasons: string[];
+  fallbacks: ProviderFallbackView[];
+}
+
+function recordValue(value: unknown): JsonObject | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as JsonObject : null;
+}
+
+function stringField(value: unknown): string | undefined {
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+function providerOutcomeFromRun(run?: ModelRun): ProviderOutcomeView | null {
+  const output = recordValue(run?.normalizedOutput);
+  const outcome = recordValue(output?.providerOutcome);
+  if (!outcome) return null;
+  const status = stringField(outcome.status);
+  if (!status || !["detected", "blocked", "recovered", "incomplete", "error"].includes(status)) return null;
+  const details = recordValue(outcome.stopDetails);
+  const stops = Array.isArray(outcome.stops)
+    ? outcome.stops.flatMap((value): JsonObject[] => {
+        const item = recordValue(value);
+        return item ? [item] : [];
+      })
+    : [];
+  const stopReasons = stops.flatMap((stop) => [
+    stringField(stop.finishReason),
+    stringField(stop.nativeFinishReason),
+    stringField(stop.incompleteReason),
+  ]).filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
+  const historicalCategory = stops
+    .map((stop) => recordValue(stop.stopDetails))
+    .map((stopDetails) => stringField(stopDetails?.category))
+    .find((value): value is string => value !== undefined);
+  const category = stringField(details?.category) ?? historicalCategory;
+  const fallbacks = Array.isArray(outcome.fallbacks)
+    ? outcome.fallbacks.flatMap((value): ProviderFallbackView[] => {
+        const item = recordValue(value);
+        if (!item) return [];
+        return [{
+          ...(stringField(item.fromModel) ? { fromModel: String(item.fromModel) } : {}),
+          ...(stringField(item.toModel) ? { toModel: String(item.toModel) } : {}),
+        }];
+      })
+    : [];
+  return {
+    status: status as ProviderOutcomeStatus,
+    policyDetected: outcome.policyDetected === true,
+    terminalPolicyBlock: outcome.terminalPolicyBlock === true,
+    recovered: outcome.recovered === true,
+    partialOutput: outcome.partialOutput === true,
+    continuedAfterBlock: outcome.continuedAfterBlock === true,
+    ...(stringField(outcome.refusalText) ? { refusalText: String(outcome.refusalText) } : {}),
+    ...(stringField(outcome.finishReason) ? { finishReason: String(outcome.finishReason) } : {}),
+    ...(stringField(outcome.nativeFinishReason) ? { nativeFinishReason: String(outcome.nativeFinishReason) } : {}),
+    ...(stringField(outcome.incompleteReason) ? { incompleteReason: String(outcome.incompleteReason) } : {}),
+    ...(category ? { category } : {}),
+    ...(stringField(outcome.errorClassification) ? { errorClassification: String(outcome.errorClassification) } : {}),
+    ...(stringField(outcome.errorMessage) ? { errorMessage: String(outcome.errorMessage) } : {}),
+    stopReasons,
+    fallbacks,
+  };
+}
+
+function ProviderOutcomeCard({ outcome, raw, live = false }: { outcome: ProviderOutcomeView; raw: boolean; live?: boolean }) {
+  const title = outcome.status === "blocked"
+    ? "Provider blocked this generation"
+    : outcome.status === "recovered"
+      ? "Policy intervention · generation continued"
+      : outcome.status === "incomplete"
+        ? "Provider returned incomplete output"
+        : outcome.status === "error"
+          ? "Provider error"
+          : "Policy intervention detected";
+  const reasons = [...outcome.stopReasons, outcome.finishReason, outcome.nativeFinishReason, outcome.incompleteReason]
+    .filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
+  return <section className={`provider-outcome outcome-${outcome.status}`} role={outcome.status === "blocked" || outcome.status === "error" ? "alert" : "status"} aria-live={live ? "polite" : undefined}>
+    <header><ShieldAlert size={14} /><strong>{title}</strong>{live && <span>live</span>}</header>
+    {(outcome.category || reasons.length > 0 || outcome.errorClassification) && <div className="provider-outcome-tags">
+      {outcome.category && <span>category · {outcome.category}</span>}
+      {reasons.map((reason) => <span key={reason}>stop · {reason}</span>)}
+      {outcome.errorClassification && <span>class · {outcome.errorClassification}</span>}
+    </div>}
+    {outcome.refusalText && <div className="provider-refusal-text">{raw ? <RawText text={outcome.refusalText} /> : <RenderedText text={outcome.refusalText} />}</div>}
+    {outcome.errorMessage && outcome.errorMessage !== outcome.refusalText && <p>{outcome.errorMessage}</p>}
+    {outcome.fallbacks.map((fallback, index) => <p className="provider-fallback" key={`${fallback.fromModel ?? "unknown"}-${fallback.toModel ?? "unknown"}-${index}`}><span>fallback</span>{fallback.fromModel ?? "requested model"} → {fallback.toModel ?? "another model"}</p>)}
+    {outcome.partialOutput && <p className="provider-outcome-note">The reasoning or output above is partial and must not be treated as a complete answer.</p>}
+    {outcome.continuedAfterBlock && <p className="provider-outcome-note">The stream emitted more output after a blocking stop signal; Lathe preserved both the signal and the continuation.</p>}
+  </section>;
 }
 
 function ResendAction({ node, data, onBranchCreated, onRunStarted }: { node: MessageNode; data: WorkbenchData; onBranchCreated?(id: string): void; onRunStarted?(id: string): void }) {
@@ -324,26 +439,135 @@ export interface RunEventEnvelope {
 export interface StreamedRunOutput {
   text: string;
   reasoning: string;
+  providerOutcome: ProviderOutcomeView | null;
   phase: "queued" | "streaming" | "finalizing" | "awaiting-tool" | "completed" | "failed" | "cancelled" | "interrupted";
+}
+
+function isPolicyReason(...values: readonly unknown[]): boolean {
+  return values.some((value) => {
+    if (typeof value !== "string" || value === "") return false;
+    const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+    return ["blocklist", "blocked", "content_filter", "content_filtered", "content_policy", "content_policy_violation", "copyright", "guardrail", "guardrail_intervened", "image_safety", "moderation", "prohibited_content", "recitation", "refusal", "refused", "safety", "spii"].includes(normalized) || /(?:^|_)(?:content_filter|content_policy|copyright|guardrail|moderation|prohibited_content|refusal|safety)(?:_|$)/.test(normalized);
+  });
 }
 
 export function streamOutputFromEvents(events: readonly RunEventEnvelope[]): StreamedRunOutput {
   let text = "";
   let reasoning = "";
+  let refusalText = "";
   let phase: StreamedRunOutput["phase"] = "queued";
-  for (const event of events) {
+  let lastOutputSequence = -1;
+  let lastPolicySequence = -1;
+  let lastPolicyStopSequence = -1;
+  let lastFallbackSequence = -1;
+  let lastNonPolicyStopSequence = -1;
+  let finishReason: string | undefined;
+  let nativeFinishReason: string | undefined;
+  let incompleteReason: string | undefined;
+  let category: string | undefined;
+  let errorClassification: string | undefined;
+  let errorMessage: string | undefined;
+  let terminalSignal = false;
+  const stopReasons: string[] = [];
+  const fallbacks: ProviderFallbackView[] = [];
+  for (let sequence = 0; sequence < events.length; sequence += 1) {
+    const event = events[sequence]!;
     const data = event.data && typeof event.data === "object" && !Array.isArray(event.data) ? event.data : null;
     if (event.type === "run.started") phase = "streaming";
-    if (event.type === "content.delta" && typeof data?.text === "string") { text += data.text; phase = "streaming"; }
-    if (event.type === "reasoning.delta" && typeof data?.text === "string") { reasoning += data.text; phase = "streaming"; }
-    if (event.type === "response.completed") phase = "finalizing";
+    if (event.type === "content.delta" && typeof data?.text === "string") { text += data.text; lastOutputSequence = sequence; phase = "streaming"; }
+    if (event.type === "reasoning.delta" && typeof data?.text === "string") { reasoning += data.text; lastOutputSequence = sequence; phase = "streaming"; }
+    if (event.type === "refusal.delta" && typeof data?.text === "string") { refusalText += data.text; lastPolicySequence = sequence; }
+    if (event.type === "refusal.done" && typeof data?.text === "string") {
+      refusalText = !refusalText || data.text.startsWith(refusalText) ? data.text : refusalText.includes(data.text) ? refusalText : `${refusalText}${data.text}`;
+      lastPolicySequence = sequence;
+    }
+    if (event.type === "response.fallback") {
+      fallbacks.push({
+        ...(typeof data?.fromModel === "string" ? { fromModel: data.fromModel } : {}),
+        ...(typeof data?.toModel === "string" ? { toModel: data.toModel } : {}),
+      });
+      lastFallbackSequence = sequence;
+      lastPolicySequence = sequence;
+    }
+    if (event.type === "response.completed") {
+      phase = "finalizing";
+      const stopDetails = recordValue(data?.stopDetails);
+      const nextFinishReason = stringField(data?.finishReason);
+      const nextNativeReason = stringField(data?.nativeFinishReason);
+      const nextIncompleteReason = stringField(data?.incompleteReason);
+      const nextCategory = stringField(stopDetails?.category);
+      const meaningful = Boolean(nextFinishReason || nextNativeReason || nextIncompleteReason || stopDetails);
+      if (nextFinishReason) finishReason = nextFinishReason;
+      if (nextNativeReason) nativeFinishReason = nextNativeReason;
+      if (nextIncompleteReason) incompleteReason = nextIncompleteReason;
+      for (const reason of [nextFinishReason, nextNativeReason, nextIncompleteReason]) {
+        if (reason && !stopReasons.includes(reason)) stopReasons.push(reason);
+      }
+      if (nextCategory) category = nextCategory;
+      if (meaningful) {
+        terminalSignal = true;
+        if (isPolicyReason(nextFinishReason, nextNativeReason, nextIncompleteReason, stopDetails?.type, stopDetails?.code)) {
+          lastPolicySequence = sequence;
+          lastPolicyStopSequence = sequence;
+        } else {
+          lastNonPolicyStopSequence = sequence;
+        }
+      }
+      const explanation = stringField(stopDetails?.explanation);
+      if (explanation && !refusalText) refusalText = explanation;
+    }
     if (event.type === "run.awaiting-tool" || event.type === "run.awaiting-tool.restored") phase = "awaiting-tool";
     if (event.type === "run.completed") phase = "completed";
-    if (event.type === "run.failed" || event.type === "provider.error") phase = "failed";
+    if (event.type === "provider.error") {
+      terminalSignal = true;
+      const error = recordValue(data?.error);
+      errorClassification = stringField(error?.classification);
+      errorMessage = stringField(error?.message);
+      if (errorClassification === "content-policy") {
+        lastPolicySequence = sequence;
+        lastPolicyStopSequence = sequence;
+      }
+      phase = "failed";
+    }
+    if (event.type === "run.failed") phase = "failed";
     if (event.type === "run.cancelled") phase = "cancelled";
     if (event.type === "run.interrupted") phase = "interrupted";
   }
-  return { text, reasoning, phase };
+  const policyDetected = lastPolicySequence >= 0;
+  const outputContinued = lastOutputSequence > lastPolicySequence;
+  const fallbackCompleted = lastFallbackSequence >= lastPolicySequence && lastNonPolicyStopSequence > lastFallbackSequence;
+  const terminalPolicyBlock = errorClassification === "content-policy" || (policyDetected && !outputContinued && !fallbackCompleted);
+  const recovered = policyDetected && !terminalPolicyBlock;
+  const normalizedIncompleteReason = (incompleteReason ?? finishReason)?.toLowerCase().replace(/[\s-]+/g, "_");
+  const incomplete = !terminalPolicyBlock && (Boolean(errorClassification) || ["cancelled", "error", "incomplete", "length", "max_completion_tokens", "max_output_tokens", "max_tokens", "model_context_window_exceeded", "pause_turn", "token_limit"].includes(normalizedIncompleteReason ?? ""));
+  const status: ProviderOutcomeStatus = terminalPolicyBlock
+    ? terminalSignal ? "blocked" : "detected"
+    : errorClassification
+      ? "error"
+      : recovered
+        ? "recovered"
+        : incomplete
+          ? "incomplete"
+          : "detected";
+  const interesting = policyDetected || fallbacks.length > 0 || incomplete;
+  const providerOutcome: ProviderOutcomeView | null = interesting ? {
+    status,
+    policyDetected,
+    terminalPolicyBlock,
+    recovered,
+    partialOutput: terminalPolicyBlock && (text.length > 0 || reasoning.length > 0),
+    continuedAfterBlock: lastPolicyStopSequence >= 0 && lastOutputSequence > lastPolicyStopSequence,
+    ...(refusalText ? { refusalText } : {}),
+    ...(finishReason ? { finishReason } : {}),
+    ...(nativeFinishReason ? { nativeFinishReason } : {}),
+    ...(incompleteReason ? { incompleteReason } : {}),
+    ...(category ? { category } : {}),
+    ...(errorClassification ? { errorClassification } : {}),
+    ...(errorMessage ? { errorMessage } : {}),
+    stopReasons,
+    fallbacks,
+  } : null;
+  return { text, reasoning, providerOutcome, phase };
 }
 
 const runRefreshEvents = new Set(["run.awaiting-tool", "run.completed", "run.failed", "run.cancelled", "run.interrupted", "provider.error", "tool.continuation.failed", "tool.continuation.limit"]);
@@ -488,9 +712,11 @@ function moveItem<T>(items: T[], from: number, to: number): T[] {
 function RunInspector({ run, events, streamError, onChanged }: { run: ModelRun | null; events: RunEventEnvelope[]; streamError: string | null; onChanged(): void }) {
   const cancel = useMutation({ mutationFn: () => api(`/api/runs/${run?.id}/cancel`, { method: "POST" }), onSuccess: onChanged });
   if (!run) return <div className="inspector-content quiet">No model runs on this branch yet.</div>;
+  const providerOutcome = providerOutcomeFromRun(run) ?? streamOutputFromEvents(events).providerOutcome;
   return <div className="inspector-content run-inspector">
     <div className="run-status"><span className={`status-badge status-${run.status}`}>{run.status}</span><code>{run.id.slice(0, 12)}</code></div>
     <dl><dt>Classification</dt><dd>{run.classification ?? "none"}</dd><dt>Started</dt><dd>{run.startedAt ? new Date(run.startedAt).toLocaleString() : "queued"}</dd><dt>Trace</dt><dd>{run.traceHash ? `${run.traceHash.slice(0, 18)}…` : "pending"}</dd></dl>
+    {providerOutcome && <ProviderOutcomeCard outcome={providerOutcome} raw />}
     <LiveRunEventPanel run={run} events={events} streamError={streamError} />
     <McpApprovalResolvers run={run} onChanged={onChanged} />
     <RunAnnotationEditor key={run.id} run={run} onChanged={onChanged} />

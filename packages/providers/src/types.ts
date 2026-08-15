@@ -140,10 +140,28 @@ export interface ProviderUsage {
   readonly cachedInputTokens?: number;
 }
 
+/** Structured provider stop metadata. Fields are intentionally open-ended and nullable. */
+export interface ProviderStopDetails {
+  readonly type?: string;
+  readonly category?: string | null;
+  readonly explanation?: string | null;
+  readonly code?: string | null;
+  /** Complete JSON object for newly introduced provider classifier fields. */
+  readonly providerData?: JsonObject;
+}
+
 export type NormalizedProviderEvent =
   | { readonly type: "response.start"; readonly responseId?: string; readonly model?: string }
   | { readonly type: "content.delta"; readonly text: string; readonly index: number }
   | { readonly type: "reasoning.delta"; readonly text: string; readonly index: number }
+  | { readonly type: "refusal.delta"; readonly text: string; readonly index: number }
+  | { readonly type: "refusal.done"; readonly text: string; readonly index: number }
+  | {
+      readonly type: "response.fallback";
+      readonly index: number;
+      readonly fromModel?: string;
+      readonly toModel?: string;
+    }
   | {
       readonly type: "tool_call.start";
       readonly index: number;
@@ -158,7 +176,13 @@ export type NormalizedProviderEvent =
       readonly argumentsDelta: string;
     }
   | { readonly type: "usage"; readonly usage: ProviderUsage }
-  | { readonly type: "response.completed"; readonly finishReason?: string }
+  | {
+      readonly type: "response.completed";
+      readonly finishReason?: string;
+      readonly nativeFinishReason?: string;
+      readonly incompleteReason?: string;
+      readonly stopDetails?: ProviderStopDetails;
+    }
   | { readonly type: "provider.error"; readonly error: ProviderFailure }
   | { readonly type: "provider.unknown"; readonly providerType?: string };
 

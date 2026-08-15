@@ -69,18 +69,9 @@ function sanitizeEvents(
   events: readonly NormalizedProviderEvent[],
   secrets: readonly string[],
 ): NormalizedProviderEvent[] {
-  return events.map((event) => {
-    if (event.type === "provider.error") {
-      return { ...event, error: sanitizeFailure(event.error, secrets) };
-    }
-    if (event.type === "content.delta" || event.type === "reasoning.delta") {
-      return { ...event, text: redactText(event.text, secrets) };
-    }
-    if (event.type === "tool_call.delta") {
-      return { ...event, argumentsDelta: redactText(event.argumentsDelta, secrets) };
-    }
-    return event;
-  });
+  return events.map((event) =>
+    redactJson(event as unknown as JsonValue, secrets) as unknown as NormalizedProviderEvent
+  );
 }
 
 function traceFactory(now: () => Date, secrets: readonly string[]) {
@@ -208,14 +199,11 @@ export async function* executeProviderRequest(
         return;
       }
       let sawTerminal = false;
-      let sawCompletion = false;
       for await (const frame of parseSseStream(response.body)) {
-        const events = sanitizeEvents(adapter.normalizeSse(frame), secrets).filter((event) => {
-          if (event.type !== "response.completed") return true;
-          if (sawCompletion) return false;
-          sawCompletion = true;
-          return true;
-        });
+        // Do not collapse completion-looking frames. Some gateways expose an
+        // attempted model's policy stop and then continue on a fallback model
+        // in the same HTTP 200 stream. Downstream code needs the full sequence.
+        const events = sanitizeEvents(adapter.normalizeSse(frame), secrets);
         if (terminal(events)) sawTerminal = true;
         yield item(makeTrace("sse", {
           raw: redactText(frame.raw, secrets),

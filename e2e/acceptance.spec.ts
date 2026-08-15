@@ -304,6 +304,34 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
     "Streaming **reasoning**:",
     "Streaming **answer**:"
   ]);
+
+  await composer.fill(`[fable-block] verify partial policy output ${suffix}`);
+  await composer.press("Enter");
+  const blockedStreamingMessage = page.getByRole("article", { name: "Streaming model response" });
+  await expect(blockedStreamingMessage).toContainText("Partial output before intervention.");
+  await expect(blockedStreamingMessage.getByRole("alert")).toContainText("Provider blocked this generation");
+  await expect(blockedStreamingMessage.getByRole("alert")).toContainText("content_filter");
+  await expect(blockedStreamingMessage.getByRole("alert")).toContainText("partial and must not be treated as a complete answer");
+  await expect(blockedStreamingMessage).toHaveCount(0);
+  const blockedMessage = page.locator("article.message-assistant").last();
+  await expect(blockedMessage.getByRole("alert")).toContainText("violative cyber content");
+  await blockedMessage.getByRole("button", { name: "inspect run" }).click();
+  await page.getByRole("tab", { name: "Run", exact: true }).click();
+  await expect(page.locator(".run-inspector")).toContainText("content-policy");
+  await expect(page.locator(".run-inspector .provider-outcome")).toContainText("Provider blocked this generation");
+
+  await composer.fill(`[fable-continue] verify recovered policy output ${suffix}`);
+  await composer.press("Enter");
+  const recoveredStreamingMessage = page.getByRole("article", { name: "Streaming model response" });
+  await expect(recoveredStreamingMessage).toContainText("Continued output after the policy signal.");
+  await expect(recoveredStreamingMessage.getByRole("status")).toContainText("generation continued");
+  await expect(recoveredStreamingMessage).toHaveCount(0);
+  const recoveredMessage = page.locator("article.message-assistant").last();
+  await expect(recoveredMessage.getByRole("status")).toContainText("generation continued");
+  await expect(recoveredMessage.getByRole("status")).toContainText("content_filter");
+  await expect(recoveredMessage.getByRole("status")).toContainText("refusal");
+  await expect(recoveredMessage.getByRole("status")).toContainText("more output after a blocking stop signal");
+
   await page.getByRole("tab", { name: "Run", exact: true }).click();
   const inspectorLayout = await page.locator(".inspector-pane").evaluate((inspector) => {
     const panel = inspector.querySelector<HTMLElement>("[role='tabpanel'][data-state='active']");

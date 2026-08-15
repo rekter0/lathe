@@ -7,6 +7,7 @@ import {
   mergeExtraBody,
   numberValue,
   serializeArguments,
+  stopDetailsFrom,
   stringValue,
   textFromContent,
   usageFrom,
@@ -102,6 +103,17 @@ function messages(request: CanonicalGenerationRequest): JsonValue[] {
   return result;
 }
 
+function fallbackEvent(block: Record<string, unknown>, index: number): NormalizedProviderEvent {
+  const from = isRecord(block.from) ? stringValue(block.from.model) : undefined;
+  const to = isRecord(block.to) ? stringValue(block.to.model) : undefined;
+  return {
+    type: "response.fallback",
+    index,
+    ...(from === undefined ? {} : { fromModel: from }),
+    ...(to === undefined ? {} : { toModel: to }),
+  };
+}
+
 function contentEvents(payload: Record<string, unknown>): NormalizedProviderEvent[] {
   const events: NormalizedProviderEvent[] = [];
   const content = Array.isArray(payload.content) ? payload.content : [];
@@ -112,6 +124,11 @@ function contentEvents(payload: Record<string, unknown>): NormalizedProviderEven
       events.push({ type: "content.delta", text: block.text, index });
     } else if (block.type === "thinking" && typeof block.thinking === "string") {
       events.push({ type: "reasoning.delta", text: block.thinking, index });
+    } else if (block.type === "refusal") {
+      const refusal = stringValue(block.refusal) ?? stringValue(block.text);
+      if (refusal) events.push({ type: "refusal.done", text: refusal, index });
+    } else if (block.type === "fallback") {
+      events.push(fallbackEvent(block, index));
     } else if (block.type === "tool_use") {
       const id = stringValue(block.id);
       const name = stringValue(block.name);
@@ -133,7 +150,12 @@ function contentEvents(payload: Record<string, unknown>): NormalizedProviderEven
   const usage = usageFrom(payload.usage);
   if (usage !== undefined) events.push({ type: "usage", usage });
   const finishReason = stringValue(payload.stop_reason);
-  events.push({ type: "response.completed", ...(finishReason === undefined ? {} : { finishReason }) });
+  const stopDetails = stopDetailsFrom(payload.stop_details);
+  events.push({
+    type: "response.completed",
+    ...(finishReason === undefined ? {} : { finishReason }),
+    ...(stopDetails === undefined ? {} : { stopDetails }),
+  });
   return events;
 }
 
@@ -194,6 +216,7 @@ export const anthropicMessagesAdapter: ProtocolAdapter = {
   },
 
   normalizeSse(event: ServerSentEvent): readonly NormalizedProviderEvent[] {
+    if (event.data === "[DONE]") return [{ type: "response.completed" }];
     let payload: JsonValue;
     try {
       payload = JSON.parse(event.data) as JsonValue;
@@ -234,6 +257,14 @@ export const anthropicMessagesAdapter: ProtocolAdapter = {
       if (block.type === "text" && typeof block.text === "string" && block.text !== "") {
         return [{ type: "content.delta", text: block.text, index }];
       }
+      if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking !== "") {
+        return [{ type: "reasoning.delta", text: block.thinking, index }];
+      }
+      if (block.type === "refusal") {
+        const refusal = stringValue(block.refusal) ?? stringValue(block.text);
+        if (refusal) return [{ type: "refusal.done", text: refusal, index }];
+      }
+      if (block.type === "fallback") return [fallbackEvent(block, index)];
     }
     if (type === "content_block_delta" && isRecord(payload.delta)) {
       const delta = payload.delta;
@@ -242,6 +273,9 @@ export const anthropicMessagesAdapter: ProtocolAdapter = {
       }
       if (delta.type === "thinking_delta") {
         return [{ type: "reasoning.delta", text: stringValue(delta.thinking) ?? "", index }];
+      }
+      if (delta.type === "refusal_delta") {
+        return [{ type: "refusal.delta", text: stringValue(delta.refusal) ?? stringValue(delta.text) ?? "", index }];
       }
       if (delta.type === "input_json_delta") {
         return [{
@@ -254,12 +288,18 @@ export const anthropicMessagesAdapter: ProtocolAdapter = {
     if (type === "message_delta") {
       const delta = isRecord(payload.delta) ? payload.delta : undefined;
       const usage = usageFrom(payload.usage);
+      const finishReason = delta === undefined ? undefined : stringValue(delta.stop_reason);
+      const stopDetails = stopDetailsFrom(delta?.stop_details ?? payload.stop_details);
       return [
         ...(usage === undefined ? [] : [{ type: "usage" as const, usage }]),
         ...(
-          delta === undefined || stringValue(delta.stop_reason) === undefined
+          finishReason === undefined && stopDetails === undefined
             ? []
-            : [{ type: "response.completed" as const, finishReason: stringValue(delta.stop_reason)! }]
+            : [{
+                type: "response.completed" as const,
+                ...(finishReason === undefined ? {} : { finishReason }),
+                ...(stopDetails === undefined ? {} : { stopDetails }),
+              }]
         ),
       ];
     }

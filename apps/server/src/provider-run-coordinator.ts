@@ -52,6 +52,7 @@ import {
   type ProviderUsage
 } from "@lathe/providers";
 import type { EventHub } from "./events.js";
+import { ProviderOutcomeTracker } from "./provider-outcome.js";
 import type { RunCoordinator, StartedRun, StartRunInput } from "./run-coordinator.js";
 
 interface ToolAccumulator {
@@ -669,6 +670,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
     let responseModel = session.modelId;
     let finishReason: string | undefined;
     let unsupportedToolOutput = false;
+    const providerOutcome = new ProviderOutcomeTracker();
     try {
       await this.repository.updateRun(nested.id, { status: "streaming", startedAt: startedAt.toISOString() });
       this.events.publish(`run:${nested.id}`, "run.started", { parentRunId, approvalId: request.id });
@@ -684,11 +686,13 @@ export class ProviderRunCoordinator implements RunCoordinator {
         });
         this.events.publish(`run:${nested.id}`, "provider.trace", item as unknown as JsonValue);
         for (const event of item.events) {
+          providerOutcome.consume(event);
           if (event.type === "content.delta") text += event.text;
           if (event.type === "reasoning.delta") reasoning += event.text;
           if (event.type === "usage") usage = event.usage;
           if (event.type === "response.start" && event.model) responseModel = event.model;
-          if (event.type === "response.completed") finishReason = event.finishReason;
+          if (event.type === "response.fallback" && event.toModel) responseModel = event.toModel;
+          if (event.type === "response.completed" && event.finishReason !== undefined) finishReason = event.finishReason;
           if (event.type === "provider.error") providerFailure = event.error;
           if (event.type === "tool_call.start" || event.type === "tool_call.delta") unsupportedToolOutput = true;
           this.events.publish(`run:${nested.id}`, event.type, event as unknown as JsonValue);
@@ -707,14 +711,18 @@ export class ProviderRunCoordinator implements RunCoordinator {
         request: payload,
         text,
         reasoning,
+        providerOutcome: providerOutcome.toJson(),
         compileWarnings,
         timings
       };
-      if (providerFailure || unsupportedToolOutput) {
-        const classification = providerFailure?.classification ?? "parse-failure";
+      const outcomeClassification = providerOutcome.classification();
+      if (providerFailure || unsupportedToolOutput || outcomeClassification) {
+        const classification = providerFailure?.classification ?? outcomeClassification ?? "parse-failure";
         const error: JsonValue = providerFailure
           ? this.toJson(providerFailure)
-          : { classification, message: "The provider returned a tool call for a text-only MCP sampling request" };
+          : outcomeClassification
+            ? { classification, message: "The provider blocked the MCP sampling generation" }
+            : { classification, message: "The provider returned a tool call for a text-only MCP sampling request" };
         await this.repository.updateRun(nested.id, {
           status: classification === "cancelled" ? "cancelled" : "failed",
           classification,
@@ -764,6 +772,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
             request: payload,
             text,
             reasoning,
+            providerOutcome: providerOutcome.toJson(),
             compileWarnings,
             timings: { durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()) },
             error: { classification, message: "MCP sampling provider execution failed" }
@@ -859,12 +868,13 @@ export class ProviderRunCoordinator implements RunCoordinator {
     this.controllers.set(runId, controller);
     const trace = await this.contentStore.createTraceWriter();
     let finalized = false;
-    let failed = false;
+    let providerFailure: ProviderFailure | undefined;
     let text = "";
     let reasoning = "";
     let usage: ProviderUsage | undefined;
     let compileWarnings: JsonValue[] = [];
     const calls = new Map<number, ToolAccumulator>();
+    const providerOutcome = new ProviderOutcomeTracker();
     const run = await this.repository.getRun(runId);
     if (!run) {
       await trace.abort({ message: "Run disappeared before execution" });
@@ -902,16 +912,11 @@ export class ProviderRunCoordinator implements RunCoordinator {
         });
         this.events.publish(`run:${runId}`, "provider.trace", item as unknown as JsonValue);
         for (const event of item.events) {
+          providerOutcome.consume(event);
           this.consumeEvent(event, calls, (delta) => { text += delta; }, (delta) => { reasoning += delta; });
           if (event.type === "usage") usage = event.usage;
           if (event.type === "provider.error") {
-            failed = true;
-            await this.repository.updateRun(runId, {
-              status: event.error.classification === "cancelled" ? "cancelled" : "failed",
-              classification: event.error.classification,
-              normalizedOutput: { text, reasoning, compileWarnings, error: event.error as unknown as JsonValue },
-              finishedAt: new Date().toISOString()
-            });
+            providerFailure = event.error;
           }
           this.events.publish(`run:${runId}`, event.type, event as unknown as JsonValue);
         }
@@ -919,19 +924,62 @@ export class ProviderRunCoordinator implements RunCoordinator {
 
       const stored = await trace.finalize();
       finalized = true;
-      if (failed) {
-        await this.repository.updateRun(runId, { traceHash: stored.sha256 });
-        return;
-      }
       const toolParts: ToolCallPart[] = Array.from(calls.values()).map((call, index) => ({
         type: "tool-call",
         callId: call.id || `call-${runId}-${index}`,
         name: call.name || "unknown_tool",
         arguments: this.parseArguments(call.argumentsText)
       }));
+      const providerOutcomeJson = providerOutcome.toJson();
+      const outcomeClassification = providerOutcome.classification();
+      const usageValue = usage ? JSON.parse(JSON.stringify(usage)) as JsonObject : null;
+      const inertToolCallEvidence: JsonValue[] = toolParts.map((call) => ({
+        callId: call.callId,
+        name: call.name,
+        arguments: call.arguments,
+        executable: false,
+        reason: providerFailure ? "provider-error" : "provider-policy-block",
+      }));
+      if (providerFailure) {
+        let resultNode: MessageNode | null = null;
+        if (text || reasoning || toolParts.length > 0 || providerFailure.classification === "content-policy") {
+          resultNode = await this.repository.appendNode({
+            sessionId: run.sessionId,
+            branchId: run.branchId,
+            parentId: contextNodeId,
+            role: "assistant",
+            parts: [{ type: "text", text }],
+            sourceRunId: runId,
+            configSnapshotId: run.configSnapshotId
+          });
+        }
+        await this.repository.updateRun(runId, {
+          ...(resultNode === null ? {} : { resultNodeId: resultNode.id }),
+          status: providerFailure.classification === "cancelled" ? "cancelled" : "failed",
+          classification: providerFailure.classification,
+          normalizedOutput: {
+            text,
+            reasoning,
+            toolCalls: inertToolCallEvidence,
+            providerOutcome: providerOutcomeJson,
+            compileWarnings,
+            error: providerFailure as unknown as JsonValue,
+          },
+          usage: usageValue,
+          traceHash: stored.sha256,
+          finishedAt: new Date().toISOString()
+        });
+        if (resultNode) this.events.publish(`session:${run.sessionId}`, "node.created", resultNode as unknown as JsonValue);
+        this.events.publish(`run:${runId}`, "run.failed", {
+          classification: providerFailure.classification,
+          ...(resultNode === null ? {} : { resultNodeId: resultNode.id }),
+          traceHash: stored.sha256,
+        });
+        return;
+      }
       const parts: MessagePart[] = [];
       if (text) parts.push({ type: "text", text });
-      parts.push(...toolParts);
+      if (outcomeClassification === null) parts.push(...toolParts);
       if (parts.length === 0) parts.push({ type: "text", text: "" });
       const node = await this.repository.appendNode({
         sessionId: run.sessionId,
@@ -944,23 +992,31 @@ export class ProviderRunCoordinator implements RunCoordinator {
       });
       const prepared = new Map<string, PreparedToolCall>();
       const toolCallEvidence: JsonValue[] = [];
-      for (const call of toolParts) {
+      for (const call of outcomeClassification === null ? toolParts : []) {
         const item = await this.prepareToolCall(config, call);
         prepared.set(call.callId, item);
         toolCallEvidence.push(this.preparedEvidence(item, run.sessionId, config.toolApprovalMode ?? "manual"));
       }
-      const normalized: JsonObject = { text, reasoning, toolCalls: toolCallEvidence, compileWarnings };
-      const usageValue = usage ? JSON.parse(JSON.stringify(usage)) as JsonObject : null;
+      if (outcomeClassification !== null) toolCallEvidence.push(...inertToolCallEvidence);
+      const normalized: JsonObject = {
+        text,
+        reasoning,
+        toolCalls: toolCallEvidence,
+        providerOutcome: providerOutcomeJson,
+        compileWarnings,
+      };
+      const awaitingTools = outcomeClassification === null && toolParts.length > 0;
       await this.repository.updateRun(runId, {
         resultNodeId: node.id,
-        status: toolParts.length > 0 ? "awaiting-tool" : "completed",
+        status: awaitingTools ? "awaiting-tool" : "completed",
+        classification: outcomeClassification,
         normalizedOutput: normalized,
         usage: usageValue,
         traceHash: stored.sha256,
-        finishedAt: toolParts.length > 0 ? null : new Date().toISOString()
+        finishedAt: awaitingTools ? null : new Date().toISOString()
       });
       this.events.publish(`session:${run.sessionId}`, "node.created", node as unknown as JsonValue);
-      if (toolParts.length > 0) {
+      if (awaitingTools) {
         const pending: PendingToolRun = {
           runId,
           sessionId: run.sessionId,
@@ -981,7 +1037,12 @@ export class ProviderRunCoordinator implements RunCoordinator {
           });
         }
       } else {
-        this.events.publish(`run:${runId}`, "run.completed", { resultNodeId: node.id, traceHash: stored.sha256 });
+        this.events.publish(`run:${runId}`, "run.completed", {
+          resultNodeId: node.id,
+          traceHash: stored.sha256,
+          ...(outcomeClassification === null ? {} : { classification: outcomeClassification }),
+          providerOutcome: providerOutcomeJson,
+        });
       }
     } catch (error) {
       if (!finalized) {
@@ -992,8 +1053,8 @@ export class ProviderRunCoordinator implements RunCoordinator {
       }
       await this.repository.updateRun(runId, {
         status: controller.signal.aborted ? "cancelled" : "failed",
-        classification: controller.signal.aborted ? "cancelled" : "unknown",
-        normalizedOutput: { text, reasoning, compileWarnings, error: error instanceof Error ? error.message : String(error) },
+        classification: controller.signal.aborted ? "cancelled" : providerOutcome.classification() ?? "unknown",
+        normalizedOutput: { text, reasoning, providerOutcome: providerOutcome.toJson(), compileWarnings, error: error instanceof Error ? error.message : String(error) },
         finishedAt: new Date().toISOString()
       });
       this.events.publish(`run:${runId}`, "run.failed", { message: error instanceof Error ? error.message : String(error) });

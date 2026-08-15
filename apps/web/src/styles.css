@@ -134,6 +134,28 @@ code, pre { font-family: var(--mono); }
 .message-reasoning > div > :last-child { margin-bottom: 0; }
 .message-raw { margin: 0 0 10px; overflow-wrap: anywhere; white-space: pre-wrap; }
 .message-body > .message-raw:last-child, .message-reasoning .message-raw { margin-bottom: 0; }
+.provider-outcome { display: grid; gap: 8px; margin-top: 12px; padding: 10px; color: #c9b98c; background: #19170e; border: 1px solid #5a4a21; border-left: 3px solid var(--amber); border-radius: 4px; font-size: 10px; line-height: 1.5; }
+.provider-outcome:first-child { margin-top: 0; }
+.provider-outcome.outcome-blocked, .provider-outcome.outcome-error { color: #dbaba6; background: #1b1110; border-color: #65312d; border-left-color: var(--red); }
+.provider-outcome.outcome-recovered { color: #a9c6bd; background: #0d1815; border-color: #315c53; border-left-color: var(--cyan); }
+.provider-outcome > header { display: flex; align-items: center; gap: 6px; height: auto; padding: 0; color: inherit; background: transparent; border: 0; }
+.provider-outcome > header svg { flex: 0 0 auto; color: var(--amber); }
+.provider-outcome.outcome-blocked > header svg, .provider-outcome.outcome-error > header svg { color: var(--red); }
+.provider-outcome.outcome-recovered > header svg { color: var(--cyan); }
+.provider-outcome > header strong { font: 9px var(--mono); letter-spacing: .04em; text-transform: uppercase; }
+.provider-outcome > header span { margin-left: auto; color: currentColor; font: 7px var(--mono); text-transform: uppercase; }
+.provider-outcome-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.provider-outcome-tags span { padding: 2px 5px; color: #bba76f; background: #27200f; border: 1px solid #4d401e; border-radius: 10px; font: 7px var(--mono); }
+.outcome-blocked .provider-outcome-tags span, .outcome-error .provider-outcome-tags span { color: #d49892; background: #281413; border-color: #56302c; }
+.outcome-recovered .provider-outcome-tags span { color: #82bbb0; background: #10231f; border-color: #2e554e; }
+.provider-refusal-text { padding: 8px 9px; color: #d5c7a0; background: rgba(5,7,6,.35); border: 1px solid rgba(255,255,255,.06); border-radius: 3px; }
+.outcome-blocked .provider-refusal-text, .outcome-error .provider-refusal-text { color: #dfb8b4; }
+.provider-refusal-text > :first-child { margin-top: 0; }
+.provider-refusal-text > :last-child { margin-bottom: 0; }
+.provider-outcome > p { margin: 0; }
+.provider-fallback { display: flex; align-items: center; gap: 6px; font: 8px var(--mono); }
+.provider-fallback span { padding: 2px 4px; color: var(--cyan); background: #10231f; border-radius: 2px; text-transform: uppercase; }
+.provider-outcome-note { padding-top: 7px; border-top: 1px solid rgba(255,255,255,.08); color: #9f9280; font-size: 9px; }
 .message-streaming { border-left-color: var(--cyan); }
 .message-streaming .message-body { background: #0d1513; }
 .message-streaming .streaming-state { color: var(--cyan); }

@@ -7,6 +7,7 @@ import {
   mergeExtraBody,
   numberValue,
   serializeArguments,
+  stopDetailsFrom,
   stringValue,
   textFromContent,
   usageFrom,
@@ -70,6 +71,45 @@ function messages(request: CanonicalGenerationRequest): JsonValue[] {
   return result;
 }
 
+function contentAndRefusalEvents(
+  value: unknown,
+  index: number,
+): NormalizedProviderEvent[] {
+  if (typeof value === "string") {
+    return value === "" ? [] : [{ type: "content.delta", text: value, index }];
+  }
+  if (!Array.isArray(value)) return [];
+  const events: NormalizedProviderEvent[] = [];
+  for (const part of value) {
+    if (!isRecord(part)) continue;
+    if ((part.type === "text" || part.type === "output_text") && typeof part.text === "string" && part.text !== "") {
+      events.push({ type: "content.delta", text: part.text, index });
+    }
+    if (part.type === "refusal") {
+      const refusal = stringValue(part.refusal) ?? stringValue(part.text);
+      if (refusal) events.push({ type: "refusal.done", text: refusal, index });
+    }
+  }
+  return events;
+}
+
+function reasoningEvents(delta: Record<string, unknown>, index: number): NormalizedProviderEvent[] {
+  const direct = stringValue(delta.reasoning) ?? stringValue(delta.reasoning_content);
+  if (direct) return [{ type: "reasoning.delta", text: direct, index }];
+  if (!Array.isArray(delta.reasoning_details)) return [];
+  const events: NormalizedProviderEvent[] = [];
+  for (const detail of delta.reasoning_details) {
+    if (!isRecord(detail)) continue;
+    const text = detail.type === "reasoning.summary"
+      ? stringValue(detail.summary)
+      : detail.type === "reasoning.text"
+        ? stringValue(detail.text)
+        : undefined;
+    if (text) events.push({ type: "reasoning.delta", text, index });
+  }
+  return events;
+}
+
 function choiceEvents(payload: Record<string, unknown>): NormalizedProviderEvent[] {
   const events: NormalizedProviderEvent[] = [];
   const choices = Array.isArray(payload.choices) ? payload.choices : [];
@@ -78,13 +118,10 @@ function choiceEvents(payload: Record<string, unknown>): NormalizedProviderEvent
     const index = numberValue(choice.index) ?? 0;
     const delta = isRecord(choice.delta) ? choice.delta : isRecord(choice.message) ? choice.message : undefined;
     if (delta !== undefined) {
-      if (typeof delta.content === "string" && delta.content !== "") {
-        events.push({ type: "content.delta", text: delta.content, index });
-      }
-      const reasoning = stringValue(delta.reasoning_content) ?? stringValue(delta.reasoning);
-      if (reasoning !== undefined && reasoning !== "") {
-        events.push({ type: "reasoning.delta", text: reasoning, index });
-      }
+      events.push(...contentAndRefusalEvents(delta.content, index));
+      events.push(...reasoningEvents(delta, index));
+      const refusal = stringValue(delta.refusal);
+      if (refusal) events.push({ type: "refusal.delta", text: refusal, index });
       if (Array.isArray(delta.tool_calls)) {
         for (const tool of delta.tool_calls) {
           if (!isRecord(tool)) continue;
@@ -113,8 +150,20 @@ function choiceEvents(payload: Record<string, unknown>): NormalizedProviderEvent
         }
       }
     }
+    if (isRecord(choice.error)) {
+      events.push(errorEvent(classifyProviderError({ payload: { error: choice.error } })));
+    }
     const finishReason = stringValue(choice.finish_reason);
-    if (finishReason !== undefined) events.push({ type: "response.completed", finishReason });
+    const nativeFinishReason = stringValue(choice.native_finish_reason);
+    const stopDetails = stopDetailsFrom(choice.stop_details);
+    if (finishReason !== undefined || nativeFinishReason !== undefined || stopDetails !== undefined) {
+      events.push({
+        type: "response.completed",
+        ...(finishReason === undefined ? {} : { finishReason }),
+        ...(nativeFinishReason === undefined ? {} : { nativeFinishReason }),
+        ...(stopDetails === undefined ? {} : { stopDetails }),
+      });
+    }
   }
   const usage = usageFrom(payload.usage);
   if (usage !== undefined) events.push({ type: "usage", usage });
@@ -165,7 +214,7 @@ export const openAiChatAdapter: ProtocolAdapter = {
       return [errorEvent(classifyProviderError({ cause, payload: event.data, fallback: "parse-failure" }))];
     }
     if (!isRecord(payload)) return [{ type: "provider.unknown", ...(event.event === undefined ? {} : { providerType: event.event }) }];
-    if (isRecord(payload.error)) return [errorEvent(classifyProviderError({ payload }))];
+    if (isRecord(payload.error)) return [errorEvent(classifyProviderError({ payload })), ...choiceEvents(payload)];
     const events = choiceEvents(payload);
     if (events.length > 0) return events;
     const id = stringValue(payload.id);
@@ -182,7 +231,7 @@ export const openAiChatAdapter: ProtocolAdapter = {
 
   normalizeJson(payload: JsonValue): readonly NormalizedProviderEvent[] {
     if (!isRecord(payload)) return [errorEvent(classifyProviderError({ payload, fallback: "parse-failure" }))];
-    if (isRecord(payload.error)) return [errorEvent(classifyProviderError({ payload }))];
+    if (isRecord(payload.error)) return [errorEvent(classifyProviderError({ payload })), ...choiceEvents(payload)];
     const id = stringValue(payload.id);
     const model = stringValue(payload.model);
     return [

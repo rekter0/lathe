@@ -7,6 +7,7 @@ import {
   mergeExtraBody,
   numberValue,
   serializeArguments,
+  stopDetailsFrom,
   stringValue,
   textFromContent,
   usageFrom,
@@ -98,8 +99,25 @@ function completionEvents(
     if (!isRecord(item)) continue;
     if (item.type === "message" && Array.isArray(item.content)) {
       for (const part of item.content) {
-        if (isRecord(part) && part.type === "output_text" && typeof part.text === "string") {
+        if (!isRecord(part)) continue;
+        if (part.type === "output_text" && typeof part.text === "string") {
           events.push({ type: "content.delta", text: part.text, index: outputIndex });
+        } else if (part.type === "refusal") {
+          const refusal = stringValue(part.refusal) ?? stringValue(part.text);
+          if (refusal) events.push({ type: "refusal.done", text: refusal, index: outputIndex });
+        } else if (part.type === "reasoning_text" && typeof part.text === "string") {
+          events.push({ type: "reasoning.delta", text: part.text, index: outputIndex });
+        }
+      }
+    } else if (item.type === "reasoning") {
+      for (const summary of Array.isArray(item.summary) ? item.summary : []) {
+        if (isRecord(summary) && typeof summary.text === "string") {
+          events.push({ type: "reasoning.delta", text: summary.text, index: outputIndex });
+        }
+      }
+      for (const part of Array.isArray(item.content) ? item.content : []) {
+        if (isRecord(part) && part.type === "reasoning_text" && typeof part.text === "string") {
+          events.push({ type: "reasoning.delta", text: part.text, index: outputIndex });
         }
       }
     } else if (item.type === "function_call") {
@@ -123,7 +141,15 @@ function completionEvents(
   const usage = usageFrom(response.usage);
   if (usage !== undefined) events.push({ type: "usage", usage });
   const finishReason = stringValue(response.status);
-  events.push({ type: "response.completed", ...(finishReason === undefined ? {} : { finishReason }) });
+  const incompleteDetails = isRecord(response.incomplete_details) ? response.incomplete_details : undefined;
+  const incompleteReason = incompleteDetails === undefined ? undefined : stringValue(incompleteDetails.reason);
+  const stopDetails = stopDetailsFrom(response.stop_details);
+  events.push({
+    type: "response.completed",
+    ...(finishReason === undefined ? {} : { finishReason }),
+    ...(incompleteReason === undefined ? {} : { incompleteReason }),
+    ...(stopDetails === undefined ? {} : { stopDetails }),
+  });
   return events;
 }
 
@@ -198,6 +224,26 @@ export const openAiResponsesAdapter: ProtocolAdapter = {
         index: numberValue(payload.output_index) ?? 0,
       }];
     }
+    if (type === "response.refusal.delta") {
+      return [{
+        type: "refusal.delta",
+        text: stringValue(payload.delta) ?? "",
+        index: numberValue(payload.output_index) ?? 0,
+      }];
+    }
+    if (type === "response.refusal.done") {
+      return [{
+        type: "refusal.done",
+        text: stringValue(payload.refusal) ?? "",
+        index: numberValue(payload.output_index) ?? 0,
+      }];
+    }
+    if (type === "response.content_part.done" && isRecord(payload.part) && payload.part.type === "refusal") {
+      const refusal = stringValue(payload.part.refusal) ?? stringValue(payload.part.text);
+      return refusal
+        ? [{ type: "refusal.done", text: refusal, index: numberValue(payload.output_index) ?? 0 }]
+        : [];
+    }
     if (type === "response.reasoning_summary_text.delta" || type === "response.reasoning_text.delta") {
       return [{
         type: "reasoning.delta",
@@ -224,7 +270,9 @@ export const openAiResponsesAdapter: ProtocolAdapter = {
         argumentsDelta: stringValue(payload.delta) ?? "",
       }];
     }
-    if (type === "response.completed" && response !== undefined) return completionEvents(response, false);
+    if ((type === "response.completed" || type === "response.incomplete") && response !== undefined) {
+      return completionEvents(response, false);
+    }
     if (type === "response.failed" || type === "error") {
       return [errorEvent(classifyProviderError({ payload }))];
     }
@@ -235,7 +283,12 @@ export const openAiResponsesAdapter: ProtocolAdapter = {
     if (!isRecord(payload)) {
       return [errorEvent(classifyProviderError({ payload, fallback: "parse-failure" }))];
     }
-    if (isRecord(payload.error)) return [errorEvent(classifyProviderError({ payload }))];
+    if (isRecord(payload.error)) {
+      return [
+        ...completionEvents(payload).filter((event) => event.type !== "response.completed"),
+        errorEvent(classifyProviderError({ payload })),
+      ];
+    }
     const id = stringValue(payload.id);
     const model = stringValue(payload.model);
     return [

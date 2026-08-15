@@ -11,6 +11,7 @@ import {
   type ProviderFailure,
   type ProviderProfile,
   type ProviderProtocol,
+  type ProviderStopDetails,
   type ProviderUsage,
 } from "./types.js";
 
@@ -29,6 +30,54 @@ export function stringValue(value: unknown): string | undefined {
 
 export function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function nullableStringValue(value: unknown): string | null | undefined {
+  return value === null ? null : stringValue(value);
+}
+
+export function stopDetailsFrom(input: unknown): ProviderStopDetails | undefined {
+  if (!isRecord(input)) return undefined;
+  const type = stringValue(input.type);
+  const category = nullableStringValue(input.category);
+  const explanation = nullableStringValue(input.explanation);
+  const code = nullableStringValue(input.code);
+  return {
+    ...(type === undefined ? {} : { type }),
+    ...(category === undefined ? {} : { category }),
+    ...(explanation === undefined ? {} : { explanation }),
+    ...(code === undefined ? {} : { code }),
+    providerData: asJsonValue(input) as JsonObject,
+  };
+}
+
+const POLICY_STOP_REASONS = new Set([
+  "blocklist",
+  "blocked",
+  "content_filter",
+  "content_filtered",
+  "content_policy",
+  "content_policy_violation",
+  "copyright",
+  "guardrail",
+  "guardrail_intervened",
+  "image_safety",
+  "moderation",
+  "prohibited_content",
+  "recitation",
+  "refusal",
+  "refused",
+  "safety",
+  "spii",
+]);
+
+export function isPolicyStopReason(...values: readonly (string | null | undefined)[]): boolean {
+  return values.some((value) => {
+    if (!value) return false;
+    const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+    return POLICY_STOP_REASONS.has(normalized) ||
+      /(?:^|_)(?:content_filter|content_policy|guardrail|moderation|prohibited_content|refusal|safety)(?:_|$)/.test(normalized);
+  });
 }
 
 export function serializeArguments(value: JsonValue | string): string {
@@ -142,16 +191,74 @@ export function makeCompiledRequest(
 
 export function errorShape(payload: unknown): { message?: string; code?: string; type?: string } {
   if (!isRecord(payload)) return {};
-  const nested = isRecord(payload.error) ? payload.error : payload;
+  const response = isRecord(payload.response) ? payload.response : undefined;
+  const nested = isRecord(payload.error)
+    ? payload.error
+    : response !== undefined && isRecord(response.error)
+      ? response.error
+      : response ?? payload;
+  const metadata = isRecord(nested.metadata) ? nested.metadata : undefined;
   const message = stringValue(nested.message) ?? stringValue(nested.detail);
   const code = stringValue(nested.code) ??
     (typeof nested.code === "number" && Number.isFinite(nested.code) ? String(nested.code) : undefined);
-  const type = stringValue(nested.type);
+  const type = stringValue(nested.error_type) ??
+    (metadata === undefined ? undefined : stringValue(metadata.error_type)) ??
+    stringValue(nested.type) ??
+    (response === undefined ? undefined : stringValue(response.error_type)) ??
+    stringValue(payload.error_type);
   return {
     ...(message === undefined ? {} : { message }),
     ...(code === undefined ? {} : { code }),
     ...(type === undefined ? {} : { type }),
   };
+}
+
+const TYPED_ERROR_CLASSIFICATIONS: Readonly<Record<string, ProviderErrorClassification>> = {
+  // OpenRouter's stable cross-protocol error_type vocabulary.
+  authentication: "authentication",
+  permission_denied: "authentication",
+  payment_required: "authentication",
+  rate_limit_exceeded: "rate-limit",
+  provider_overloaded: "unavailable",
+  provider_unavailable: "unavailable",
+  timeout: "timeout",
+  context_length_exceeded: "invalid-request",
+  max_tokens_exceeded: "invalid-request",
+  token_limit_exceeded: "invalid-request",
+  string_too_long: "invalid-request",
+  invalid_request: "invalid-request",
+  invalid_prompt: "invalid-request",
+  not_found: "invalid-request",
+  precondition_failed: "invalid-request",
+  payload_too_large: "invalid-request",
+  unprocessable: "invalid-request",
+  invalid_image: "invalid-request",
+  image_too_large: "invalid-request",
+  image_too_small: "invalid-request",
+  unsupported_image_format: "invalid-request",
+  image_not_found: "invalid-request",
+  image_download_failed: "invalid-request",
+  content_policy_violation: "content-policy",
+  refusal: "content-policy",
+  server: "unavailable",
+  unmapped: "unavailable",
+
+  // Common native spellings used when no stable gateway type is present.
+  authentication_error: "authentication",
+  permission_error: "authentication",
+  billing_error: "authentication",
+  rate_limit_error: "rate-limit",
+  overloaded_error: "unavailable",
+  timeout_error: "timeout",
+  invalid_request_error: "invalid-request",
+  not_found_error: "invalid-request",
+  api_error: "unavailable",
+  server_error: "unavailable",
+};
+
+function typedErrorClassification(value: string | undefined): ProviderErrorClassification | undefined {
+  if (!value) return undefined;
+  return TYPED_ERROR_CLASSIFICATIONS[value.trim().toLowerCase().replace(/[\s-]+/g, "_")];
 }
 
 export function classifyProviderError(input: {
@@ -164,21 +271,24 @@ export function classifyProviderError(input: {
 }): ProviderFailure {
   const shape = errorShape(input.payload);
   const fingerprint = `${shape.code ?? ""} ${shape.type ?? ""} ${shape.message ?? ""}`.toLowerCase();
+  const typedClassification = typedErrorClassification(shape.type);
   let classification: ProviderErrorClassification = input.fallback ?? "unknown";
 
   if (input.timedOut === true) classification = "timeout";
   else if (input.aborted === true) classification = "cancelled";
-  else if (/content[_ -]?filter|safety|moderation|policy/.test(fingerprint)) classification = "content-policy";
-  else if (input.status === 401 || input.status === 403) classification = "authentication";
+  else if (isPolicyStopReason(shape.code, shape.type) || /content[_ -]?(?:filter|policy)|copyright|safety|moderation|guardrail|prompt[_ -]?injection|request[_ -]?blocked|blocked[_ -]?pii|\brefus(?:al|ed)\b/.test(fingerprint)) classification = "content-policy";
+  else if (typedClassification !== undefined) classification = typedClassification;
+  else if (input.status === 401 || input.status === 403 || /auth(?:entication|orization)?|invalid[_ -]?api[_ -]?key|permission[_ -]?denied|forbidden/.test(fingerprint)) classification = "authentication";
   else if (input.status === 429 || /rate[_ -]?limit|\b429\b/.test(fingerprint)) classification = "rate-limit";
-  else if (input.status === 408 || input.status === 504) classification = "timeout";
-  else if (input.status !== undefined && input.status >= 500) classification = "unavailable";
+  else if (input.status === 408 || input.status === 504 || /timeout|timed[_ -]?out/.test(fingerprint)) classification = "timeout";
+  else if (input.status !== undefined && input.status >= 500 || /(?:^|\s)(?:server|unmapped)(?:\s|$)|overload|unavailable|server[_ -]?error|upstream[_ -]?error/.test(fingerprint)) classification = "unavailable";
   else if (
     input.status !== undefined &&
     [400, 404, 405, 409, 413, 415, 422].includes(input.status)
   ) {
     classification = "invalid-request";
-  } else if (input.cause instanceof SyntaxError) classification = "parse-failure";
+  } else if (/context[_ -]?length|invalid[_ -]?(?:image|prompt|request)|not[_ -]?found|payload[_ -]?too[_ -]?large|precondition[_ -]?failed|string[_ -]?too[_ -]?long|token[_ -]?limit|unprocessable|validation[_ -]?error|bad[_ -]?request/.test(fingerprint)) classification = "invalid-request";
+  else if (input.cause instanceof SyntaxError) classification = "parse-failure";
   else if (input.cause instanceof TypeError) classification = "transport";
 
   const causeMessage = input.cause instanceof Error ? input.cause.message : undefined;
