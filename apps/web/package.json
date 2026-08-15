@@ -16,6 +16,7 @@
     "@codemirror/theme-one-dark": "catalog:",
     "@codemirror/view": "catalog:",
     "@lathe/domain": "workspace:*",
+    "@lathe/payloads": "workspace:*",
     "@radix-ui/react-dialog": "catalog:",
     "@radix-ui/react-tabs": "catalog:",
     "@tailwindcss/vite": "catalog:",

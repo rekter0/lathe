@@ -90,6 +90,22 @@ function sanitizeFile(
   }
 
   const text = decodeUtf8(original, file.path);
+  if (mediaType === "application/x-ndjson" || file.path.endsWith(".ndjson")) {
+    try {
+      let count = 0;
+      const lines = text.split(/\r?\n/u).map((line) => {
+        if (line.trim() === "") return "";
+        const redacted = redactArtifactJson(JSON.parse(line) as JsonValue, secretValues);
+        count += redacted.count;
+        return JSON.stringify(redacted.value);
+      });
+      return { bytes: utf8(lines.join("\n")), redactions: count };
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      // Some compatible providers record non-JSON diagnostic fragments. Fall
+      // through to conservative text redaction for those legacy traces.
+    }
+  }
   if (mediaType === "application/json" || mediaType.endsWith("+json") || file.path.endsWith(".json")) {
     try {
       const parsed = JSON.parse(text) as JsonValue;

@@ -9,6 +9,7 @@ const project: Project = {
   id: "project-1",
   name: "Adversarial research",
   description: "",
+  targetName: "",
   defaultHarnessRevisionId: null,
   workspaceRoot: null,
   createdAt: "2026-08-15T00:00:00.000Z",

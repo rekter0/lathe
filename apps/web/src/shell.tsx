@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { PanelLeftClose, PanelLeftOpen, Settings2 } from "lucide-react";
 import { api, hasLaunchToken } from "./api.js";
 import { UiSettingsDialog } from "./components/ui-settings-dialog.js";
+import { PayloadWorkbenchSettingsDialog } from "./components/payload-workbench-settings.js";
 import type { Project } from "./types.js";
 
 interface AppConfig {
@@ -117,6 +118,7 @@ export function Shell({ children }: PropsWithChildren) {
         </Link>
         <div className="topbar-meta">
           <span className="status-dot" /> local · {config.data?.databaseDialect ?? "…"}
+          <PayloadWorkbenchSettingsDialog />
           <Link to="/settings" className="icon-button" aria-label="Settings" title="Provider and library settings"><Settings2 size={17} /></Link>
           <UiSettingsDialog />
         </div>

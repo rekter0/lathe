@@ -516,6 +516,7 @@ function BranchActions({ data, branch, selectedNode, onChanged }: { data: Workbe
 
 function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchData; branch: BranchRef; onRunStarted(id: string): void; onChanged(): void }) {
   const [message, setMessage] = useState("");
+  const [sourcePayloadRevisionId, setSourcePayloadRevisionId] = useState<string | null>(null);
   const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
   const send = useMutation({
     mutationFn: async () => {
@@ -525,12 +526,12 @@ function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchDa
           const item = data.attachments.find((attachment) => attachment.id === id);
           return item ? [{ type: "attachment" as const, attachmentId: item.id, name: item.fileName, mediaType: item.mediaType }] : [];
         })];
-        const response = await api<{ node: MessageNode }>(`/api/sessions/${data.session.id}/messages`, { method: "POST", ...jsonBody({ branchId: branch.id, parentId: branch.headNodeId, role: "user", parts }) });
+        const response = await api<{ node: MessageNode }>(`/api/sessions/${data.session.id}/messages`, { method: "POST", ...jsonBody({ branchId: branch.id, parentId: branch.headNodeId, role: "user", parts, sourcePayloadRevisionId }) });
         contextNodeId = response.node.id;
       }
-      return api<{ run: { id: string } }>("/api/runs", { method: "POST", ...jsonBody({ sessionId: data.session.id, branchId: branch.id, contextNodeId, ...(attachmentIds.length === 0 ? { userMessage: message } : {}) }) });
+      return api<{ run: { id: string } }>("/api/runs", { method: "POST", ...jsonBody({ sessionId: data.session.id, branchId: branch.id, contextNodeId, ...(attachmentIds.length === 0 ? { userMessage: message, sourcePayloadRevisionId } : {}) }) });
     },
-    onSuccess: ({ run }) => { setMessage(""); setAttachmentIds([]); onRunStarted(run.id); onChanged(); }
+    onSuccess: ({ run }) => { setMessage(""); setSourcePayloadRevisionId(null); setAttachmentIds([]); onRunStarted(run.id); onChanged(); }
   });
   const upload = useMutation({ mutationFn: async (file: File) => {
     const form = new FormData(); form.set("file", file);
@@ -547,7 +548,16 @@ function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchDa
         if (canSend) event.currentTarget.form?.requestSubmit();
       }} placeholder="Enter the next operator payload…" rows={2} required aria-keyshortcuts="Enter Shift+Enter" />
       <div className="composer-actions">
-        <PayloadWorkbench value={message} onUse={setMessage} />
+        <PayloadWorkbench value={message} sourcePayloadRevisionId={sourcePayloadRevisionId} context={{
+          projectId: data.session.projectId,
+          sessionId: data.session.id,
+          sessionName: data.session.name,
+          ...(data.session.description ? { sessionDescription: data.session.description } : {}),
+          branchId: branch.id,
+          branchName: branch.name,
+          contextNodeId: branch.headNodeId,
+          path: pathToRoot(data.nodes, branch.headNodeId)
+        }} onUse={(selection) => { setMessage(selection.text); setSourcePayloadRevisionId(selection.sourcePayloadRevisionId); }} />
         <Button disabled={!canSend}>{send.isPending ? <span className="spinner small" /> : <Play size={16} />} Run</Button>
       </div>
     </form>

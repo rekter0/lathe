@@ -1,8 +1,16 @@
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import {
+  assetKindSchema,
+  createPayloadGenerationAttemptSchema,
+  createPayloadGenerationSchema,
+  createPayloadRevisionSchema,
   emptyResolvedConfig,
   nowIso,
+  payloadWorkbenchSettingsInputSchema,
   sha256Json,
+  updatePayloadGenerationAttemptSchema,
+  updatePayloadGenerationSchema,
+  updateSessionMetadataSchema,
   uuidv7,
   type AssetKind,
   type AssetRevision,
@@ -17,6 +25,14 @@ import {
   type MessageNode,
   type MessagePart,
   type ModelRun,
+  type CreatePayloadGenerationAttemptInput,
+  type CreatePayloadGenerationInput,
+  type CreatePayloadRevisionInput,
+  type PayloadGeneration,
+  type PayloadGenerationAttempt,
+  type PayloadRevision,
+  type PayloadWorkbenchSettings,
+  type PayloadWorkbenchSettingsInput,
   type Project,
   type ProviderProfile,
   type ResolvedConfig,
@@ -29,6 +45,7 @@ import {
 export interface CreateProjectInput {
   name: string;
   description?: string;
+  targetName?: string;
   workspaceRoot?: string | null;
   defaultHarnessRevisionId?: string | null;
 }
@@ -36,6 +53,7 @@ export interface CreateProjectInput {
 export interface CreateSessionInput {
   projectId: string;
   name: string;
+  description?: string;
   providerProfileId?: string | null;
   modelId?: string | null;
   draftConfig?: ResolvedConfig;
@@ -50,6 +68,12 @@ export interface AppendNodeInput {
   parts: MessagePart[];
   sourceRunId?: string | null;
   configSnapshotId?: string | null;
+  sourcePayloadRevisionId?: string | null;
+}
+
+export interface UpdateSessionMetadataInput {
+  name?: string | undefined;
+  description?: string | undefined;
 }
 
 export interface CreateProviderInput {
@@ -71,7 +95,7 @@ export interface RestoreCheckpointInput { checkpointId: string; sessionId: strin
 export interface RestoreCheckpointResult { checkpoint: Checkpoint; branch: BranchRef; session: Session }
 
 export interface ResourceReference {
-  kind: "project" | "session" | "checkpoint" | "snapshot" | "asset" | "automation";
+  kind: "project" | "session" | "checkpoint" | "snapshot" | "asset" | "automation" | "payload-settings" | "payload-generation" | "payload-revision" | "message";
   id: string;
   label: string;
   detail: string;
@@ -93,6 +117,7 @@ export interface LatheRepository {
   listSessions(projectId: string): Promise<Session[]>;
   getSession(id: string): Promise<Session | null>;
   createSession(input: CreateSessionInput): Promise<{ session: Session; branch: BranchRef }>;
+  updateSessionMetadata(id: string, input: UpdateSessionMetadataInput): Promise<Session | null>;
   updateSessionDraft(id: string, config: ResolvedConfig): Promise<Session | null>;
   updateSessionModel(id: string, providerProfileId: string | null, modelId: string | null): Promise<Session | null>;
   updateSessionContinuation(id: string, enabled: boolean, limit: number): Promise<Session | null>;
@@ -133,6 +158,26 @@ export interface LatheRepository {
   getAutomationJob(id: string): Promise<AutomationJob | null>;
   updateAutomationJob(id: string, patch: Partial<Pick<AutomationJob, "status" | "progress" | "error">>): Promise<AutomationJob | null>;
   listAutomationJobs(sessionId: string): Promise<AutomationJob[]>;
+  getPayloadWorkbenchSettings(): Promise<PayloadWorkbenchSettings | null>;
+  upsertPayloadWorkbenchSettings(input: PayloadWorkbenchSettingsInput): Promise<PayloadWorkbenchSettings>;
+  deletePayloadWorkbenchSettings(): Promise<boolean>;
+  createPayloadGeneration(input: CreatePayloadGenerationInput): Promise<PayloadGeneration>;
+  getPayloadGeneration(id: string, includeDeleted?: boolean): Promise<PayloadGeneration | null>;
+  getActivePayloadGeneration(sessionId: string): Promise<PayloadGeneration | null>;
+  listPayloadGenerations(sessionId: string, includeDeleted?: boolean): Promise<PayloadGeneration[]>;
+  updatePayloadGeneration(id: string, patch: { status: PayloadGeneration["status"] }): Promise<PayloadGeneration | null>;
+  deletePayloadGeneration(id: string): Promise<ResourceDeletionResult>;
+  restorePayloadGeneration(id: string): Promise<PayloadGeneration | null>;
+  createPayloadGenerationAttempt(input: CreatePayloadGenerationAttemptInput): Promise<PayloadGenerationAttempt>;
+  getPayloadGenerationAttempt(id: string): Promise<PayloadGenerationAttempt | null>;
+  listPayloadGenerationAttempts(generationId: string): Promise<PayloadGenerationAttempt[]>;
+  updatePayloadGenerationAttempt(id: string, patch: Partial<Pick<PayloadGenerationAttempt, "status" | "classification" | "normalizedOutput" | "usage" | "traceHash" | "nativeThreadId" | "nativeTurnId" | "startedAt" | "finishedAt">>): Promise<PayloadGenerationAttempt | null>;
+  createPayloadRevision(input: CreatePayloadRevisionInput): Promise<PayloadRevision>;
+  getPayloadRevision(id: string, includeDeleted?: boolean): Promise<PayloadRevision | null>;
+  listPayloadRevisions(sessionId: string, includeDeleted?: boolean): Promise<PayloadRevision[]>;
+  listPayloadRevisionsForGeneration(generationId: string, includeDeleted?: boolean): Promise<PayloadRevision[]>;
+  deletePayloadRevision(id: string): Promise<ResourceDeletionResult>;
+  restorePayloadRevision(id: string): Promise<PayloadRevision | null>;
   markRunningJobsInterrupted(): Promise<void>;
 }
 
@@ -223,6 +268,7 @@ export class DrizzleLatheRepository implements LatheRepository {
       id: uuidv7(),
       name: input.name,
       description: input.description ?? "",
+      targetName: input.targetName ?? "",
       defaultHarnessRevisionId: input.defaultHarnessRevisionId ?? null,
       workspaceRoot: input.workspaceRoot ?? null,
       createdAt: timestamp,
@@ -263,7 +309,7 @@ export class DrizzleLatheRepository implements LatheRepository {
     const draftConfig = structuredClone(input.draftConfig ?? emptyResolvedConfig());
     draftConfig.provider = null;
     const session: Session = {
-      id: uuidv7(), projectId: input.projectId, name: input.name, providerProfileId: input.providerProfileId ?? null,
+      id: uuidv7(), projectId: input.projectId, name: input.name, description: input.description ?? "", providerProfileId: input.providerProfileId ?? null,
       modelId: input.modelId ?? null, activeBranchId: branch.id, draftConfig,
       autoContinueTools: false, autoContinueLimit: 8, createdAt: timestamp, updatedAt: timestamp
     };
@@ -281,6 +327,13 @@ export class DrizzleLatheRepository implements LatheRepository {
       });
     }
     return { session, branch };
+  }
+
+  async updateSessionMetadata(id: string, input: UpdateSessionMetadataInput): Promise<Session | null> {
+    const parsed = updateSessionMetadataSchema.parse(input);
+    return this.returningOrNull(
+      this.db.update(this.schema.sessions).set({ ...parsed, updatedAt: nowIso() }).where(eq(this.schema.sessions.id, id)).returning()
+    );
   }
 
   async updateSessionDraft(id: string, config: ResolvedConfig): Promise<Session | null> {
@@ -333,9 +386,14 @@ export class DrizzleLatheRepository implements LatheRepository {
       const parent = await this.getNode(input.parentId);
       if (!parent || parent.sessionId !== input.sessionId) throw new Error("Parent node does not belong to session");
     }
+    if (input.sourcePayloadRevisionId) {
+      const revision = await this.getPayloadRevision(input.sourcePayloadRevisionId);
+      if (!revision || revision.sessionId !== input.sessionId) throw new Error("Source payload revision does not belong to session");
+    }
     const node: MessageNode = {
       id: input.id ?? uuidv7(), sessionId: input.sessionId, parentId: input.parentId ?? null, role: input.role, parts: input.parts,
-      sourceRunId: input.sourceRunId ?? null, configSnapshotId: input.configSnapshotId ?? null, createdAt: nowIso()
+      sourceRunId: input.sourceRunId ?? null, configSnapshotId: input.configSnapshotId ?? null,
+      sourcePayloadRevisionId: input.sourcePayloadRevisionId ?? null, createdAt: nowIso()
     };
     const apply = (tx: any, synchronous: boolean) => {
       const branchQuery = tx.select().from(this.schema.branches).where(eq(this.schema.branches.id, input.branchId));
@@ -625,6 +683,7 @@ export class DrizzleLatheRepository implements LatheRepository {
   }
 
   async saveAssetRevision(asset: AssetRevision): Promise<AssetRevision> {
+    assetKindSchema.parse(asset.kind);
     const query = this.db.insert(this.schema.assetRevisions).values(asset).onConflictDoNothing().returning();
     const inserted = await this.returningOrNull<AssetRevision>(query);
     if (inserted) return inserted;
@@ -664,20 +723,28 @@ export class DrizzleLatheRepository implements LatheRepository {
     snapshots: ConfigSnapshot[];
     assets: AssetRevision[];
     jobs: AutomationJob[];
+    payloadSettings: PayloadWorkbenchSettings | null;
+    payloadGenerations: PayloadGeneration[];
+    payloadAttempts: PayloadGenerationAttempt[];
+    payloadRevisions: PayloadRevision[];
   }> {
-    const [projects, sessions, checkpoints, snapshots, assets, jobs] = await Promise.all([
+    const [projects, sessions, checkpoints, snapshots, assets, jobs, payloadSettings, payloadGenerations, payloadAttempts, payloadRevisions] = await Promise.all([
       this.all<Project>(this.db.select().from(this.schema.projects)),
       this.all<Session>(this.db.select().from(this.schema.sessions)),
       this.all<Checkpoint>(this.db.select().from(this.schema.checkpoints)),
       this.all<ConfigSnapshot>(this.db.select().from(this.schema.configSnapshots)),
       this.listAssetRevisions(),
-      this.all<AutomationJob>(this.db.select().from(this.schema.automationJobs))
+      this.all<AutomationJob>(this.db.select().from(this.schema.automationJobs)),
+      this.getPayloadWorkbenchSettings(),
+      this.all<PayloadGeneration>(this.db.select().from(this.schema.payloadGenerations)),
+      this.all<PayloadGenerationAttempt>(this.db.select().from(this.schema.payloadGenerationAttempts)),
+      this.all<PayloadRevision>(this.db.select().from(this.schema.payloadRevisions))
     ]);
-    return { projects, sessions, checkpoints, snapshots, assets, jobs };
+    return { projects, sessions, checkpoints, snapshots, assets, jobs, payloadSettings, payloadGenerations, payloadAttempts, payloadRevisions };
   }
 
   private async providerReferences(id: string): Promise<ResourceReference[]> {
-    const { sessions, checkpoints, snapshots, assets, jobs } = await this.referenceRows();
+    const { sessions, checkpoints, snapshots, assets, jobs, payloadAttempts } = await this.referenceRows();
     const references: ResourceReference[] = [];
     for (const session of sessions) {
       if (session.providerProfileId === id || session.draftConfig.provider?.profileId === id) {
@@ -696,11 +763,16 @@ export class DrizzleLatheRepository implements LatheRepository {
     for (const job of jobs) {
       if (jsonReferences(job.plan, id)) references.push({ kind: "automation", id: job.id, label: job.kind, detail: "saved automation plan" });
     }
+    for (const attempt of payloadAttempts) {
+      if (attempt.providerProfileId === id || jsonReferences(attempt.backendSnapshot, id)) {
+        references.push({ kind: "payload-generation", id: attempt.generationId, label: attempt.generationId, detail: "payload generation backend evidence" });
+      }
+    }
     return uniqueReferences(references);
   }
 
   private async assetReferences(id: string): Promise<ResourceReference[]> {
-    const { projects, sessions, snapshots, assets, jobs } = await this.referenceRows();
+    const { projects, sessions, snapshots, assets, jobs, payloadSettings, payloadGenerations } = await this.referenceRows();
     const references: ResourceReference[] = [];
     for (const project of projects) {
       if (project.defaultHarnessRevisionId === id) references.push({ kind: "project", id: project.id, label: project.name, detail: "default harness" });
@@ -717,11 +789,24 @@ export class DrizzleLatheRepository implements LatheRepository {
     for (const job of jobs) {
       if (jsonReferences(job.plan, id)) references.push({ kind: "automation", id: job.id, label: job.kind, detail: "saved automation plan" });
     }
+    if (payloadSettings?.defaultGeneratorProfileRevisionId === id || payloadSettings?.defaultInstructionRevisionId === id) {
+      references.push({ kind: "payload-settings", id: payloadSettings.id, label: "Payload workbench defaults", detail: "selected default revision" });
+    }
+    for (const generation of payloadGenerations) {
+      if (
+        generation.generatorProfileRevisionId === id
+        || generation.instructionRevisionId === id
+        || generation.pipelineRevisionId === id
+        || generation.techniqueRevisionIds.includes(id)
+      ) {
+        references.push({ kind: "payload-generation", id: generation.id, label: generation.id, detail: "immutable payload generation configuration" });
+      }
+    }
     return uniqueReferences(references);
   }
 
   private async secretReferences(id: string): Promise<ResourceReference[]> {
-    const { sessions, snapshots, assets, jobs } = await this.referenceRows();
+    const { sessions, snapshots, assets, jobs, payloadGenerations, payloadAttempts, payloadRevisions } = await this.referenceRows();
     const references: ResourceReference[] = [];
     for (const session of sessions) {
       if (jsonReferences(session.draftConfig as unknown as JsonValue, id)) references.push({ kind: "session", id: session.id, label: session.name, detail: "session draft" });
@@ -734,6 +819,25 @@ export class DrizzleLatheRepository implements LatheRepository {
     }
     for (const job of jobs) {
       if (jsonReferences(job.plan, id)) references.push({ kind: "automation", id: job.id, label: job.kind, detail: "saved automation plan" });
+    }
+    for (const generation of payloadGenerations) {
+      if (
+        jsonReferences(generation.variables, id)
+        || jsonReferences(generation.contextSnapshot, id)
+        || jsonReferences(generation.contextOptions as unknown as JsonValue, id)
+      ) {
+        references.push({ kind: "payload-generation", id: generation.id, label: generation.id, detail: "payload generation input or context" });
+      }
+    }
+    for (const attempt of payloadAttempts) {
+      if (jsonReferences(attempt.backendSnapshot, id) || (attempt.normalizedOutput !== null && jsonReferences(attempt.normalizedOutput, id))) {
+        references.push({ kind: "payload-generation", id: attempt.generationId, label: attempt.generationId, detail: "payload generation backend evidence" });
+      }
+    }
+    for (const revision of payloadRevisions) {
+      if (jsonReferences(revision.provenance, id)) {
+        references.push({ kind: "payload-revision", id: revision.id, label: `Payload revision ${revision.ordinal}`, detail: "payload provenance" });
+      }
     }
     return uniqueReferences(references);
   }
@@ -795,9 +899,388 @@ export class DrizzleLatheRepository implements LatheRepository {
     return this.all(this.db.select().from(this.schema.automationJobs).where(eq(this.schema.automationJobs.sessionId, sessionId)).orderBy(desc(this.schema.automationJobs.createdAt)));
   }
 
+  private async requireAssetRevision(id: string, kind: AssetKind, label: string): Promise<AssetRevision> {
+    const asset = await this.get<AssetRevision>(
+      this.db.select().from(this.schema.assetRevisions).where(eq(this.schema.assetRevisions.id, id))
+    );
+    if (!asset || asset.archivedAt) throw new Error(`${label} revision does not exist`);
+    if (asset.kind !== kind) throw new Error(`${label} revision must be a ${kind} asset`);
+    return asset;
+  }
+
+  async getPayloadWorkbenchSettings(): Promise<PayloadWorkbenchSettings | null> {
+    return this.get(
+      this.db.select().from(this.schema.payloadWorkbenchSettings).where(eq(this.schema.payloadWorkbenchSettings.id, "global"))
+    );
+  }
+
+  async upsertPayloadWorkbenchSettings(input: PayloadWorkbenchSettingsInput): Promise<PayloadWorkbenchSettings> {
+    const parsed = payloadWorkbenchSettingsInputSchema.parse(input);
+    if (parsed.defaultGeneratorProfileRevisionId) {
+      await this.requireAssetRevision(parsed.defaultGeneratorProfileRevisionId, "payload-generator-profile", "Default generator profile");
+    }
+    if (parsed.defaultInstructionRevisionId) {
+      await this.requireAssetRevision(parsed.defaultInstructionRevisionId, "payload-generator-instruction", "Default generator instruction");
+    }
+    const timestamp = nowIso();
+    const settings: PayloadWorkbenchSettings = { id: "global", ...parsed, createdAt: timestamp, updatedAt: timestamp };
+    return this.returning(
+      this.db.insert(this.schema.payloadWorkbenchSettings).values(settings).onConflictDoUpdate({
+        target: this.schema.payloadWorkbenchSettings.id,
+        set: { ...parsed, updatedAt: timestamp }
+      }).returning()
+    );
+  }
+
+  async deletePayloadWorkbenchSettings(): Promise<boolean> {
+    return Boolean(await this.returningOrNull<PayloadWorkbenchSettings>(
+      this.db.delete(this.schema.payloadWorkbenchSettings)
+        .where(eq(this.schema.payloadWorkbenchSettings.id, "global"))
+        .returning()
+    ));
+  }
+
+  private async validatePayloadGenerationReferences(input: {
+    projectId: string;
+    sessionId: string;
+    branchId: string;
+    contextNodeId: string | null;
+    parentRevisionId: string | null;
+    feedback: string | null;
+    generatorProfileRevisionId: string;
+    instructionRevisionId: string | null;
+    techniqueRevisionIds: string[];
+    pipelineRevisionId: string | null;
+  }): Promise<void> {
+    const [project, session, branches] = await Promise.all([
+      this.getProject(input.projectId),
+      this.getSession(input.sessionId),
+      this.listBranches(input.sessionId)
+    ]);
+    if (!project) throw new Error("Payload generation project does not exist");
+    if (!session || session.projectId !== input.projectId) throw new Error("Payload generation session does not belong to project");
+    if (!branches.some((branch) => branch.id === input.branchId)) throw new Error("Payload generation branch does not belong to session");
+    if (input.contextNodeId) {
+      const node = await this.getNode(input.contextNodeId);
+      if (!node || node.sessionId !== input.sessionId) throw new Error("Payload generation context node does not belong to session");
+    }
+    if (input.parentRevisionId) {
+      const parent = await this.getPayloadRevision(input.parentRevisionId);
+      if (!parent || parent.projectId !== input.projectId || parent.sessionId !== input.sessionId) {
+        throw new Error("Parent payload revision does not belong to session");
+      }
+    } else if (input.feedback !== null) {
+      throw new Error("Payload generation feedback requires a parent revision");
+    }
+    await this.requireAssetRevision(input.generatorProfileRevisionId, "payload-generator-profile", "Generator profile");
+    if (input.instructionRevisionId) {
+      await this.requireAssetRevision(input.instructionRevisionId, "payload-generator-instruction", "Generator instruction");
+    }
+    for (const techniqueRevisionId of input.techniqueRevisionIds) {
+      await this.requireAssetRevision(techniqueRevisionId, "payload-technique", "Technique");
+    }
+    if (input.pipelineRevisionId) {
+      await this.requireAssetRevision(input.pipelineRevisionId, "payload-pipeline", "Pipeline");
+    }
+  }
+
+  async createPayloadGeneration(input: CreatePayloadGenerationInput): Promise<PayloadGeneration> {
+    const parsed = createPayloadGenerationSchema.parse(input);
+    await this.validatePayloadGenerationReferences(parsed);
+    const timestamp = nowIso();
+    const generation: PayloadGeneration = {
+      ...parsed,
+      id: uuidv7(),
+      contextHash: sha256Json(parsed.contextSnapshot),
+      status: "queued",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      deletedAt: null
+    };
+    return this.returning(this.db.insert(this.schema.payloadGenerations).values(generation).returning());
+  }
+
+  async getPayloadGeneration(id: string, includeDeleted = false): Promise<PayloadGeneration | null> {
+    const condition = includeDeleted
+      ? eq(this.schema.payloadGenerations.id, id)
+      : and(eq(this.schema.payloadGenerations.id, id), isNull(this.schema.payloadGenerations.deletedAt));
+    return this.get(this.db.select().from(this.schema.payloadGenerations).where(condition));
+  }
+
+  async getActivePayloadGeneration(sessionId: string): Promise<PayloadGeneration | null> {
+    return this.get(
+      this.db.select().from(this.schema.payloadGenerations).where(and(
+        eq(this.schema.payloadGenerations.sessionId, sessionId),
+        isNull(this.schema.payloadGenerations.deletedAt),
+        inArray(this.schema.payloadGenerations.status, ["queued", "streaming"])
+      )).orderBy(desc(this.schema.payloadGenerations.createdAt))
+    );
+  }
+
+  async listPayloadGenerations(sessionId: string, includeDeleted = false): Promise<PayloadGeneration[]> {
+    const condition = includeDeleted
+      ? eq(this.schema.payloadGenerations.sessionId, sessionId)
+      : and(eq(this.schema.payloadGenerations.sessionId, sessionId), isNull(this.schema.payloadGenerations.deletedAt));
+    return this.all(this.db.select().from(this.schema.payloadGenerations).where(condition).orderBy(desc(this.schema.payloadGenerations.createdAt)));
+  }
+
+  async updatePayloadGeneration(id: string, patch: { status: PayloadGeneration["status"] }): Promise<PayloadGeneration | null> {
+    const parsed = updatePayloadGenerationSchema.parse(patch);
+    return this.returningOrNull(
+      this.db.update(this.schema.payloadGenerations)
+        .set({ ...parsed, updatedAt: nowIso() })
+        .where(and(eq(this.schema.payloadGenerations.id, id), isNull(this.schema.payloadGenerations.deletedAt)))
+        .returning()
+    );
+  }
+
+  async deletePayloadGeneration(id: string): Promise<ResourceDeletionResult> {
+    const generation = await this.getPayloadGeneration(id);
+    if (!generation) return { deleted: false, references: [] };
+    const ownRevisions = await this.listPayloadRevisionsForGeneration(id, true);
+    const ownRevisionIds = new Set(ownRevisions.map((revision) => revision.id));
+    const [nodes, generations, revisions] = await Promise.all([
+      this.all<MessageNode>(this.db.select().from(this.schema.messageNodes)),
+      this.all<PayloadGeneration>(this.db.select().from(this.schema.payloadGenerations)),
+      this.all<PayloadRevision>(this.db.select().from(this.schema.payloadRevisions))
+    ]);
+    const references: ResourceReference[] = [
+      ...nodes.filter((node) => node.sourcePayloadRevisionId && ownRevisionIds.has(node.sourcePayloadRevisionId)).map((node) => ({
+        kind: "message" as const, id: node.id, label: node.id, detail: "message source payload"
+      })),
+      ...generations.filter((child) => child.id !== id && child.deletedAt === null && child.parentRevisionId && ownRevisionIds.has(child.parentRevisionId)).map((child) => ({
+        kind: "payload-generation" as const, id: child.id, label: child.id, detail: "refinement based on this generation"
+      })),
+      ...revisions.filter((child) => child.generationId !== id && child.deletedAt === null && child.parentRevisionId && ownRevisionIds.has(child.parentRevisionId)).map((child) => ({
+        kind: "payload-revision" as const, id: child.id, label: `Payload revision ${child.ordinal}`, detail: "derived outside this generation"
+      }))
+    ];
+    if (references.length > 0) return { deleted: false, references };
+    let timestamp = nowIso();
+    const existingTombstones = new Set(ownRevisions.map((revision) => revision.deletedAt).filter((value): value is string => value !== null));
+    while (existingTombstones.has(timestamp)) timestamp = new Date(Date.parse(timestamp) + 1).toISOString();
+    if (this.dialect === "sqlite") {
+      const deleted = this.db.transaction((tx: any) => {
+        const row = tx.update(this.schema.payloadGenerations).set({ deletedAt: timestamp, updatedAt: timestamp })
+          .where(and(eq(this.schema.payloadGenerations.id, id), isNull(this.schema.payloadGenerations.deletedAt))).returning().get() as PayloadGeneration | undefined;
+        if (!row) return false;
+        tx.update(this.schema.payloadRevisions).set({ deletedAt: timestamp })
+          .where(and(eq(this.schema.payloadRevisions.generationId, id), isNull(this.schema.payloadRevisions.deletedAt))).run();
+        return true;
+      }) as boolean;
+      return { deleted, references: [] };
+    }
+    const deleted = await this.db.transaction(async (tx: any) => {
+      const rows = await tx.update(this.schema.payloadGenerations).set({ deletedAt: timestamp, updatedAt: timestamp })
+        .where(and(eq(this.schema.payloadGenerations.id, id), isNull(this.schema.payloadGenerations.deletedAt))).returning() as PayloadGeneration[];
+      if (rows.length === 0) return false;
+      await tx.update(this.schema.payloadRevisions).set({ deletedAt: timestamp })
+        .where(and(eq(this.schema.payloadRevisions.generationId, id), isNull(this.schema.payloadRevisions.deletedAt)));
+      return true;
+    }) as boolean;
+    return { deleted, references: [] };
+  }
+
+  async restorePayloadGeneration(id: string): Promise<PayloadGeneration | null> {
+    const generation = await this.getPayloadGeneration(id, true);
+    if (!generation || !generation.deletedAt) return null;
+    await this.validatePayloadGenerationReferences(generation);
+    const deletedAt = generation.deletedAt;
+    const timestamp = nowIso();
+    if (this.dialect === "sqlite") {
+      return this.db.transaction((tx: any) => {
+        const restored = tx.update(this.schema.payloadGenerations).set({ deletedAt: null, updatedAt: timestamp })
+          .where(and(eq(this.schema.payloadGenerations.id, id), eq(this.schema.payloadGenerations.deletedAt, deletedAt))).returning().get() as PayloadGeneration | undefined;
+        if (!restored) return null;
+        tx.update(this.schema.payloadRevisions).set({ deletedAt: null })
+          .where(and(eq(this.schema.payloadRevisions.generationId, id), eq(this.schema.payloadRevisions.deletedAt, deletedAt))).run();
+        return restored;
+      }) as PayloadGeneration | null;
+    }
+    return this.db.transaction(async (tx: any) => {
+      const rows = await tx.update(this.schema.payloadGenerations).set({ deletedAt: null, updatedAt: timestamp })
+        .where(and(eq(this.schema.payloadGenerations.id, id), eq(this.schema.payloadGenerations.deletedAt, deletedAt))).returning() as PayloadGeneration[];
+      const restored = rows[0];
+      if (!restored) return null;
+      await tx.update(this.schema.payloadRevisions).set({ deletedAt: null })
+        .where(and(eq(this.schema.payloadRevisions.generationId, id), eq(this.schema.payloadRevisions.deletedAt, deletedAt)));
+      return restored;
+    }) as PayloadGeneration | null;
+  }
+
+  async createPayloadGenerationAttempt(input: CreatePayloadGenerationAttemptInput): Promise<PayloadGenerationAttempt> {
+    const parsed = createPayloadGenerationAttemptSchema.parse(input);
+    const generation = await this.getPayloadGeneration(parsed.generationId);
+    if (!generation) throw new Error("Payload generation attempt generation does not exist");
+    if (parsed.providerProfileId && !await this.getProviderProfile(parsed.providerProfileId)) {
+      throw new Error("Payload generation attempt provider profile does not exist");
+    }
+    if (parsed.configSnapshotId) {
+      const snapshot = await this.getConfigSnapshot(parsed.configSnapshotId);
+      if (!snapshot || snapshot.sessionId !== generation.sessionId) {
+        throw new Error("Payload generation attempt configuration does not belong to session");
+      }
+    }
+    const timestamp = nowIso();
+    const attempt: PayloadGenerationAttempt = {
+      ...parsed,
+      id: uuidv7(),
+      status: "queued",
+      classification: null,
+      normalizedOutput: null,
+      usage: null,
+      traceHash: null,
+      startedAt: null,
+      finishedAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    return this.returning(this.db.insert(this.schema.payloadGenerationAttempts).values(attempt).returning());
+  }
+
+  async getPayloadGenerationAttempt(id: string): Promise<PayloadGenerationAttempt | null> {
+    return this.get(this.db.select().from(this.schema.payloadGenerationAttempts).where(eq(this.schema.payloadGenerationAttempts.id, id)));
+  }
+
+  async listPayloadGenerationAttempts(generationId: string): Promise<PayloadGenerationAttempt[]> {
+    return this.all(this.db.select().from(this.schema.payloadGenerationAttempts)
+      .where(eq(this.schema.payloadGenerationAttempts.generationId, generationId))
+      .orderBy(this.schema.payloadGenerationAttempts.ordinal));
+  }
+
+  async updatePayloadGenerationAttempt(
+    id: string,
+    patch: Partial<Pick<PayloadGenerationAttempt, "status" | "classification" | "normalizedOutput" | "usage" | "traceHash" | "nativeThreadId" | "nativeTurnId" | "startedAt" | "finishedAt">>
+  ): Promise<PayloadGenerationAttempt | null> {
+    const parsed = updatePayloadGenerationAttemptSchema.parse(patch);
+    return this.returningOrNull(
+      this.db.update(this.schema.payloadGenerationAttempts).set({ ...parsed, updatedAt: nowIso() })
+        .where(eq(this.schema.payloadGenerationAttempts.id, id)).returning()
+    );
+  }
+
+  async createPayloadRevision(input: CreatePayloadRevisionInput): Promise<PayloadRevision> {
+    const parsed = createPayloadRevisionSchema.parse(input);
+    const [project, session] = await Promise.all([this.getProject(parsed.projectId), this.getSession(parsed.sessionId)]);
+    if (!project) throw new Error("Payload revision project does not exist");
+    if (!session || session.projectId !== parsed.projectId) throw new Error("Payload revision session does not belong to project");
+
+    let generation: PayloadGeneration | null = null;
+    if (parsed.generationId) {
+      generation = await this.getPayloadGeneration(parsed.generationId);
+      if (!generation || generation.projectId !== parsed.projectId || generation.sessionId !== parsed.sessionId) {
+        throw new Error("Payload revision generation does not belong to session");
+      }
+    }
+    if (parsed.attemptId) {
+      const attempt = await this.getPayloadGenerationAttempt(parsed.attemptId);
+      if (!attempt || !generation || attempt.generationId !== generation.id) {
+        throw new Error("Payload revision attempt does not belong to generation");
+      }
+    }
+    if (parsed.parentRevisionId) {
+      const parent = await this.getPayloadRevision(parsed.parentRevisionId);
+      if (!parent || parent.projectId !== parsed.projectId || parent.sessionId !== parsed.sessionId) {
+        throw new Error("Parent payload revision does not belong to session");
+      }
+    }
+    if (parsed.operation === "generated") {
+      if (!generation || !parsed.attemptId || parsed.parentRevisionId) {
+        throw new Error("Generated payload revisions require a generation and attempt, without a parent revision");
+      }
+    } else if (parsed.operation === "refined") {
+      if (!generation || !parsed.attemptId || !parsed.parentRevisionId) {
+        throw new Error("Refined payload revisions require a generation, attempt, and parent revision");
+      }
+    } else if (parsed.operation === "transformed") {
+      if (!parsed.parentRevisionId || parsed.attemptId) {
+        throw new Error("Transformed payload revisions require a parent revision and cannot claim a generation attempt");
+      }
+    } else if (parsed.operation === "edited") {
+      if (parsed.attemptId) throw new Error("Edited payload revisions cannot claim a generation attempt");
+      if (!parsed.parentRevisionId && generation) {
+        throw new Error("A root edited payload revision cannot reference generation evidence");
+      }
+    }
+
+    const revision: PayloadRevision = {
+      ...parsed,
+      id: uuidv7(),
+      contentHash: sha256Json(parsed.text),
+      createdAt: nowIso(),
+      deletedAt: null
+    };
+    return this.returning(this.db.insert(this.schema.payloadRevisions).values(revision).returning());
+  }
+
+  async getPayloadRevision(id: string, includeDeleted = false): Promise<PayloadRevision | null> {
+    const condition = includeDeleted
+      ? eq(this.schema.payloadRevisions.id, id)
+      : and(eq(this.schema.payloadRevisions.id, id), isNull(this.schema.payloadRevisions.deletedAt));
+    return this.get(this.db.select().from(this.schema.payloadRevisions).where(condition));
+  }
+
+  async listPayloadRevisions(sessionId: string, includeDeleted = false): Promise<PayloadRevision[]> {
+    const condition = includeDeleted
+      ? eq(this.schema.payloadRevisions.sessionId, sessionId)
+      : and(eq(this.schema.payloadRevisions.sessionId, sessionId), isNull(this.schema.payloadRevisions.deletedAt));
+    return this.all(this.db.select().from(this.schema.payloadRevisions).where(condition).orderBy(desc(this.schema.payloadRevisions.createdAt)));
+  }
+
+  async listPayloadRevisionsForGeneration(generationId: string, includeDeleted = false): Promise<PayloadRevision[]> {
+    const condition = includeDeleted
+      ? eq(this.schema.payloadRevisions.generationId, generationId)
+      : and(eq(this.schema.payloadRevisions.generationId, generationId), isNull(this.schema.payloadRevisions.deletedAt));
+    return this.all(this.db.select().from(this.schema.payloadRevisions).where(condition).orderBy(this.schema.payloadRevisions.ordinal));
+  }
+
+  async deletePayloadRevision(id: string): Promise<ResourceDeletionResult> {
+    const revision = await this.getPayloadRevision(id);
+    if (!revision) return { deleted: false, references: [] };
+    const [nodes, generations, revisions] = await Promise.all([
+      this.all<MessageNode>(this.db.select().from(this.schema.messageNodes).where(eq(this.schema.messageNodes.sourcePayloadRevisionId, id))),
+      this.all<PayloadGeneration>(this.db.select().from(this.schema.payloadGenerations)
+        .where(and(eq(this.schema.payloadGenerations.parentRevisionId, id), isNull(this.schema.payloadGenerations.deletedAt)))),
+      this.all<PayloadRevision>(this.db.select().from(this.schema.payloadRevisions)
+        .where(and(eq(this.schema.payloadRevisions.parentRevisionId, id), isNull(this.schema.payloadRevisions.deletedAt))))
+    ]);
+    const references: ResourceReference[] = [
+      ...nodes.map((node) => ({ kind: "message" as const, id: node.id, label: node.id, detail: "message source payload" })),
+      ...generations.map((generation) => ({ kind: "payload-generation" as const, id: generation.id, label: generation.id, detail: "generation parent payload" })),
+      ...revisions.map((child) => ({ kind: "payload-revision" as const, id: child.id, label: `Payload revision ${child.ordinal}`, detail: "derived payload" }))
+    ];
+    if (references.length > 0) return { deleted: false, references };
+    const deleted = await this.returningOrNull<PayloadRevision>(
+      this.db.update(this.schema.payloadRevisions).set({ deletedAt: nowIso() })
+        .where(and(eq(this.schema.payloadRevisions.id, id), isNull(this.schema.payloadRevisions.deletedAt))).returning()
+    );
+    return { deleted: Boolean(deleted), references: [] };
+  }
+
+  async restorePayloadRevision(id: string): Promise<PayloadRevision | null> {
+    const revision = await this.getPayloadRevision(id, true);
+    if (!revision || !revision.deletedAt) return null;
+    const session = await this.getSession(revision.sessionId);
+    if (!session || session.projectId !== revision.projectId) throw new Error("Payload revision session no longer belongs to project");
+    if (revision.generationId) {
+      const generation = await this.getPayloadGeneration(revision.generationId);
+      if (!generation || generation.sessionId !== revision.sessionId) throw new Error("Payload revision generation is unavailable");
+    }
+    if (revision.parentRevisionId) {
+      const parent = await this.getPayloadRevision(revision.parentRevisionId);
+      if (!parent || parent.sessionId !== revision.sessionId) throw new Error("Parent payload revision is unavailable");
+    }
+    return this.returningOrNull(
+      this.db.update(this.schema.payloadRevisions).set({ deletedAt: null })
+        .where(eq(this.schema.payloadRevisions.id, id)).returning()
+    );
+  }
+
   async markRunningJobsInterrupted(): Promise<void> {
     const timestamp = nowIso();
     await this.run(this.db.update(this.schema.automationJobs).set({ status: "interrupted", updatedAt: timestamp }).where(inArray(this.schema.automationJobs.status, ["queued", "running"])));
     await this.run(this.db.update(this.schema.modelRuns).set({ status: "interrupted", classification: "interrupted-stream", finishedAt: timestamp }).where(inArray(this.schema.modelRuns.status, ["queued", "streaming"])));
+    await this.run(this.db.update(this.schema.payloadGenerations).set({ status: "interrupted", updatedAt: timestamp }).where(inArray(this.schema.payloadGenerations.status, ["queued", "streaming"])));
+    await this.run(this.db.update(this.schema.payloadGenerationAttempts).set({ status: "interrupted", classification: "interrupted-stream", finishedAt: timestamp, updatedAt: timestamp }).where(inArray(this.schema.payloadGenerationAttempts.status, ["queued", "streaming"])));
   }
 }

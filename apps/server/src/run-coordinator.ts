@@ -5,6 +5,7 @@ export interface StartRunInput {
   branchId: string;
   contextNodeId: string | null;
   userMessage?: string;
+  sourcePayloadRevisionId?: string | null;
   configOverride?: ResolvedConfig;
 }
 

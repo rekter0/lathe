@@ -18,6 +18,7 @@ function generatedTree(seed: number, size: number): MessageNode[] {
       parts: [{ type: "text", text: String(index) }],
       sourceRunId: null,
       configSnapshotId: null,
+      sourcePayloadRevisionId: null,
       createdAt: new Date(index).toISOString(),
     });
   }

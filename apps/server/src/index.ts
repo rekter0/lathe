@@ -6,7 +6,9 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { createPersistence } from "@lathe/db";
 import { builtInAssets } from "@lathe/harness";
 import { createApp } from "./app.js";
+import { CodexAppServerPayloadGenerator } from "./codex-payload-generator.js";
 import { EventHub } from "./events.js";
+import { PayloadGenerationCoordinator } from "./payload-generation-coordinator.js";
 import { ProviderRunCoordinator } from "./provider-run-coordinator.js";
 import { JobCoordinator } from "./job-coordinator.js";
 
@@ -23,6 +25,13 @@ for (const asset of builtInAssets) await persistence.repository.saveAssetRevisio
 const events = new EventHub();
 const token = process.env.LATHE_API_TOKEN ?? randomBytes(32).toString("base64url");
 const coordinator = new ProviderRunCoordinator(persistence.repository, persistence.contentStore, events);
+const payloadCoordinator = new PayloadGenerationCoordinator(
+  persistence.repository,
+  persistence.contentStore,
+  events,
+  globalThis.fetch,
+  new CodexAppServerPayloadGenerator(persistence.contentStore)
+);
 const jobCoordinator = new JobCoordinator(persistence.repository, coordinator, events);
 const app = createApp({
   repository: persistence.repository,
@@ -31,7 +40,8 @@ const app = createApp({
   runCoordinator: coordinator,
   apiToken: token,
   dataDirectory: persistence.dataDirectory,
-  jobCoordinator
+  jobCoordinator,
+  payloadCoordinator
 });
 
 const webRoot = resolve(import.meta.dirname, "../../web/dist");

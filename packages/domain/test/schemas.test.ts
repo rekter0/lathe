@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { createAutomationSchema, createProviderProfileSchema, createSessionSchema, emptyResolvedConfig, resolvedConfigSchema } from "../src/index.js";
+import {
+  createAutomationSchema,
+  createPayloadGenerationSchema,
+  createProviderProfileSchema,
+  createSessionSchema,
+  emptyResolvedConfig,
+  payloadWorkbenchSettingsInputSchema,
+  resolvedConfigSchema,
+  updateSessionMetadataSchema
+} from "../src/index.js";
 
 describe("provider profile schema", () => {
   it("accepts HTTP endpoints but rejects credentials embedded in URLs", () => {
@@ -30,6 +39,9 @@ describe("session schema", () => {
     expect(createSessionSchema.safeParse({ projectId: "project", name: "Session", providerProfileId: "provider" }).success).toBe(false);
     expect(createSessionSchema.safeParse({ projectId: "project", name: "Session", modelId: "model" }).success).toBe(false);
     expect(createSessionSchema.safeParse({ projectId: "project", name: "Session", providerProfileId: "provider", modelId: "model" }).success).toBe(true);
+    expect(createSessionSchema.safeParse({ projectId: "project", name: "Session", description: "x".repeat(4_001) }).success).toBe(false);
+    expect(updateSessionMetadataSchema.safeParse({}).success).toBe(false);
+    expect(updateSessionMetadataSchema.safeParse({ description: "Updated" }).success).toBe(true);
   });
 
   it("defaults legacy configs to manual tool approval and accepts explicit bypass", () => {
@@ -67,5 +79,45 @@ describe("automation schema", () => {
         template: { sourceBranchId: "branch", payload: "probe" }
       }
     }).success).toBe(false);
+  });
+});
+
+describe("payload workbench schemas", () => {
+  const options = {
+    contextMode: "minimal" as const,
+    includeProjectBrief: true,
+    includeSessionBrief: true,
+    includeTargetConfig: false,
+    budgetChars: 12_000
+  };
+
+  it("applies bounded singleton defaults", () => {
+    expect(payloadWorkbenchSettingsInputSchema.parse({
+      defaultGeneratorProfileRevisionId: null,
+      defaultInstructionRevisionId: null,
+      ...options
+    })).toMatchObject({ candidateCount: 1, diversity: "balanced" });
+    expect(payloadWorkbenchSettingsInputSchema.safeParse({ ...options, budgetChars: 1_999 }).success).toBe(false);
+    expect(payloadWorkbenchSettingsInputSchema.safeParse({ ...options, candidateCount: 5 }).success).toBe(false);
+  });
+
+  it("validates exact generation context and diversity values", () => {
+    const generation = {
+      projectId: "project",
+      sessionId: "session",
+      branchId: "branch",
+      operatorInstruction: "Generate candidates",
+      generatorProfileRevisionId: "profile",
+      techniqueRevisionIds: ["technique"],
+      variables: {},
+      contextOptions: options,
+      candidateCount: 1,
+      diversity: "balanced",
+      contextSnapshot: {}
+    };
+    expect(createPayloadGenerationSchema.safeParse(generation).success).toBe(true);
+    expect(createPayloadGenerationSchema.safeParse({ ...generation, diversity: "maximum" }).success).toBe(false);
+    expect(createPayloadGenerationSchema.safeParse({ ...generation, contextOptions: { ...options, contextMode: "project" } }).success).toBe(false);
+    expect(createPayloadGenerationSchema.safeParse({ ...generation, techniqueRevisionIds: ["technique", "technique"] }).success).toBe(false);
   });
 });

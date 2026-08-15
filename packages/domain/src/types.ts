@@ -9,6 +9,7 @@ export interface Project {
   id: Id;
   name: string;
   description: string;
+  targetName: string;
   defaultHarnessRevisionId: Id | null;
   workspaceRoot: string | null;
   createdAt: IsoDateTime;
@@ -19,6 +20,7 @@ export interface Session {
   id: Id;
   projectId: Id;
   name: string;
+  description: string;
   providerProfileId: Id | null;
   modelId: string | null;
   activeBranchId: Id | null;
@@ -69,6 +71,7 @@ export interface MessageNode {
   parts: MessagePart[];
   sourceRunId: Id | null;
   configSnapshotId: Id | null;
+  sourcePayloadRevisionId: Id | null;
   createdAt: IsoDateTime;
 }
 
@@ -244,7 +247,17 @@ export interface Attachment {
   createdAt: IsoDateTime;
 }
 
-export type AssetKind = "prompt" | "tool-spec" | "tool-implementation" | "harness" | "target" | "mcp-server";
+export type AssetKind =
+  | "prompt"
+  | "tool-spec"
+  | "tool-implementation"
+  | "harness"
+  | "target"
+  | "mcp-server"
+  | "payload-generator-profile"
+  | "payload-generator-instruction"
+  | "payload-technique"
+  | "payload-pipeline";
 
 export interface AssetRevision<T extends JsonValue = JsonValue> {
   id: Id;
@@ -293,6 +306,103 @@ export interface AutomationJob {
   error: JsonObject | null;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
+}
+
+export type PayloadContextMode = "none" | "minimal" | "full";
+export type PayloadDiversity = "low" | "balanced" | "high";
+
+export interface PayloadGenerationOptions {
+  contextMode: PayloadContextMode;
+  includeProjectBrief: boolean;
+  includeSessionBrief: boolean;
+  includeTargetConfig: boolean;
+  budgetChars: number;
+}
+
+/** Global defaults for the local operator's payload workbench. */
+export interface PayloadWorkbenchSettings extends PayloadGenerationOptions {
+  id: Id;
+  defaultGeneratorProfileRevisionId: Id | null;
+  defaultInstructionRevisionId: Id | null;
+  candidateCount: number;
+  diversity: PayloadDiversity;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+}
+
+export type PayloadGenerationStatus =
+  | "queued"
+  | "streaming"
+  | "partial"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export interface PayloadGeneration {
+  id: Id;
+  projectId: Id;
+  sessionId: Id;
+  branchId: Id;
+  contextNodeId: Id | null;
+  parentRevisionId: Id | null;
+  feedback: string | null;
+  operatorInstruction: string;
+  generatorProfileRevisionId: Id;
+  instructionRevisionId: Id | null;
+  techniqueRevisionIds: Id[];
+  pipelineRevisionId: Id | null;
+  variables: JsonObject;
+  contextOptions: PayloadGenerationOptions;
+  candidateCount: number;
+  diversity: PayloadDiversity;
+  contextSnapshot: JsonObject;
+  contextHash: string;
+  status: PayloadGenerationStatus;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+  deletedAt: IsoDateTime | null;
+}
+
+/** One backend/provider invocation belonging to a logical payload generation. */
+export interface PayloadGenerationAttempt {
+  id: Id;
+  generationId: Id;
+  ordinal: number;
+  backendSnapshot: JsonObject;
+  providerProfileId: Id | null;
+  modelId: string | null;
+  configSnapshotId: Id | null;
+  nativeThreadId: string | null;
+  nativeTurnId: string | null;
+  status: RunStatus;
+  classification: RunClassification | null;
+  normalizedOutput: JsonValue | null;
+  usage: JsonObject | null;
+  traceHash: string | null;
+  startedAt: IsoDateTime | null;
+  finishedAt: IsoDateTime | null;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+}
+
+export type PayloadRevisionOperation = "generated" | "refined" | "edited" | "transformed";
+
+/** Immutable payload text plus its derivation and generation evidence. */
+export interface PayloadRevision {
+  id: Id;
+  projectId: Id;
+  sessionId: Id;
+  generationId: Id | null;
+  attemptId: Id | null;
+  parentRevisionId: Id | null;
+  ordinal: number;
+  operation: PayloadRevisionOperation;
+  text: string;
+  contentHash: string;
+  provenance: JsonObject;
+  createdAt: IsoDateTime;
+  deletedAt: IsoDateTime | null;
 }
 
 export interface TraceEvent {

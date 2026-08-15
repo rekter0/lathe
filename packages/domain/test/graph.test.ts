@@ -10,6 +10,7 @@ const node = (id: string, parentId: string | null): MessageNode => ({
   parts: [{ type: "text", text: id }],
   sourceRunId: null,
   configSnapshotId: null,
+  sourcePayloadRevisionId: null,
   createdAt: "2026-01-01T00:00:00.000Z"
 });
 

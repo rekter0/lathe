@@ -1,5 +1,12 @@
 import { z } from "zod";
-import type { JsonValue, ResolvedConfig } from "./types.js";
+import type {
+  JsonValue,
+  PayloadGenerationOptions,
+  PayloadGenerationStatus,
+  PayloadRevisionOperation,
+  PayloadWorkbenchSettings,
+  ResolvedConfig
+} from "./types.js";
 
 export const idSchema = z.string().min(1);
 export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
@@ -38,7 +45,7 @@ export const modelCapabilitiesSchema = z.object({
   maxContextTokens: z.number().int().positive().nullable().default(null)
 });
 
-const jsonObjectSchema = z.record(z.string(), jsonValueSchema);
+export const jsonObjectSchema = z.record(z.string(), jsonValueSchema);
 
 export const resolvedConfigSchema: z.ZodType<ResolvedConfig> = z.object({
   promptBlocks: z.array(z.object({
@@ -85,20 +92,43 @@ export const resolvedConfigSchema: z.ZodType<ResolvedConfig> = z.object({
 export const createProjectSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: z.string().max(4_000).default(""),
+  targetName: z.string().trim().max(200).default(""),
   workspaceRoot: z.string().trim().min(1).nullable().optional()
 });
 
 export const updateProjectSchema = createProjectSchema.partial();
 
+export const assetKindSchema = z.enum([
+  "prompt",
+  "tool-spec",
+  "tool-implementation",
+  "harness",
+  "target",
+  "mcp-server",
+  "payload-generator-profile",
+  "payload-generator-instruction",
+  "payload-technique",
+  "payload-pipeline"
+]);
+
 export const createSessionSchema = z.object({
   projectId: idSchema,
   name: z.string().trim().min(1).max(120),
+  description: z.string().max(4_000).default(""),
   providerProfileId: idSchema.nullable().optional(),
   modelId: z.string().trim().min(1).nullable().optional(),
   harnessRevisionId: idSchema.nullable().optional()
 }).refine(
   (value) => (value.providerProfileId == null) === (value.modelId == null),
   { message: "Provider and model must either both be selected or both be omitted" }
+);
+
+export const updateSessionMetadataSchema = z.object({
+  name: z.string().trim().min(1).max(120).optional(),
+  description: z.string().max(4_000).optional()
+}).refine(
+  (value) => value.name !== undefined || value.description !== undefined,
+  "At least one session metadata field is required"
 );
 
 export const textPartSchema = z.object({ type: z.literal("text"), text: z.string() });
@@ -134,8 +164,142 @@ export const appendMessageSchema = z.object({
   parentId: idSchema.nullable().optional(),
   role: z.enum(["user", "assistant", "tool"]),
   parts: z.array(messagePartSchema).min(1),
-  configSnapshotId: idSchema.nullable().optional()
+  configSnapshotId: idSchema.nullable().optional(),
+  sourcePayloadRevisionId: idSchema.nullable().optional()
 });
+
+export const payloadContextModeSchema = z.enum(["none", "minimal", "full"]);
+export const payloadDiversitySchema = z.enum(["low", "balanced", "high"]);
+
+export const payloadGenerationOptionsSchema: z.ZodType<PayloadGenerationOptions> = z.object({
+  contextMode: payloadContextModeSchema,
+  includeProjectBrief: z.boolean(),
+  includeSessionBrief: z.boolean(),
+  includeTargetConfig: z.boolean(),
+  budgetChars: z.number().int().min(2_000).max(200_000)
+});
+
+export const payloadWorkbenchSettingsInputSchema = z.object({
+  defaultGeneratorProfileRevisionId: idSchema.nullable().default(null),
+  defaultInstructionRevisionId: idSchema.nullable().default(null),
+  candidateCount: z.number().int().min(1).max(4).default(1),
+  diversity: payloadDiversitySchema.default("balanced"),
+  contextMode: payloadContextModeSchema,
+  includeProjectBrief: z.boolean(),
+  includeSessionBrief: z.boolean(),
+  includeTargetConfig: z.boolean(),
+  budgetChars: z.number().int().min(2_000).max(200_000)
+}) satisfies z.ZodType<Omit<PayloadWorkbenchSettings, "id" | "createdAt" | "updatedAt">>;
+
+export const payloadGenerationStatusSchema = z.enum([
+  "queued",
+  "streaming",
+  "partial",
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted"
+]) satisfies z.ZodType<PayloadGenerationStatus>;
+
+export const createPayloadGenerationSchema = z.object({
+  projectId: idSchema,
+  sessionId: idSchema,
+  branchId: idSchema,
+  contextNodeId: idSchema.nullable().default(null),
+  parentRevisionId: idSchema.nullable().default(null),
+  feedback: z.string().max(200_000).nullable().default(null),
+  operatorInstruction: z.string().min(1).max(200_000),
+  generatorProfileRevisionId: idSchema,
+  instructionRevisionId: idSchema.nullable().default(null),
+  techniqueRevisionIds: z.array(idSchema).max(1_000).refine(
+    (ids) => new Set(ids).size === ids.length,
+    "Payload technique revision IDs must be unique"
+  ),
+  pipelineRevisionId: idSchema.nullable().default(null),
+  variables: jsonObjectSchema,
+  contextOptions: payloadGenerationOptionsSchema,
+  candidateCount: z.number().int().min(1).max(4),
+  diversity: payloadDiversitySchema,
+  contextSnapshot: jsonObjectSchema
+});
+
+export const updatePayloadGenerationSchema = z.object({
+  status: payloadGenerationStatusSchema
+});
+
+export const runStatusSchema = z.enum([
+  "queued",
+  "streaming",
+  "awaiting-tool",
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted"
+]);
+
+export const runClassificationSchema = z.enum([
+  "transport",
+  "authentication",
+  "rate-limit",
+  "invalid-request",
+  "content-policy",
+  "unavailable",
+  "timeout",
+  "parse-failure",
+  "interrupted-stream",
+  "cancelled",
+  "tool-failure",
+  "unknown"
+]);
+
+export const createPayloadGenerationAttemptSchema = z.object({
+  generationId: idSchema,
+  ordinal: z.number().int().positive(),
+  backendSnapshot: jsonObjectSchema,
+  providerProfileId: idSchema.nullable().default(null),
+  modelId: z.string().trim().min(1).max(500).nullable().default(null),
+  configSnapshotId: idSchema.nullable().default(null),
+  nativeThreadId: z.string().max(10_000).nullable().default(null),
+  nativeTurnId: z.string().max(10_000).nullable().default(null)
+});
+
+export const updatePayloadGenerationAttemptSchema = z.object({
+  status: runStatusSchema.optional(),
+  classification: runClassificationSchema.nullable().optional(),
+  normalizedOutput: jsonValueSchema.nullable().optional(),
+  usage: jsonObjectSchema.nullable().optional(),
+  traceHash: z.string().regex(/^[a-f0-9]{64}$/).nullable().optional(),
+  nativeThreadId: z.string().max(10_000).nullable().optional(),
+  nativeTurnId: z.string().max(10_000).nullable().optional(),
+  startedAt: z.iso.datetime().nullable().optional(),
+  finishedAt: z.iso.datetime().nullable().optional()
+}).refine((patch) => Object.keys(patch).length > 0, "Attempt update cannot be empty");
+
+export const payloadRevisionOperationSchema = z.enum([
+  "generated",
+  "refined",
+  "edited",
+  "transformed"
+]) satisfies z.ZodType<PayloadRevisionOperation>;
+
+export const createPayloadRevisionSchema = z.object({
+  projectId: idSchema,
+  sessionId: idSchema,
+  generationId: idSchema.nullable().default(null),
+  attemptId: idSchema.nullable().default(null),
+  parentRevisionId: idSchema.nullable().default(null),
+  ordinal: z.number().int().positive(),
+  operation: payloadRevisionOperationSchema,
+  text: z.string().min(1).max(10_000_000),
+  provenance: jsonObjectSchema
+});
+
+export type PayloadWorkbenchSettingsInput = z.input<typeof payloadWorkbenchSettingsInputSchema>;
+export type CreatePayloadGenerationInput = z.input<typeof createPayloadGenerationSchema>;
+export type UpdatePayloadGenerationInput = z.input<typeof updatePayloadGenerationSchema>;
+export type CreatePayloadGenerationAttemptInput = z.input<typeof createPayloadGenerationAttemptSchema>;
+export type UpdatePayloadGenerationAttemptInput = z.input<typeof updatePayloadGenerationAttemptSchema>;
+export type CreatePayloadRevisionInput = z.input<typeof createPayloadRevisionSchema>;
 
 export const createBranchSchema = z.object({
   sessionId: idSchema,
@@ -177,8 +341,12 @@ export const createRunSchema = z.object({
   branchId: idSchema,
   contextNodeId: idSchema.nullable().optional(),
   userMessage: z.string().min(1).optional(),
+  sourcePayloadRevisionId: idSchema.nullable().optional(),
   config: resolvedConfigSchema.optional()
-});
+}).refine(
+  (value) => value.sourcePayloadRevisionId == null || value.userMessage !== undefined,
+  { message: "A source payload revision requires a user message", path: ["sourcePayloadRevisionId"] }
+);
 
 export const createFindingSchema = z.object({
   projectId: idSchema,

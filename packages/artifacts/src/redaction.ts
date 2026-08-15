@@ -3,6 +3,7 @@ import type { JsonValue } from "@lathe/domain";
 export const REDACTED_CREDENTIAL = "[REDACTED CREDENTIAL]";
 
 const SENSITIVE_KEY = /(?:authorization|proxy-authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|password|passwd|cookie|private[-_]?key|client[-_]?secret|secret)/i;
+const RUNTIME_ACCOUNT_KEY = /^(?:auth(?:mode|state)?|account(?:id|identifier|type|plan)?|planType)$/i;
 const REFERENCE_SUFFIX = /(?:id|ref|reference|name)$/i;
 const HEADER_LINE = /^(\s*(?:authorization|proxy-authorization|x-api-key|api-key|cookie)\s*[:=]\s*).+$/gim;
 const ASSIGNMENT = /(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|client[_-]?secret)\b\s*[:=]\s*)["']?[^\s,"';}]+["']?/gi;
@@ -47,7 +48,7 @@ export function redactArtifactJson(
   const output: Record<string, JsonValue> = {};
   let count = 0;
   for (const [key, item] of Object.entries(value)) {
-    if (SENSITIVE_KEY.test(key) && !REFERENCE_SUFFIX.test(key)) {
+    if (RUNTIME_ACCOUNT_KEY.test(key) || (SENSITIVE_KEY.test(key) && !REFERENCE_SUFFIX.test(key))) {
       output[key] = REDACTED_CREDENTIAL;
       count += 1;
       continue;

@@ -11,6 +11,7 @@
     "test": "vitest run test"
   },
   "dependencies": {
+    "@lathe/agent-runtimes": "workspace:*",
     "@hono/node-server": "catalog:",
     "@lathe/artifacts": "workspace:*",
     "@lathe/automation": "workspace:*",
@@ -19,6 +20,7 @@
     "@lathe/execution": "workspace:*",
     "@lathe/harness": "workspace:*",
     "@lathe/mcp": "workspace:*",
+    "@lathe/payloads": "workspace:*",
     "@lathe/providers": "workspace:*",
     "hono": "catalog:",
     "zod": "catalog:"

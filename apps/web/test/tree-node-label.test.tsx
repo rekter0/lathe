@@ -38,6 +38,7 @@ function node(input: Pick<MessageNode, "id" | "role"> & Partial<MessageNode>): M
     parts: [],
     sourceRunId: null,
     configSnapshotId: null,
+    sourcePayloadRevisionId: null,
     createdAt: timestamp,
     ...overrides
   };

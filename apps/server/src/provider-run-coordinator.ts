@@ -349,12 +349,32 @@ export class ProviderRunCoordinator implements RunCoordinator {
     let contextNodeId = input.contextNodeId ?? branch.headNodeId;
     if (branch.headNodeId !== contextNodeId) throw new Error("Run context must be the current branch head; fork or rewind first");
     if (input.userMessage) {
+      let sourcePayloadRevisionId = input.sourcePayloadRevisionId ?? null;
+      if (sourcePayloadRevisionId) {
+        const source = await this.repository.getPayloadRevision(sourcePayloadRevisionId);
+        if (!source || source.sessionId !== session.id) throw new Error("Source payload revision does not belong to this session");
+        if (source.text !== input.userMessage) {
+          const edited = await this.repository.createPayloadRevision({
+            projectId: session.projectId,
+            sessionId: session.id,
+            generationId: source.generationId,
+            attemptId: null,
+            parentRevisionId: source.id,
+            ordinal: source.ordinal,
+            operation: "edited",
+            text: input.userMessage,
+            provenance: { kind: "composer-edit", parentHash: source.contentHash }
+          });
+          sourcePayloadRevisionId = edited.id;
+        }
+      }
       const userNode = await this.repository.appendNode({
         sessionId: session.id,
         branchId: branch.id,
         parentId: contextNodeId,
         role: "user",
-        parts: [{ type: "text", text: input.userMessage }]
+        parts: [{ type: "text", text: input.userMessage }],
+        sourcePayloadRevisionId
       });
       contextNodeId = userNode.id;
       this.events.publish(`session:${session.id}`, "node.created", userNode as unknown as JsonValue);

@@ -8,7 +8,12 @@ import {
   messagePartSchema,
   nowIso,
   pathToRoot,
+  payloadGenerationOptionsSchema,
+  payloadGenerationStatusSchema,
+  payloadRevisionOperationSchema,
   resolvedConfigSchema,
+  runClassificationSchema,
+  runStatusSchema,
   sha256Json,
   uuidv7,
   type AssetRevision,
@@ -18,6 +23,9 @@ import {
   type JsonValue,
   type MessageNode,
   type ModelRun,
+  type PayloadGeneration,
+  type PayloadGenerationAttempt,
+  type PayloadRevision,
   type ResolvedConfig
 } from "@lathe/domain";
 import type { ContentStore, LatheRepository } from "@lathe/db";
@@ -41,7 +49,10 @@ function safeExtension(fileName: string): string {
 const assetRevisionSchema = z.object({
   id: z.string().min(1),
   assetId: z.string().min(1),
-  kind: z.enum(["prompt", "tool-spec", "tool-implementation", "harness", "target", "mcp-server"]),
+  kind: z.enum([
+    "prompt", "tool-spec", "tool-implementation", "harness", "target", "mcp-server",
+    "payload-generator-profile", "payload-generator-instruction", "payload-technique", "payload-pipeline"
+  ]),
   revision: z.number().int().positive(),
   name: z.string().min(1).max(500),
   description: z.string().max(100_000),
@@ -62,6 +73,7 @@ const transcriptSchema = z.array(z.object({
   parts: z.array(messagePartSchema).min(1).max(10_000),
   sourceRunId: z.string().nullable(),
   configSnapshotId: z.string().nullable(),
+  sourcePayloadRevisionId: z.string().nullable().default(null),
   createdAt: z.string().min(1)
 })).max(100_000);
 
@@ -94,6 +106,47 @@ const modelRunSchema = z.object({
   createdAt: isoDateSchema
 });
 const modelRunsSchema = z.array(modelRunSchema).max(100_000);
+const payloadGenerationSchema = z.object({
+  id: z.string().min(1),
+  projectId: z.string().min(1),
+  sessionId: z.string().min(1),
+  branchId: z.string().min(1),
+  contextNodeId: z.string().nullable(),
+  parentRevisionId: z.string().nullable(),
+  feedback: z.string().nullable(),
+  operatorInstruction: z.string().min(1),
+  generatorProfileRevisionId: z.string().min(1),
+  instructionRevisionId: z.string().nullable(),
+  techniqueRevisionIds: z.array(z.string().min(1)).max(1_000),
+  pipelineRevisionId: z.string().nullable(),
+  variables: z.record(z.string(), jsonValueSchema),
+  contextOptions: payloadGenerationOptionsSchema,
+  candidateCount: z.number().int().min(1).max(4),
+  diversity: z.enum(["low", "balanced", "high"]),
+  contextSnapshot: z.record(z.string(), jsonValueSchema),
+  contextHash: sha256Schema,
+  status: payloadGenerationStatusSchema,
+  createdAt: isoDateSchema,
+  updatedAt: isoDateSchema,
+  deletedAt: isoDateSchema.nullable()
+});
+const payloadGenerationsSchema = z.array(payloadGenerationSchema).max(100_000);
+const payloadAttemptSchema = z.object({
+  id: z.string().min(1), generationId: z.string().min(1), ordinal: z.number().int().positive(),
+  backendSnapshot: z.record(z.string(), jsonValueSchema), providerProfileId: z.string().nullable(), modelId: z.string().nullable(),
+  configSnapshotId: z.string().nullable(), nativeThreadId: z.string().nullable(), nativeTurnId: z.string().nullable(),
+  status: runStatusSchema, classification: runClassificationSchema.nullable(), normalizedOutput: jsonValueSchema.nullable(),
+  usage: z.record(z.string(), jsonValueSchema).nullable(), traceHash: sha256Schema.nullable(),
+  startedAt: isoDateSchema.nullable(), finishedAt: isoDateSchema.nullable(), createdAt: isoDateSchema, updatedAt: isoDateSchema
+});
+const payloadAttemptsSchema = z.array(payloadAttemptSchema).max(100_000);
+const payloadRevisionSchema = z.object({
+  id: z.string().min(1), projectId: z.string().min(1), sessionId: z.string().min(1),
+  generationId: z.string().nullable(), attemptId: z.string().nullable(), parentRevisionId: z.string().nullable(),
+  ordinal: z.number().int().positive(), operation: payloadRevisionOperationSchema, text: z.string().min(1).max(10_000_000),
+  contentHash: sha256Schema, provenance: z.record(z.string(), jsonValueSchema), createdAt: isoDateSchema, deletedAt: isoDateSchema.nullable()
+});
+const payloadRevisionsSchema = z.array(payloadRevisionSchema).max(100_000);
 const missingEvidenceSchema = z.object({ hashes: z.array(sha256Schema).max(100_000) });
 
 function parseArtifactJson<T>(data: Uint8Array, schema: z.ZodType<T>, label: string): T {
@@ -194,11 +247,112 @@ function evidenceHashes(value: JsonValue, output: Map<string, string>, key = "")
   else if (value && typeof value === "object") for (const [childKey, item] of Object.entries(value)) evidenceHashes(item, output, childKey);
 }
 
+function withoutCodexAccountState(value: JsonValue): JsonValue {
+  if (Array.isArray(value)) return value.map(withoutCodexAccountState);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).flatMap(([key, item]) =>
+    /^(?:auth(?:mode|state)?|account(?:id|identifier|type|plan)?|planType|nativeThreadId|nativeTurnId|threadId|turnId|sourceThreadId|sourceTurnId)$/i.test(key)
+      ? []
+      : [[key, withoutCodexAccountState(item)]]
+  ));
+}
+
+function payloadAttemptForArtifact(attempt: PayloadGenerationAttempt): PayloadGenerationAttempt {
+  if (attempt.backendSnapshot.kind !== "codex-app-server") return attempt;
+  return {
+    ...attempt,
+    backendSnapshot: withoutCodexAccountState(attempt.backendSnapshot) as JsonObject,
+    normalizedOutput: attempt.normalizedOutput === null ? null : withoutCodexAccountState(attempt.normalizedOutput),
+    nativeThreadId: null,
+    nativeTurnId: null
+  };
+}
+
+function revisionPipelineId(revision: PayloadRevision): string | null {
+  const pipelineRevisionId = revision.provenance.pipelineRevisionId;
+  return typeof pipelineRevisionId === "string" && pipelineRevisionId.length > 0 ? pipelineRevisionId : null;
+}
+
+function rewritePayloadRevisionProvenance(
+  provenance: JsonObject,
+  revisions: ReadonlyMap<string, string>
+): JsonObject {
+  const rewritten = structuredClone(provenance);
+  const pipelineRevisionId = rewritten.pipelineRevisionId;
+  if (typeof pipelineRevisionId === "string") {
+    rewritten.pipelineRevisionId = rewrittenRevisionId(revisions, pipelineRevisionId, "payload pipeline");
+  }
+  return rewritten;
+}
+
 function artifactAssetPath(asset: AssetRevision): { path: string; role: "prompt" | "tool-spec" | "tool-script" | "config"; script?: true } {
   if (asset.kind === "prompt") return { path: `prompts/${asset.id}.json`, role: "prompt" };
   if (asset.kind === "tool-spec") return { path: `tools/specs/${asset.id}.json`, role: "tool-spec" };
   if (asset.kind === "tool-implementation") return { path: `tools/implementations/${asset.id}.json`, role: "tool-script", script: true };
   return { path: `config/references/${asset.id}.json`, role: "config" };
+}
+
+interface FindingPayloadLineage {
+  revisions: PayloadRevision[];
+  generations: PayloadGeneration[];
+  attempts: PayloadGenerationAttempt[];
+  assetRevisionIds: Set<string>;
+}
+
+async function findingPayloadLineage(
+  repository: LatheRepository,
+  sessionId: string,
+  path: readonly MessageNode[]
+): Promise<FindingPayloadLineage> {
+  const [allRevisions, allGenerations] = await Promise.all([
+    repository.listPayloadRevisions(sessionId),
+    repository.listPayloadGenerations(sessionId)
+  ]);
+  const revisionById = new Map(allRevisions.map((revision) => [revision.id, revision]));
+  const generationById = new Map(allGenerations.map((generation) => [generation.id, generation]));
+  const selectedRevisions = new Map<string, PayloadRevision>();
+  const pending = path.flatMap((node) => node.sourcePayloadRevisionId ? [node.sourcePayloadRevisionId] : []);
+  while (pending.length > 0) {
+    const id = pending.pop()!;
+    if (selectedRevisions.has(id)) continue;
+    const revision = revisionById.get(id);
+    if (!revision) throw new HTTPException(409, { message: `Finding references missing payload revision ${id}` });
+    selectedRevisions.set(id, revision);
+    if (revision.parentRevisionId) pending.push(revision.parentRevisionId);
+  }
+
+  const generations = [...new Set([...selectedRevisions.values()].flatMap((revision) => revision.generationId ? [revision.generationId] : []))]
+    .map((id) => {
+      const generation = generationById.get(id);
+      if (!generation) throw new HTTPException(409, { message: `Payload revision references missing generation ${id}` });
+      return generation;
+    });
+  const selectedAttemptIds = new Set([...selectedRevisions.values()].flatMap((revision) => revision.attemptId ? [revision.attemptId] : []));
+  const attempts = (await Promise.all(generations.map((generation) => repository.listPayloadGenerationAttempts(generation.id))))
+    .flat()
+    .filter((attempt) => selectedAttemptIds.has(attempt.id));
+  for (const attemptId of selectedAttemptIds) {
+    if (!attempts.some((attempt) => attempt.id === attemptId)) {
+      throw new HTTPException(409, { message: `Payload revision references missing generation attempt ${attemptId}` });
+    }
+  }
+  const assetRevisionIds = new Set<string>();
+  for (const generation of generations) {
+    assetRevisionIds.add(generation.generatorProfileRevisionId);
+    if (generation.instructionRevisionId) assetRevisionIds.add(generation.instructionRevisionId);
+    if (generation.pipelineRevisionId) assetRevisionIds.add(generation.pipelineRevisionId);
+    for (const id of generation.techniqueRevisionIds) assetRevisionIds.add(id);
+  }
+  for (const revision of selectedRevisions.values()) {
+    const pipelineRevisionId = revisionPipelineId(revision);
+    if (pipelineRevisionId) assetRevisionIds.add(pipelineRevisionId);
+  }
+  return {
+    revisions: [...selectedRevisions.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+    generations: generations.sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+    attempts: attempts.sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+    assetRevisionIds
+  };
 }
 
 async function allSecrets(repository: LatheRepository): Promise<string[]> {
@@ -229,7 +383,10 @@ async function allSecrets(repository: LatheRepository): Promise<string[]> {
       }
     }
   }
-  for (const asset of await repository.listAssetRevisions()) {
+  // Findings intentionally retain exact immutable revisions after they are
+  // superseded. Include archived executable/MCP assets so credentials from a
+  // historical revision are still scrubbed from every exported evidence file.
+  for (const asset of await repository.listAssetRevisions(undefined, true)) {
     collect(asset.value);
     values.push(...assetCredentialValues(asset));
   }
@@ -291,16 +448,28 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
     const relevantRuns = runs.filter((run) => (run.resultNodeId && pathIds.has(run.resultNodeId)) || (run.contextNodeId && pathIds.has(run.contextNodeId)));
     const snapshotIds = new Set(relevantRuns.map((run) => run.configSnapshotId));
     for (const node of path) if (node.configSnapshotId) snapshotIds.add(node.configSnapshotId);
-    const snapshots = await Promise.all(Array.from(snapshotIds).map((id) => repository.getConfigSnapshot(id)));
+    const [snapshots, payloadLineage] = await Promise.all([
+      Promise.all(Array.from(snapshotIds).map((id) => repository.getConfigSnapshot(id))),
+      findingPayloadLineage(repository, session.id, path)
+    ]);
     const referencedIds = new Set<string>();
     for (const snapshot of snapshots) if (snapshot) referenceIdsFromConfig(snapshot.config as unknown as JsonValue, referencedIds);
-    const referencedAssets = (await repository.listAssetRevisions()).filter((asset) => referencedIds.has(asset.id));
+    for (const id of payloadLineage.assetRevisionIds) referencedIds.add(id);
+    const referencedAssets = (await repository.listAssetRevisions(undefined, true)).filter((asset) => referencedIds.has(asset.id));
+    for (const id of referencedIds) {
+      if (!referencedAssets.some((asset) => asset.id === id)) {
+        throw new HTTPException(409, { message: `Finding references missing immutable asset revision ${id}` });
+      }
+    }
     const attachmentIds = new Set(path.flatMap((node) => node.parts.filter((part) => part.type === "attachment").map((part) => part.attachmentId)));
     const attachments = (await repository.listAttachments(projectId)).filter((attachment) => attachmentIds.has(attachment.id));
     const files: ArtifactFileInput[] = [
       { path: "transcript/branch.json", data: JSON.stringify(path), role: "transcript", mediaType: "application/json" },
       { path: "config/snapshots.json", data: JSON.stringify(snapshots.filter(Boolean)), role: "config", mediaType: "application/json" },
       { path: "traces/runs.json", data: JSON.stringify(relevantRuns), role: "trace", mediaType: "application/json" },
+      { path: "payloads/generations.json", data: JSON.stringify(payloadLineage.generations), role: "config", mediaType: "application/json" },
+      { path: "payloads/attempts.json", data: JSON.stringify(payloadLineage.attempts.map(payloadAttemptForArtifact)), role: "trace", mediaType: "application/json" },
+      { path: "payloads/revisions.json", data: JSON.stringify(payloadLineage.revisions), role: "config", mediaType: "application/json" },
       ...referencedAssets.map((asset) => {
         const location = artifactAssetPath(asset);
         return { ...location, data: JSON.stringify(sanitizeAssetRevision(asset)), mediaType: "application/json" };
@@ -310,6 +479,10 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
     for (const run of relevantRuns) {
       if (run.traceHash) hashes.set(run.traceHash, "application/x-ndjson");
       if (run.normalizedOutput) evidenceHashes(run.normalizedOutput, hashes);
+    }
+    for (const attempt of payloadLineage.attempts) {
+      if (attempt.traceHash) hashes.set(attempt.traceHash, "application/x-ndjson");
+      if (attempt.normalizedOutput) evidenceHashes(attempt.normalizedOutput, hashes);
     }
     const missingEvidence: string[] = [];
     for (const [hash, mediaType] of hashes) {
@@ -430,12 +603,27 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
     const transcript = imported.files.find((entry) => entry.path === "transcript/branch.json");
     const snapshotsFile = imported.files.find((entry) => entry.path === "config/snapshots.json");
     const runsFile = imported.files.find((entry) => entry.path === "traces/runs.json");
+    const payloadGenerationsFile = imported.files.find((entry) => entry.path === "payloads/generations.json");
+    const payloadAttemptsFile = imported.files.find((entry) => entry.path === "payloads/attempts.json");
+    const payloadRevisionsFile = imported.files.find((entry) => entry.path === "payloads/revisions.json");
     const sourceNodes = transcript ? parseArtifactJson(transcript.data, transcriptSchema, "Finding transcript") as MessageNode[] : [];
     const sourceSnapshots = snapshotsFile ? parseArtifactJson(snapshotsFile.data, configSnapshotsSchema, "Finding configuration snapshots") as ConfigSnapshot[] : [];
     const sourceRuns = runsFile ? parseArtifactJson(runsFile.data, modelRunsSchema, "Finding runs") as ModelRun[] : [];
+    const sourcePayloadGenerations = payloadGenerationsFile
+      ? parseArtifactJson(payloadGenerationsFile.data, payloadGenerationsSchema, "Finding payload generations") as PayloadGeneration[]
+      : [];
+    const sourcePayloadAttempts = payloadAttemptsFile
+      ? parseArtifactJson(payloadAttemptsFile.data, payloadAttemptsSchema, "Finding payload attempts") as PayloadGenerationAttempt[]
+      : [];
+    const sourcePayloadRevisions = payloadRevisionsFile
+      ? parseArtifactJson(payloadRevisionsFile.data, payloadRevisionsSchema, "Finding payload revisions") as PayloadRevision[]
+      : [];
     assertUniqueIds(sourceNodes, "Finding transcript");
     assertUniqueIds(sourceSnapshots, "Finding configuration snapshots");
     assertUniqueIds(sourceRuns, "Finding runs");
+    assertUniqueIds(sourcePayloadGenerations, "Finding payload generations");
+    assertUniqueIds(sourcePayloadAttempts, "Finding payload attempts");
+    assertUniqueIds(sourcePayloadRevisions, "Finding payload revisions");
     for (const [index, source] of sourceNodes.entries()) {
       const expectedParent = index === 0 ? null : sourceNodes[index - 1]!.id;
       if (source.parentId !== expectedParent) throw new HTTPException(422, { message: "Finding transcript is not a contiguous branch path" });
@@ -443,9 +631,61 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
     const nodeIds = new Set(sourceNodes.map((node) => node.id));
     const snapshotSourceIds = new Set(sourceSnapshots.map((snapshot) => snapshot.id));
     const runSourceIds = new Set(sourceRuns.map((run) => run.id));
+    const payloadGenerationSourceIds = new Set(sourcePayloadGenerations.map((generation) => generation.id));
+    const payloadAttemptSourceIds = new Set(sourcePayloadAttempts.map((attempt) => attempt.id));
+    const payloadRevisionSourceIds = new Set(sourcePayloadRevisions.map((revision) => revision.id));
     for (const node of sourceNodes) {
       if (node.configSnapshotId && !snapshotSourceIds.has(node.configSnapshotId)) throw new HTTPException(422, { message: `Finding node references missing configuration snapshot ${node.configSnapshotId}` });
       if (node.sourceRunId && !runSourceIds.has(node.sourceRunId)) throw new HTTPException(422, { message: `Finding node references missing run ${node.sourceRunId}` });
+      if (node.sourcePayloadRevisionId && !payloadRevisionSourceIds.has(node.sourcePayloadRevisionId)) {
+        throw new HTTPException(422, { message: `Finding node references missing payload revision ${node.sourcePayloadRevisionId}` });
+      }
+    }
+    for (const generation of sourcePayloadGenerations) {
+      if (sha256Json(generation.contextSnapshot) !== generation.contextHash) {
+        throw new HTTPException(422, { message: `Payload generation ${generation.id} has an invalid context hash` });
+      }
+      if (generation.parentRevisionId && !payloadRevisionSourceIds.has(generation.parentRevisionId)) {
+        throw new HTTPException(422, { message: `Payload generation ${generation.id} references missing parent revision` });
+      }
+    }
+    for (const attempt of sourcePayloadAttempts) {
+      if (!payloadGenerationSourceIds.has(attempt.generationId)) {
+        throw new HTTPException(422, { message: `Payload attempt ${attempt.id} references missing generation` });
+      }
+      if (attempt.configSnapshotId && !snapshotSourceIds.has(attempt.configSnapshotId)) {
+        throw new HTTPException(422, { message: `Payload attempt ${attempt.id} references missing configuration snapshot` });
+      }
+    }
+    for (const revision of sourcePayloadRevisions) {
+      if (sha256Json(revision.text) !== revision.contentHash) throw new HTTPException(422, { message: `Payload revision ${revision.id} has an invalid content hash` });
+      if (revision.generationId && !payloadGenerationSourceIds.has(revision.generationId)) {
+        throw new HTTPException(422, { message: `Payload revision ${revision.id} references missing generation` });
+      }
+      if (revision.attemptId && !payloadAttemptSourceIds.has(revision.attemptId)) {
+        throw new HTTPException(422, { message: `Payload revision ${revision.id} references missing attempt` });
+      }
+      if (revision.attemptId && revision.generationId) {
+        const attempt = sourcePayloadAttempts.find((item) => item.id === revision.attemptId);
+        if (attempt?.generationId !== revision.generationId) {
+          throw new HTTPException(422, { message: `Payload revision ${revision.id} has an attempt from another generation` });
+        }
+      }
+      if (revision.parentRevisionId && !payloadRevisionSourceIds.has(revision.parentRevisionId)) {
+        throw new HTTPException(422, { message: `Payload revision ${revision.id} references missing parent revision` });
+      }
+      if (revision.operation === "generated" && (!revision.generationId || !revision.attemptId || revision.parentRevisionId)) {
+        throw new HTTPException(422, { message: `Generated payload revision ${revision.id} has invalid lineage evidence` });
+      }
+      if (revision.operation === "refined" && (!revision.generationId || !revision.attemptId || !revision.parentRevisionId)) {
+        throw new HTTPException(422, { message: `Refined payload revision ${revision.id} has invalid lineage evidence` });
+      }
+      if (revision.operation === "transformed" && (!revision.parentRevisionId || revision.attemptId)) {
+        throw new HTTPException(422, { message: `Transformed payload revision ${revision.id} has invalid lineage evidence` });
+      }
+      if (revision.operation === "edited" && revision.attemptId) {
+        throw new HTTPException(422, { message: `Edited payload revision ${revision.id} has invalid lineage evidence` });
+      }
     }
     for (const run of sourceRuns) {
       if (!snapshotSourceIds.has(run.configSnapshotId)) throw new HTTPException(422, { message: `Finding run references missing configuration snapshot ${run.configSnapshotId}` });
@@ -472,12 +712,37 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
       if (entry.mediaType !== "application/json") throw new HTTPException(422, { message: `Evidence asset ${entry.path} must be JSON` });
       const source = parseArtifactJson(entry.data, assetRevisionSchema, `Evidence asset ${entry.path}`) as AssetRevision;
       const expectedKind = expectedAssetKind(entry.path, entry.role);
-      if (expectedKind === "reference" && source.kind !== "target" && source.kind !== "mcp-server") throw new HTTPException(422, { message: `Evidence asset ${entry.path} has an invalid kind` });
+      if (expectedKind === "reference" && ![
+        "target", "mcp-server", "payload-generator-profile", "payload-generator-instruction", "payload-technique", "payload-pipeline"
+      ].includes(source.kind)) throw new HTTPException(422, { message: `Evidence asset ${entry.path} has an invalid kind` });
       if (expectedKind !== "reference" && expectedKind !== source.kind) throw new HTTPException(422, { message: `Evidence asset ${entry.path} has an invalid kind` });
       validateImportedAssetCredentials(source, `Evidence asset ${entry.path}`);
       return source;
     });
     assertUniqueIds(evidenceAssetSources, "Finding evidence assets");
+    const evidenceAssetSourceIds = new Set(evidenceAssetSources.map((asset) => asset.id));
+    for (const generation of sourcePayloadGenerations) {
+      const requiredAssets = [
+        [generation.generatorProfileRevisionId, "payload-generator-profile"],
+        ...(generation.instructionRevisionId ? [[generation.instructionRevisionId, "payload-generator-instruction"]] : []),
+        ...generation.techniqueRevisionIds.map((id) => [id, "payload-technique"]),
+        ...(generation.pipelineRevisionId ? [[generation.pipelineRevisionId, "payload-pipeline"]] : [])
+      ] as const;
+      for (const [id, kind] of requiredAssets) {
+        const asset = evidenceAssetSources.find((item) => item.id === id);
+        if (!asset || asset.kind !== kind || !evidenceAssetSourceIds.has(id)) {
+          throw new HTTPException(422, { message: `Payload generation ${generation.id} is missing ${kind} revision ${id}` });
+        }
+      }
+    }
+    for (const revision of sourcePayloadRevisions) {
+      const pipelineRevisionId = revisionPipelineId(revision);
+      if (!pipelineRevisionId) continue;
+      const asset = evidenceAssetSources.find((item) => item.id === pipelineRevisionId);
+      if (!asset || asset.kind !== "payload-pipeline") {
+        throw new HTTPException(422, { message: `Payload revision ${revision.id} is missing payload-pipeline revision ${pipelineRevisionId}` });
+      }
+    }
     const assetRevisionIds = new Map(evidenceAssetSources.map((source) => [source.id, uuidv7()]));
     const rewrittenConfigs = new Map(sourceSnapshots.map((snapshot) => [snapshot.id, rewriteConfigReferences(snapshot.config, assetRevisionIds)]));
 
@@ -501,6 +766,18 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
       return [run.id, {
         traceHash,
         normalizedOutput: run.normalizedOutput === null ? null : rewriteEvidenceReferences(run.normalizedOutput, storedEvidenceHashes, declaredMissing)
+      }];
+    }));
+    const rewrittenPayloadAttemptEvidence = new Map(sourcePayloadAttempts.map((attempt) => {
+      const traceHash = attempt.traceHash === null
+        ? null
+        : storedEvidenceHashes.get(attempt.traceHash) ?? (declaredMissing.has(attempt.traceHash) ? null : undefined);
+      if (traceHash === undefined) throw new HTTPException(422, { message: `Payload attempt references trace ${attempt.traceHash} that is absent from the bundle` });
+      return [attempt.id, {
+        traceHash,
+        normalizedOutput: attempt.normalizedOutput === null
+          ? null
+          : rewriteEvidenceReferences(attempt.normalizedOutput, storedEvidenceHashes, declaredMissing)
       }];
     }));
 
@@ -537,6 +814,142 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
     }
     const nodeIdsBySource = new Map(sourceNodes.map((node) => [node.id, uuidv7()]));
     const runIdsBySource = new Map(sourceRuns.map((run) => [run.id, uuidv7()]));
+    const sourceGenerationById = new Map(sourcePayloadGenerations.map((generation) => [generation.id, generation]));
+    const sourceAttemptById = new Map(sourcePayloadAttempts.map((attempt) => [attempt.id, attempt]));
+    const sourceRevisionById = new Map(sourcePayloadRevisions.map((revision) => [revision.id, revision]));
+    const generationIdsBySource = new Map<string, string>();
+    const attemptIdsBySource = new Map<string, string>();
+    const revisionIdsBySource = new Map<string, string>();
+    const importingGenerations = new Set<string>();
+    const importingRevisions = new Set<string>();
+
+    const rewritePayloadContextSnapshot = (value: JsonObject): JsonObject => {
+      const rewritten = structuredClone(value);
+      if (typeof rewritten.contextNodeId === "string") rewritten.contextNodeId = nodeIdsBySource.get(rewritten.contextNodeId) ?? null;
+      rewritten.branchId = branch.id;
+      const manifest = rewritten.manifest;
+      if (manifest && typeof manifest === "object" && !Array.isArray(manifest)) {
+        if (Array.isArray(manifest.includedNodeIds)) {
+          manifest.includedNodeIds = manifest.includedNodeIds.map((id) => typeof id === "string" ? nodeIdsBySource.get(id) ?? id : id);
+        }
+        manifest.importedWithoutNativeContextCursor = true;
+      }
+      return rewritten;
+    };
+
+    const ensureAttempt = async (sourceId: string): Promise<string> => {
+      const known = attemptIdsBySource.get(sourceId);
+      if (known) return known;
+      const source = sourceAttemptById.get(sourceId);
+      if (!source) throw new HTTPException(422, { message: `Missing payload attempt ${sourceId}` });
+      const generationId = generationIdsBySource.get(source.generationId);
+      if (!generationId) throw new HTTPException(422, { message: `Payload attempt ${sourceId} was imported before its generation` });
+      const attempt = await repository.createPayloadGenerationAttempt({
+        generationId,
+        ordinal: source.ordinal,
+        backendSnapshot: source.backendSnapshot,
+        // Provider credentials/revisions are intentionally not imported. The
+        // immutable redacted backend snapshot remains available for inspection.
+        providerProfileId: null,
+        modelId: source.modelId,
+        configSnapshotId: source.configSnapshotId === null ? null : snapshotIds.get(source.configSnapshotId) ?? null,
+        nativeThreadId: null,
+        nativeTurnId: null
+      });
+      attemptIdsBySource.set(sourceId, attempt.id);
+      const evidence = rewrittenPayloadAttemptEvidence.get(sourceId)!;
+      await repository.updatePayloadGenerationAttempt(attempt.id, {
+        status: source.status,
+        classification: source.classification,
+        normalizedOutput: evidence.normalizedOutput,
+        usage: source.usage,
+        traceHash: evidence.traceHash,
+        startedAt: source.startedAt,
+        finishedAt: source.finishedAt
+      });
+      return attempt.id;
+    };
+
+    let ensureRevision!: (sourceId: string) => Promise<string>;
+    const ensureGeneration = async (sourceId: string): Promise<string> => {
+      const known = generationIdsBySource.get(sourceId);
+      if (known) return known;
+      if (importingGenerations.has(sourceId)) throw new HTTPException(422, { message: "Payload lineage contains a generation cycle" });
+      const source = sourceGenerationById.get(sourceId);
+      if (!source) throw new HTTPException(422, { message: `Missing payload generation ${sourceId}` });
+      importingGenerations.add(sourceId);
+      try {
+        const parentRevisionId = source.parentRevisionId === null ? null : await ensureRevision(source.parentRevisionId);
+        const contextSnapshot = rewritePayloadContextSnapshot(source.contextSnapshot);
+        const generation = await repository.createPayloadGeneration({
+          projectId: project.id,
+          sessionId: session.id,
+          branchId: branch.id,
+          // The original context cursor may precede an accepted payload node,
+          // but nodes are immutable and reference payload revisions. Preserve
+          // the rewritten cursor in the manifest and start imported evidence
+          // detached from an executable branch cursor.
+          contextNodeId: null,
+          parentRevisionId,
+          feedback: source.feedback,
+          operatorInstruction: source.operatorInstruction,
+          generatorProfileRevisionId: rewrittenRevisionId(assetRevisionIds, source.generatorProfileRevisionId, "payload generator profile"),
+          instructionRevisionId: source.instructionRevisionId === null
+            ? null
+            : rewrittenRevisionId(assetRevisionIds, source.instructionRevisionId, "payload generator instruction"),
+          techniqueRevisionIds: source.techniqueRevisionIds.map((id) => rewrittenRevisionId(assetRevisionIds, id, "payload technique")),
+          pipelineRevisionId: source.pipelineRevisionId === null
+            ? null
+            : rewrittenRevisionId(assetRevisionIds, source.pipelineRevisionId, "payload pipeline"),
+          variables: source.variables,
+          contextOptions: source.contextOptions,
+          candidateCount: source.candidateCount,
+          diversity: source.diversity,
+          contextSnapshot
+        });
+        generationIdsBySource.set(sourceId, generation.id);
+        for (const attempt of sourcePayloadAttempts.filter((item) => item.generationId === sourceId)) await ensureAttempt(attempt.id);
+        await repository.updatePayloadGeneration(generation.id, { status: source.status });
+        return generation.id;
+      } finally {
+        importingGenerations.delete(sourceId);
+      }
+    };
+
+    ensureRevision = async (sourceId: string): Promise<string> => {
+      const known = revisionIdsBySource.get(sourceId);
+      if (known) return known;
+      if (importingRevisions.has(sourceId)) throw new HTTPException(422, { message: "Payload lineage contains a revision cycle" });
+      const source = sourceRevisionById.get(sourceId);
+      if (!source) throw new HTTPException(422, { message: `Missing payload revision ${sourceId}` });
+      importingRevisions.add(sourceId);
+      try {
+        const parentRevisionId = source.parentRevisionId === null ? null : await ensureRevision(source.parentRevisionId);
+        const generationId = source.generationId === null ? null : await ensureGeneration(source.generationId);
+        const attemptId = source.attemptId === null ? null : await ensureAttempt(source.attemptId);
+        const revision = await repository.createPayloadRevision({
+          projectId: project.id,
+          sessionId: session.id,
+          generationId,
+          attemptId,
+          parentRevisionId,
+          ordinal: source.ordinal,
+          operation: source.operation,
+          text: source.text,
+          provenance: {
+            ...rewritePayloadRevisionProvenance(source.provenance, assetRevisionIds),
+            importedArtifactId: imported.manifest.artifactId,
+            sourceRevisionId: source.id
+          }
+        });
+        revisionIdsBySource.set(sourceId, revision.id);
+        return revision.id;
+      } finally {
+        importingRevisions.delete(sourceId);
+      }
+    };
+
+    for (const source of sourcePayloadRevisions) await ensureRevision(source.id);
     let headNodeId: string | null = null;
     for (const source of sourceNodes) {
       const parts = source.parts.map((part) => {
@@ -551,7 +964,8 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
         role: source.role,
         parts,
         sourceRunId: source.sourceRunId === null ? null : runIdsBySource.get(source.sourceRunId)!,
-        configSnapshotId: source.configSnapshotId === null ? null : snapshotIds.get(source.configSnapshotId)!
+        configSnapshotId: source.configSnapshotId === null ? null : snapshotIds.get(source.configSnapshotId)!,
+        sourcePayloadRevisionId: source.sourcePayloadRevisionId === null ? null : revisionIdsBySource.get(source.sourcePayloadRevisionId)!
       });
       headNodeId = node.id;
     }
@@ -580,6 +994,15 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
       if (!restored) throw new HTTPException(500, { message: "Imported run could not be restored" });
       importedRuns.push(restored);
     }
+    const importedPayloadGenerations = (await Promise.all(
+      [...generationIdsBySource.values()].map((id) => repository.getPayloadGeneration(id))
+    )).filter((value): value is PayloadGeneration => value !== null);
+    const importedPayloadAttempts = (await Promise.all(
+      [...attemptIdsBySource.values()].map((id) => repository.getPayloadGenerationAttempt(id))
+    )).filter((value): value is PayloadGenerationAttempt => value !== null);
+    const importedPayloadRevisions = (await Promise.all(
+      [...revisionIdsBySource.values()].map((id) => repository.getPayloadRevision(id))
+    )).filter((value): value is PayloadRevision => value !== null);
     const finding = await repository.createFinding({
       projectId: project.id, sessionId: session.id, branchId: branch.id, nodeId: headNodeId,
       title: typeof metadata.title === "string" ? metadata.title : "Imported finding",
@@ -598,6 +1021,9 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
       importedEvidenceAssets: importedEvidenceAssets.map(sanitizeAssetRevision),
       importedSnapshots,
       importedRuns,
+      importedPayloadGenerations,
+      importedPayloadAttempts,
+      importedPayloadRevisions,
       importedMissingEvidence: [...declaredMissing],
       scriptsEnabled: false
     }, 201);

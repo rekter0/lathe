@@ -4,6 +4,12 @@ import type {
   JsonValue,
   MessagePart,
   ModelCapabilities,
+  PayloadDiversity,
+  PayloadGenerationOptions,
+  PayloadGenerationStatus,
+  PayloadRevisionOperation,
+  RunClassification,
+  RunStatus,
   ResolvedConfig
 } from "@lathe/domain";
 
@@ -11,6 +17,7 @@ export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   description: text("description").notNull(),
+  targetName: text("target_name").notNull().default(""),
   defaultHarnessRevisionId: text("default_harness_revision_id"),
   workspaceRoot: text("workspace_root"),
   createdAt: text("created_at").notNull(),
@@ -23,6 +30,7 @@ export const sessions = sqliteTable(
     id: text("id").primaryKey(),
     projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
+    description: text("description").notNull().default(""),
     providerProfileId: text("provider_profile_id"),
     modelId: text("model_id"),
     activeBranchId: text("active_branch_id"),
@@ -45,6 +53,7 @@ export const messageNodes = sqliteTable(
     parts: text("parts", { mode: "json" }).$type<MessagePart[]>().notNull(),
     sourceRunId: text("source_run_id"),
     configSnapshotId: text("config_snapshot_id"),
+    sourcePayloadRevisionId: text("source_payload_revision_id"),
     createdAt: text("created_at").notNull()
   },
   (table) => [index("message_nodes_session_idx").on(table.sessionId), index("message_nodes_parent_idx").on(table.parentId)]
@@ -218,6 +227,106 @@ export const automationJobs = sqliteTable(
   (table) => [index("automation_jobs_session_idx").on(table.sessionId)]
 );
 
+export const payloadWorkbenchSettings = sqliteTable("payload_workbench_settings", {
+  id: text("id").primaryKey(),
+  defaultGeneratorProfileRevisionId: text("default_generator_profile_revision_id"),
+  defaultInstructionRevisionId: text("default_instruction_revision_id"),
+  candidateCount: integer("candidate_count").notNull(),
+  diversity: text("diversity").$type<PayloadDiversity>().notNull(),
+  contextMode: text("context_mode").$type<PayloadGenerationOptions["contextMode"]>().notNull(),
+  includeProjectBrief: integer("include_project_brief", { mode: "boolean" }).notNull(),
+  includeSessionBrief: integer("include_session_brief", { mode: "boolean" }).notNull(),
+  includeTargetConfig: integer("include_target_config", { mode: "boolean" }).notNull(),
+  budgetChars: integer("budget_chars").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+});
+
+export const payloadGenerations = sqliteTable(
+  "payload_generations",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    branchId: text("branch_id").notNull().references(() => branches.id, { onDelete: "cascade" }),
+    contextNodeId: text("context_node_id"),
+    parentRevisionId: text("parent_revision_id"),
+    feedback: text("feedback"),
+    operatorInstruction: text("operator_instruction").notNull(),
+    generatorProfileRevisionId: text("generator_profile_revision_id").notNull(),
+    instructionRevisionId: text("instruction_revision_id"),
+    techniqueRevisionIds: text("technique_revision_ids", { mode: "json" }).$type<string[]>().notNull(),
+    pipelineRevisionId: text("pipeline_revision_id"),
+    variables: text("variables", { mode: "json" }).$type<JsonObject>().notNull(),
+    contextOptions: text("context_options", { mode: "json" }).$type<PayloadGenerationOptions>().notNull(),
+    candidateCount: integer("candidate_count").notNull(),
+    diversity: text("diversity").$type<PayloadDiversity>().notNull(),
+    contextSnapshot: text("context_snapshot", { mode: "json" }).$type<JsonObject>().notNull(),
+    contextHash: text("context_hash").notNull(),
+    status: text("status").$type<PayloadGenerationStatus>().notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    deletedAt: text("deleted_at")
+  },
+  (table) => [
+    index("payload_generations_session_idx").on(table.sessionId),
+    index("payload_generations_branch_idx").on(table.branchId),
+    index("payload_generations_status_idx").on(table.status)
+  ]
+);
+
+export const payloadGenerationAttempts = sqliteTable(
+  "payload_generation_attempts",
+  {
+    id: text("id").primaryKey(),
+    generationId: text("generation_id").notNull().references(() => payloadGenerations.id, { onDelete: "cascade" }),
+    ordinal: integer("ordinal").notNull(),
+    backendSnapshot: text("backend_snapshot", { mode: "json" }).$type<JsonObject>().notNull(),
+    providerProfileId: text("provider_profile_id"),
+    modelId: text("model_id"),
+    configSnapshotId: text("config_snapshot_id"),
+    nativeThreadId: text("native_thread_id"),
+    nativeTurnId: text("native_turn_id"),
+    status: text("status").$type<RunStatus>().notNull(),
+    classification: text("classification").$type<RunClassification>(),
+    normalizedOutput: text("normalized_output", { mode: "json" }).$type<JsonValue>(),
+    usage: text("usage", { mode: "json" }).$type<JsonObject>(),
+    traceHash: text("trace_hash"),
+    startedAt: text("started_at"),
+    finishedAt: text("finished_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => [
+    uniqueIndex("payload_attempts_generation_ordinal_uq").on(table.generationId, table.ordinal),
+    index("payload_attempts_generation_idx").on(table.generationId)
+  ]
+);
+
+export const payloadRevisions = sqliteTable(
+  "payload_revisions",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    generationId: text("generation_id").references(() => payloadGenerations.id, { onDelete: "cascade" }),
+    attemptId: text("attempt_id").references(() => payloadGenerationAttempts.id, { onDelete: "set null" }),
+    parentRevisionId: text("parent_revision_id"),
+    ordinal: integer("ordinal").notNull(),
+    operation: text("operation").$type<PayloadRevisionOperation>().notNull(),
+    text: text("text").notNull(),
+    contentHash: text("content_hash").notNull(),
+    provenance: text("provenance", { mode: "json" }).$type<JsonObject>().notNull(),
+    createdAt: text("created_at").notNull(),
+    deletedAt: text("deleted_at")
+  },
+  (table) => [
+    index("payload_revisions_session_idx").on(table.sessionId),
+    index("payload_revisions_generation_idx").on(table.generationId),
+    index("payload_revisions_parent_idx").on(table.parentRevisionId)
+  ]
+);
+
 export const sqliteSchema = {
   projects,
   sessions,
@@ -231,5 +340,9 @@ export const sqliteSchema = {
   assetRevisions,
   attachments,
   findings,
-  automationJobs
+  automationJobs,
+  payloadWorkbenchSettings,
+  payloadGenerations,
+  payloadGenerationAttempts,
+  payloadRevisions
 };

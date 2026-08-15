@@ -41,6 +41,14 @@ import type { RunCoordinator } from "./run-coordinator.js";
 import { registerArtifactRoutes } from "./artifact-routes.js";
 import { registerMcpRoutes } from "./mcp-routes.js";
 import type { JobCoordinator } from "./job-coordinator.js";
+import { PayloadGenerationCoordinator } from "./payload-generation-coordinator.js";
+import { registerPayloadRoutes } from "./payload-routes.js";
+import {
+  payloadGeneratorInstructionValueSchema,
+  payloadGeneratorProfileValueSchema,
+  payloadPipelineValueSchema,
+  payloadTechniqueValueSchema
+} from "./payload-schemas.js";
 
 export interface AppDependencies {
   repository: LatheRepository;
@@ -51,6 +59,7 @@ export interface AppDependencies {
   dataDirectory: string;
   jobCoordinator?: Pick<JobCoordinator, "start" | "cancel" | "resume">;
   providerFetch?: typeof globalThis.fetch;
+  payloadCoordinator?: PayloadGenerationCoordinator;
 }
 
 async function parseBody<T>(request: Request, schema: ZodType<T>): Promise<T> {
@@ -72,6 +81,26 @@ function validateAssetCredentials(kind: AssetKind, value: JsonValue): void {
   }
 }
 
+function validatePayloadAssetValue(kind: AssetKind, value: JsonValue): void {
+  if (kind === "payload-generator-profile") payloadGeneratorProfileValueSchema.parse(value);
+  else if (kind === "payload-generator-instruction") payloadGeneratorInstructionValueSchema.parse(value);
+  else if (kind === "payload-technique") payloadTechniqueValueSchema.parse(value);
+  else if (kind === "payload-pipeline") payloadPipelineValueSchema.parse(value);
+}
+
+async function validatePayloadAssetReferences(repository: LatheRepository, kind: AssetKind, value: JsonValue): Promise<void> {
+  if (kind !== "payload-generator-profile") return;
+  const profile = payloadGeneratorProfileValueSchema.parse(value);
+  if (profile.backend.kind !== "http-provider") return;
+  const provider = await repository.getProviderProfile(profile.backend.providerProfileRevisionId);
+  if (!provider) {
+    throw new HTTPException(409, { message: "Generator profile references an unavailable provider revision" });
+  }
+  if (provider.models.length > 0 && !provider.models.some((model) => model.id === profile.backend.modelId)) {
+    throw new HTTPException(409, { message: "Generator profile model is not present in the referenced provider revision" });
+  }
+}
+
 function resourceInUseMessage(label: string, result: ResourceDeletionResult): string {
   const examples = result.references
     .slice(0, 3)
@@ -84,6 +113,12 @@ function resourceInUseMessage(label: string, result: ResourceDeletionResult): st
 export function createApp(dependencies: AppDependencies): Hono {
   const { repository, contentStore, events, runCoordinator } = dependencies;
   const app = new Hono();
+  const payloadCoordinator = dependencies.payloadCoordinator ?? new PayloadGenerationCoordinator(
+    repository,
+    contentStore,
+    events,
+    dependencies.providerFetch ?? globalThis.fetch
+  );
   app.use("*", localSecurity(dependencies.apiToken));
 
   app.onError((error, context) => {
@@ -110,6 +145,7 @@ export function createApp(dependencies: AppDependencies): Hono {
     return context.json({ project: await repository.createProject({
       name: input.name,
       description: input.description,
+      targetName: input.targetName,
       ...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot })
     }) }, 201);
   });
@@ -124,8 +160,16 @@ export function createApp(dependencies: AppDependencies): Hono {
     if (!project) throw new HTTPException(404, { message: "Project not found" });
     const sessions = await repository.listSessions(project.id);
     for (const session of sessions) {
-      const [runs, jobs] = await Promise.all([repository.listRuns(session.id), repository.listAutomationJobs(session.id)]);
-      if (runs.some((run) => ["queued", "streaming", "awaiting-tool"].includes(run.status)) || jobs.some((job) => ["queued", "running"].includes(job.status))) {
+      const [runs, jobs, payloadGenerations] = await Promise.all([
+        repository.listRuns(session.id),
+        repository.listAutomationJobs(session.id),
+        repository.listPayloadGenerations(session.id)
+      ]);
+      if (
+        runs.some((run) => ["queued", "streaming", "awaiting-tool"].includes(run.status))
+        || jobs.some((job) => ["queued", "running"].includes(job.status))
+        || payloadGenerations.some((generation) => ["queued", "streaming"].includes(generation.status))
+      ) {
         throw new HTTPException(409, { message: `Project “${project.name}” has active work in session “${session.name}”. Cancel or finish it before deleting the project.` });
       }
     }
@@ -158,6 +202,7 @@ export function createApp(dependencies: AppDependencies): Hono {
     const result = await repository.createSession({
       projectId: input.projectId,
       name: input.name,
+      description: input.description,
       ...(input.providerProfileId !== undefined ? { providerProfileId: input.providerProfileId } : {}),
       ...(input.modelId !== undefined ? { modelId: input.modelId } : {}),
       ...(draftConfig ? { draftConfig } : {})
@@ -175,6 +220,18 @@ export function createApp(dependencies: AppDependencies): Hono {
       repository.listAttachments(session.projectId)
     ]);
     return context.json({ session, nodes, branches, checkpoints, runs, attachments });
+  });
+  app.patch("/api/sessions/:id/metadata", async (context) => {
+    const body = await parseBody(context.req.raw, z.object({
+      name: z.string().trim().min(1).max(120).optional(),
+      description: z.string().max(4_000).optional()
+    }).refine((value) => value.name !== undefined || value.description !== undefined, { message: "At least one metadata field is required" }));
+    const session = await repository.updateSessionMetadata(context.req.param("id"), {
+      ...(body.name === undefined ? {} : { name: body.name }),
+      ...(body.description === undefined ? {} : { description: body.description })
+    });
+    if (!session) throw new HTTPException(404, { message: "Session not found" });
+    return context.json({ session });
   });
   app.patch("/api/sessions/:id/config", async (context) => {
     const body = await parseBody(context.req.raw, z.object({ config: resolvedConfigSchema }));
@@ -213,8 +270,16 @@ export function createApp(dependencies: AppDependencies): Hono {
   app.delete("/api/sessions/:id", async (context) => {
     const session = await repository.getSession(context.req.param("id"));
     if (!session) throw new HTTPException(404, { message: "Session not found" });
-    const [runs, jobs] = await Promise.all([repository.listRuns(session.id), repository.listAutomationJobs(session.id)]);
-    if (runs.some((run) => ["queued", "streaming", "awaiting-tool"].includes(run.status)) || jobs.some((job) => ["queued", "running"].includes(job.status))) {
+    const [runs, jobs, payloadGenerations] = await Promise.all([
+      repository.listRuns(session.id),
+      repository.listAutomationJobs(session.id),
+      repository.listPayloadGenerations(session.id)
+    ]);
+    if (
+      runs.some((run) => ["queued", "streaming", "awaiting-tool"].includes(run.status))
+      || jobs.some((job) => ["queued", "running"].includes(job.status))
+      || payloadGenerations.some((generation) => ["queued", "streaming"].includes(generation.status))
+    ) {
       throw new HTTPException(409, { message: `Session “${session.name}” has active work. Cancel or finish it before deleting the session.` });
     }
     if (!await repository.deleteSession(session.id)) throw new HTTPException(404, { message: "Session not found" });
@@ -223,19 +288,44 @@ export function createApp(dependencies: AppDependencies): Hono {
 
   app.post("/api/sessions/:id/messages", async (context) => {
     const input = await parseBody(context.req.raw, appendMessageSchema);
+    const sessionId = context.req.param("id");
     const branchId = input.branchId;
-    const branches = await repository.listBranches(context.req.param("id"));
+    const branches = await repository.listBranches(sessionId);
     const branch = branches.find((item) => item.id === branchId);
     if (!branch) throw new HTTPException(404, { message: "Branch not found" });
+    let sourcePayloadRevisionId = input.sourcePayloadRevisionId ?? null;
+    if (sourcePayloadRevisionId !== null) {
+      if (input.role !== "user") throw new HTTPException(422, { message: "Only operator messages can reference a source payload revision" });
+      const source = await repository.getPayloadRevision(sourcePayloadRevisionId);
+      if (!source || source.sessionId !== sessionId) throw new HTTPException(409, { message: "Source payload revision does not belong to this session" });
+      const messageText = input.parts.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+      if (messageText !== source.text) {
+        const session = await repository.getSession(sessionId);
+        if (!session) throw new HTTPException(404, { message: "Session not found" });
+        const edited = await repository.createPayloadRevision({
+          projectId: session.projectId,
+          sessionId,
+          generationId: source.generationId,
+          attemptId: null,
+          parentRevisionId: source.id,
+          ordinal: source.ordinal,
+          operation: "edited",
+          text: messageText,
+          provenance: { kind: "composer-edit-with-attachments", parentHash: source.contentHash }
+        });
+        sourcePayloadRevisionId = edited.id;
+      }
+    }
     const node = await repository.appendNode({
-      sessionId: context.req.param("id"),
+      sessionId,
       branchId,
       parentId: input.parentId ?? branch.headNodeId,
       role: input.role,
       parts: input.parts as MessagePart[],
-      configSnapshotId: input.configSnapshotId ?? null
+      configSnapshotId: input.configSnapshotId ?? null,
+      sourcePayloadRevisionId
     });
-    events.publish(`session:${context.req.param("id")}`, "node.created", node as unknown as JsonValue);
+    events.publish(`session:${sessionId}`, "node.created", node as unknown as JsonValue);
     return context.json({ node }, 201);
   });
 
@@ -357,6 +447,8 @@ export function createApp(dependencies: AppDependencies): Hono {
   app.post("/api/assets", async (context) => {
     const asset = await parseBody(context.req.raw, z.custom<Parameters<typeof repository.saveAssetRevision>[0]>((value) => Boolean(value && typeof value === "object")));
     validateAssetCredentials(asset.kind, asset.value);
+    validatePayloadAssetValue(asset.kind, asset.value);
+    await validatePayloadAssetReferences(repository, asset.kind, asset.value);
     return context.json({ asset: sanitizeAssetRevision(await repository.saveAssetRevision(asset)) }, 201);
   });
   app.delete("/api/library/assets/:id", async (context) => {
@@ -369,7 +461,7 @@ export function createApp(dependencies: AppDependencies): Hono {
     const body = await parseBody(context.req.raw, z.object({
       assetId: z.string().optional(),
       baseRevisionId: z.string().optional(),
-      kind: z.enum(["prompt", "tool-spec", "tool-implementation", "harness", "target", "mcp-server"]),
+      kind: z.enum(["prompt", "tool-spec", "tool-implementation", "harness", "target", "mcp-server", "payload-generator-profile", "payload-generator-instruction", "payload-technique", "payload-pipeline"]),
       name: z.string().trim().min(1).max(120),
       description: z.string().max(4_000).default(""),
       tags: z.array(z.string()).default([]),
@@ -411,6 +503,8 @@ export function createApp(dependencies: AppDependencies): Hono {
     const provenance = structuredClone(body.provenance);
     if (baseRevision) delete provenance.trustedFromRevisionId;
     validateAssetCredentials(body.kind, value);
+    validatePayloadAssetValue(body.kind, value);
+    await validatePayloadAssetReferences(repository, body.kind, value);
     const asset = await repository.saveAssetRevision({
       id: uuidv7(),
       assetId,
@@ -573,6 +667,7 @@ export function createApp(dependencies: AppDependencies): Hono {
       branchId: input.branchId,
       contextNodeId: input.contextNodeId ?? null,
       ...(input.userMessage ? { userMessage: input.userMessage } : {}),
+      ...(input.sourcePayloadRevisionId !== undefined ? { sourcePayloadRevisionId: input.sourcePayloadRevisionId } : {}),
       ...(input.config ? { configOverride: input.config } : {})
     });
     return context.json({ run }, 202);
@@ -619,6 +714,8 @@ export function createApp(dependencies: AppDependencies): Hono {
       headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive" }
     });
   });
+
+  registerPayloadRoutes(app, { repository, coordinator: payloadCoordinator });
 
   registerMcpRoutes(app, repository, contentStore);
   registerArtifactRoutes(app, repository, contentStore);

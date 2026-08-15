@@ -17,6 +17,7 @@ function assistantNode(id: string, text: string, runId: string): MessageNode {
     parts: [{ type: "text", text }],
     sourceRunId: runId,
     configSnapshotId: "config-1",
+    sourcePayloadRevisionId: null,
     createdAt
   };
 }
