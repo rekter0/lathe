@@ -403,10 +403,11 @@ function clientInfo(profile: CodexAppServerProfile): JsonObject {
 async function initialize(
   connection: CodexAppServerProcess,
   profile: CodexAppServerProfile,
+  experimentalApi: boolean,
 ): Promise<string | null> {
   const result = record(await connection.request("initialize", {
     clientInfo: clientInfo(profile),
-    capabilities: { experimentalApi: false, requestAttestation: false },
+    capabilities: { experimentalApi, requestAttestation: false },
   }));
   connection.notify("initialized");
   return stringValue(result.userAgent) ?? null;
@@ -516,19 +517,11 @@ interface EstablishedThread {
 }
 
 function threadOverrides(request: CodexGenerationRequest, workspace: PreparedWorkspace): JsonObject {
-  const sandboxPolicy: JsonObject = {
-    type: "readOnly",
-    access: {
-      type: "restricted",
-      includePlatformDefaults: true,
-      readableRoots: [workspace.cwd],
-    },
-  };
   return {
     model: request.model,
     cwd: workspace.cwd,
     approvalPolicy: "never",
-    sandboxPolicy,
+    sandbox: "readOnly",
     runtimeWorkspaceRoots: workspace.runtimeWorkspaceRoots,
     ...(request.baseInstructions === undefined ? {} : { baseInstructions: request.baseInstructions }),
     ...(request.developerInstructions === undefined
@@ -1016,7 +1009,7 @@ export class CodexAppServerAdapter implements CodexAppServerAdapterContract {
         directory,
         probeCallbacks(trace, warnings, (error) => { fatal = error; }),
       );
-      const userAgent = await initialize(connection, profile);
+      const userAgent = await initialize(connection, profile, false);
       if (fatal !== undefined) throw fatal;
       const account = await readAccount(connection);
       if (fatal !== undefined) throw fatal;
@@ -1066,7 +1059,7 @@ export class CodexAppServerAdapter implements CodexAppServerAdapterContract {
       );
       controller.bindConnection(connection);
       controller.bindSignal(options.signal);
-      const userAgent = await initialize(connection, profile);
+      const userAgent = await initialize(connection, profile, true);
       const account = await readAccount(connection);
       const established = await establishThread(connection, request, workspace);
       const threadId = established.threadId;

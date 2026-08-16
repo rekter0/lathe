@@ -82,9 +82,31 @@ const models = {
 let input = "";
 let inputQueue = Promise.resolve();
 let activeThreadId = "thread-fixture";
+let experimentalApiEnabled = false;
 const rejectedIds = new Set(["server-approval", "server-tool", "server-mcp", "server-app"]);
 const observedRejections = new Set();
 let childProcess;
+
+const experimentalFieldsByMethod = new Map([
+  ["thread/start", ["runtimeWorkspaceRoots", "environments"]],
+  ["thread/fork", ["runtimeWorkspaceRoots", "excludeTurns"]],
+  ["thread/resume", ["runtimeWorkspaceRoots", "excludeTurns"]],
+  ["turn/start", ["runtimeWorkspaceRoots", "environments"]],
+]);
+
+async function rejectUnnegotiatedExperimentalField(id, method, params) {
+  if (experimentalApiEnabled) return false;
+  const field = experimentalFieldsByMethod.get(method)?.find((candidate) => candidate in params);
+  if (field === undefined) return false;
+  await send({
+    id,
+    error: {
+      code: -32602,
+      message: `${method}.${field} requires experimentalApi capability`,
+    },
+  });
+  return true;
+}
 
 async function finishTurn(text = "hello") {
   await send({ method: "turn/started", params: { threadId: activeThreadId, turn: { id: "turn-fixture" } } });
@@ -136,6 +158,7 @@ async function handle(message) {
   }
   const { id, method, params = {} } = message ?? {};
   if (method === "initialize") {
+    experimentalApiEnabled = params.capabilities?.experimentalApi === true;
     const forbiddenEnvironment = [
       "OPENAI_API_KEY",
       "CODEX_API_KEY",
@@ -158,6 +181,7 @@ async function handle(message) {
     return;
   }
   if (method === "initialized") return;
+  if (await rejectUnnegotiatedExperimentalField(id, method, params)) return;
   if (method === "account/read") {
     if (scenario === "malformed") {
       await sendBytes(Buffer.from(`{"id":${JSON.stringify(id)},"result":\n`, "utf8"), true);
@@ -171,15 +195,13 @@ async function handle(message) {
     return;
   }
   if (method === "thread/start") {
-    const valid = params.sandboxPolicy?.type === "readOnly"
-      && params.sandboxPolicy?.access?.type === "restricted"
-      && params.sandboxPolicy?.access?.includePlatformDefaults === true
-      && Array.isArray(params.sandboxPolicy?.access?.readableRoots)
-      && params.sandboxPolicy.access.readableRoots.length === 1
+    const valid = params.sandbox === "readOnly"
+      && !("sandboxPolicy" in params)
       && params.approvalPolicy === "never"
       && params.ephemeral === true
       && Array.isArray(params.environments)
-      && params.environments.length === 0;
+      && params.environments.length === 0
+      && Array.isArray(params.runtimeWorkspaceRoots);
     activeThreadId = "thread-fixture";
     await send(valid
       ? { id, result: { thread: { id: activeThreadId } } }
@@ -191,11 +213,8 @@ async function handle(message) {
       await send({ id, error: { code: -32601, message: `${method} unsupported` } });
       return;
     }
-    const valid = params.sandboxPolicy?.type === "readOnly"
-      && params.sandboxPolicy?.access?.type === "restricted"
-      && params.sandboxPolicy?.access?.includePlatformDefaults === true
-      && Array.isArray(params.sandboxPolicy?.access?.readableRoots)
-      && params.sandboxPolicy.access.readableRoots.length === 1
+    const valid = params.sandbox === "readOnly"
+      && !("sandboxPolicy" in params)
       && params.approvalPolicy === "never"
       && params.excludeTurns === true
       && Array.isArray(params.runtimeWorkspaceRoots);
@@ -221,7 +240,11 @@ async function handle(message) {
       && params.sandboxPolicy?.access?.includePlatformDefaults === true
       && Array.isArray(params.sandboxPolicy?.access?.readableRoots)
       && params.sandboxPolicy.access.readableRoots.length === 1
-      && params.approvalPolicy === "never";
+      && params.approvalPolicy === "never"
+      && !("sandbox" in params)
+      && Array.isArray(params.environments)
+      && params.environments.length === 0
+      && Array.isArray(params.runtimeWorkspaceRoots);
     if (!safeTurn) {
       await send({ id, error: { code: -32090, message: "unsafe turn settings" } });
       return;

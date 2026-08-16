@@ -86,6 +86,14 @@ describe("CodexAppServerAdapter", () => {
         supportedReasoningEfforts: ["low", "high"],
       }),
     ]);
+    expect(result.trace.find((item) => item.method === "initialize")?.data).toMatchObject({
+      params: {
+        capabilities: {
+          experimentalApi: false,
+          requestAttestation: false,
+        },
+      },
+    });
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain("operator@example.test");
     expect(serialized).not.toContain("account-private-123");
@@ -167,8 +175,29 @@ describe("CodexAppServerAdapter", () => {
     const { items, result } = await collect(run);
 
     expect(result.status).toBe("completed");
+    const initializeRequest = items.find((item) => item.trace?.method === "initialize")?.trace;
+    expect(initializeRequest?.data).toMatchObject({
+      params: {
+        capabilities: {
+          experimentalApi: true,
+          requestAttestation: false,
+        },
+      },
+    });
     const threadStart = items.find((item) => item.trace?.method === "thread/start")?.trace;
     expect(threadStart?.data).toMatchObject({
+      params: {
+        cwd: resolvedProject,
+        sandbox: "readOnly",
+        approvalPolicy: "never",
+        ephemeral: true,
+        environments: [],
+        runtimeWorkspaceRoots: [resolvedProject],
+      },
+    });
+    expect(threadStart?.data).not.toHaveProperty("params.sandboxPolicy");
+    const turnStart = items.find((item) => item.trace?.method === "turn/start")?.trace;
+    expect(turnStart?.data).toMatchObject({
       params: {
         cwd: resolvedProject,
         sandboxPolicy: {
@@ -180,11 +209,11 @@ describe("CodexAppServerAdapter", () => {
           },
         },
         approvalPolicy: "never",
-        ephemeral: true,
         environments: [],
         runtimeWorkspaceRoots: [resolvedProject],
       },
     });
+    expect(turnStart?.data).not.toHaveProperty("params.sandbox");
     expect(events(items)).toContainEqual(expect.objectContaining({
       type: "runtime.warning",
       code: "runtime-boundary",
@@ -220,16 +249,13 @@ describe("CodexAppServerAdapter", () => {
           lastTurnId: "turn-source",
           excludeTurns: true,
           ephemeral: true,
-          sandboxPolicy: {
-            type: "readOnly",
-            access: expect.objectContaining({
-              type: "restricted",
-              includePlatformDefaults: true,
-            }),
-          },
+          sandbox: "readOnly",
+          runtimeWorkspaceRoots: [],
           approvalPolicy: "never",
         },
       });
+    expect(forkedOutput.items.find((item) => item.trace?.method === "thread/fork")?.trace?.data)
+      .not.toHaveProperty("params.sandboxPolicy");
     expect(JSON.stringify(forkedOutput.items)).not.toContain("native-history-secret");
 
     const resumed = await adapter.start(profile(executable), {
@@ -241,6 +267,18 @@ describe("CodexAppServerAdapter", () => {
     const resumedOutput = await collect(resumed);
     expect(resumed.threadId).toBe("thread-source");
     expect(resumedOutput.result).toMatchObject({ status: "completed", continuity: { mode: "resume" } });
+    const resumeRequest = resumedOutput.items
+      .find((item) => item.trace?.method === "thread/resume")?.trace;
+    expect(resumeRequest?.data).toMatchObject({
+      params: {
+        threadId: "thread-source",
+        excludeTurns: true,
+        sandbox: "readOnly",
+        runtimeWorkspaceRoots: [],
+        approvalPolicy: "never",
+      },
+    });
+    expect(resumeRequest?.data).not.toHaveProperty("params.sandboxPolicy");
     expect(events(resumedOutput.items)).toContainEqual(expect.objectContaining({
       type: "runtime.warning",
       message: expect.stringContaining("prefer fork"),
