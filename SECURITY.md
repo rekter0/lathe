@@ -13,7 +13,7 @@ At launch, Lathe:
 - prints a tokenized launch URL, then the UI removes the token from the address bar and keeps it in tab-scoped session storage;
 - requires the token for ordinary `/api` calls and checks browser origins against loopback names;
 - emits a restrictive Content Security Policy, no-referrer policy, same-origin resource policy, and `nosniff` headers;
-- renders model Markdown with raw HTML disabled and sanitization enabled.
+- renders model Markdown as sanitized GitHub-flavored Markdown with raw HTML disabled.
 
 `/api/health` is intentionally unauthenticated and returns only service health/version information.
 
@@ -34,6 +34,10 @@ Heuristic evidence redaction is enabled by default and can be disabled from the 
 Provider profiles may point at arbitrary HTTP(S) endpoints. The selected endpoint receives the compiled system prompt, branch transcript, enabled tool schemas, supported attachments, and configured request metadata. A gateway compatible with an OpenAI or Anthropic wire format is still a separate trust domain; inspect its URL and policy before use.
 
 Extra profile/request body fields cannot overwrite Lathe-owned fields such as `model`, `input`/`messages`, `tools`, or `stream`. There are no automatic retries, preventing Lathe from silently repeating a sensitive or costly request. Raw response frames are retained in policy-filtered traces because failures may arrive after an HTTP 200 streaming response. Each operation snapshots the active evidence-redaction setting, so changing it cannot alter a stream already in flight.
+
+## Helper runtimes
+
+Codex Payload Workbench profiles launch an operator-selected absolute `codex app-server` path directly as the Lathe OS user. They require its existing ChatGPT login—API-key auth is rejected—and Lathe does not copy or store its auth cache. Lathe supplies a narrow environment, rejects server-initiated approval/tool/input/MCP/app requests, and selects a named read-only, no-command-network permission profile rooted at either an empty staging directory or an explicitly confirmed project directory. These controls are enforced by the installed Codex runtime, not an independent OS sandbox: use a trusted executable path and review its recorded version/entry-file hash. Codex still owns its upstream traffic, native state, and provider behavior.
 
 ## Tool execution
 
@@ -71,9 +75,13 @@ Roots default to none and must be explicitly selected. Sampling and elicitation 
 
 ## Attachments and artifacts
 
-Attachments preserve exact bytes in a SHA-256-addressed content store. Lathe does not claim that uploaded files are malware-free. Opening an exported attachment in another application can invoke that application's parsers; use appropriate isolation for suspicious files.
+Attachments preserve exact bytes in a SHA-256-addressed content store and are reusable across sessions in the same project; names and MIME types are client-supplied metadata. Supported provider requests and branch exports may inline those bytes as base64. Lathe does not claim that uploaded files are malware-free. Opening an exported attachment in another application can invoke that application's parsers; use appropriate isolation for suspicious files.
+
+Branch export is a raw provider request body, not a checksummed Lathe artifact. It can contain the selected path, current prompts/tools/options, tool output, and inline attachments; it excludes provider URL/headers, siblings, and Lathe evidence metadata. Known managed credentials remain scrubbed (and matching attachments are rejected), while other heuristic filtering follows the global evidence setting.
 
 Artifact import validates path safety, declared hashes and sizes, file counts, compression expansion, manifest schemas, and supported ZIP features. Imported scripts remain disabled/untrusted. These checks reduce archive attacks but do not make imported content trustworthy.
+
+Deleting project/database references is not secure erasure: v1 has no content-store garbage collector. Dispose of sensitive stored bytes by securely removing the relevant `LATHE_DATA_DIR`.
 
 ## Dependency integrity
 

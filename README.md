@@ -14,7 +14,7 @@ Lathe is deliberately not an autonomous agent or a scanner. The operator chooses
 - Lathe-maintained Blank, Claude Code-inspired, and Codex-inspired harnesses. The inspired harnesses are approximations, not extracted vendor prompts.
 - Manual and deterministic mock tools, QuickJS-authored command builders/formatters, and host, existing Docker/Podman container, or system OpenSSH targets.
 - MCP client support through the official TypeScript SDK over stdio and Streamable HTTP, with negotiated capability snapshots and explicit approval gates.
-- Redacted raw provider/MCP traces, content-addressed attachments, persisted automation jobs, and checksum-verified `.lathe-harness` and `.lathe-finding` bundles.
+- Raw provider/MCP traces with configurable heuristic evidence redaction, content-addressed attachments, persisted automation jobs, and checksum-verified `.lathe-harness` and `.lathe-finding` bundles.
 - A Payload Workbench for deterministic transforms and pipelines, context-aware helper-model generation, independent candidate comparison/refinement, and immutable payload history.
 - SQLite by default or PostgreSQL selected at startup, both behind the same repository contract.
 
@@ -85,7 +85,7 @@ SQLite and PostgreSQL migrations run automatically at server startup.
 3. Create a project, then a session. The harness becomes an editable session draft; the original revision remains unchanged.
 4. Select a provider/model and preview the compiled prompt and tools in the inspector.
 5. Run a payload. Select any earlier node to fork, rewind, or checkpoint it; choose another branch in the comparison selector to inspect the divergence. The branch-toolbar download action exports the active branch as a ready-to-send JSON request body for the currently selected provider protocol and current session configuration.
-6. Review normalized output and the captured raw trace. Resolve tool calls manually, with a mock, through an approved real target, or through an approved MCP server.
+6. Inspect requests from operator turns and responses from model turns, then review normalized output and captured raw traces. Resolve tool calls manually, with a mock, through an approved real target, or through an approved MCP server.
 
 Evidence redaction is enabled by default. The always-available **Interface settings** cog can disable heuristic redaction for new provider, MCP, and Payload Workbench operations when exact safety-test content must be preserved. The choice is installation-wide and persistent. Disabling it does not reveal exact provider or MCP credentials managed by Lathe, but it can retain sensitive-looking content in new nodes, traces, normalized output, and exports. Existing evidence is never rewritten when the setting changes.
 7. Save a reusable harness or record a finding and export its reproducible bundle.
