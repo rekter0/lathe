@@ -521,7 +521,7 @@ function threadOverrides(request: CodexGenerationRequest, workspace: PreparedWor
     model: request.model,
     cwd: workspace.cwd,
     approvalPolicy: "never",
-    sandbox: "readOnly",
+    sandbox: "read-only",
     runtimeWorkspaceRoots: workspace.runtimeWorkspaceRoots,
     ...(request.baseInstructions === undefined ? {} : { baseInstructions: request.baseInstructions }),
     ...(request.developerInstructions === undefined

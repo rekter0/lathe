@@ -195,7 +195,7 @@ async function handle(message) {
     return;
   }
   if (method === "thread/start") {
-    const valid = params.sandbox === "readOnly"
+    const valid = params.sandbox === "read-only"
       && !("sandboxPolicy" in params)
       && params.approvalPolicy === "never"
       && params.ephemeral === true
@@ -213,7 +213,7 @@ async function handle(message) {
       await send({ id, error: { code: -32601, message: `${method} unsupported` } });
       return;
     }
-    const valid = params.sandbox === "readOnly"
+    const valid = params.sandbox === "read-only"
       && !("sandboxPolicy" in params)
       && params.approvalPolicy === "never"
       && params.excludeTurns === true

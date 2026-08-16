@@ -23,12 +23,12 @@ official Codex App Server over newline-delimited JSON-RPC on stdio.
 - Each generation uses an ephemeral App Server process, an ephemeral Codex
   thread, `approvalPolicy: "never"`, disabled web search, and a structured
   read-only turn sandbox policy with restricted readable roots. Thread lifecycle
-  requests use the corresponding `sandbox: "readOnly"` mode. Isolated mode uses
-  a disposable empty 0700 directory unless the caller supplies an empty absolute
-  directory. Project mode adds only the explicitly selected workspace to the
-  platform-default readable roots. This is a request to the installed Codex
-  runtime, not an independent operating-system security boundary supplied by
-  Lathe.
+  requests use the corresponding `sandbox: "read-only"` wire value. Isolated
+  mode uses a disposable empty 0700 directory unless the caller supplies an
+  empty absolute directory. Project mode adds only the explicitly selected
+  workspace to the platform-default readable roots. This is a request to the
+  installed Codex runtime, not an independent operating-system security
+  boundary supplied by Lathe.
 - A generation can explicitly fork or resume a documented native Codex thread
   ID. Fork is the preferred mapping for Lathe because it preserves the source;
   resume appends to the vendor-owned native thread. Fork can optionally target a

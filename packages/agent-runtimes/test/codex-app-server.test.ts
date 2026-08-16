@@ -188,7 +188,7 @@ describe("CodexAppServerAdapter", () => {
     expect(threadStart?.data).toMatchObject({
       params: {
         cwd: resolvedProject,
-        sandbox: "readOnly",
+        sandbox: "read-only",
         approvalPolicy: "never",
         ephemeral: true,
         environments: [],
@@ -249,7 +249,7 @@ describe("CodexAppServerAdapter", () => {
           lastTurnId: "turn-source",
           excludeTurns: true,
           ephemeral: true,
-          sandbox: "readOnly",
+          sandbox: "read-only",
           runtimeWorkspaceRoots: [],
           approvalPolicy: "never",
         },
@@ -273,7 +273,7 @@ describe("CodexAppServerAdapter", () => {
       params: {
         threadId: "thread-source",
         excludeTurns: true,
-        sandbox: "readOnly",
+        sandbox: "read-only",
         runtimeWorkspaceRoots: [],
         approvalPolicy: "never",
       },
