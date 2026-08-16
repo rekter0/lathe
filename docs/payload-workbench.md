@@ -30,7 +30,7 @@ recomputed or requested against the current session state.
 
 An HTTP generator reuses Lathe's existing provider adapters, credentials, redaction, trace capture, streaming, and error classification.
 
-1. Open the regular **Settings** page and create a provider revision. Select OpenAI Responses, OpenAI Chat Completions, or Anthropic Messages according to the endpoint's actual protocol. Configure its base URL, credential, and model catalog.
+1. Open the regular **Settings** page and create a provider revision. Select OpenAI Responses, OpenAI Chat Completions, or Anthropic Messages according to the endpoint's actual protocol. Configure its base URL, credential, and model catalog. See [Provider settings](./settings-provider.md) for endpoint, header, request-body, and reasoning details.
 2. Open **Payload Workbench settings → Profiles**, choose **HTTP provider**, and select the exact provider revision and model.
 3. Optionally set a maximum output-token limit, reasoning capture, and the temperatures mapped to Low, Balanced, and High diversity.
 4. Save the profile, then use its probe button to verify the endpoint and selected model before a session.

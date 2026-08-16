@@ -18,7 +18,7 @@ Lathe is deliberately not an autonomous agent or a scanner. The operator chooses
 - A Payload Workbench for deterministic transforms and pipelines, context-aware helper-model generation, independent candidate comparison/refinement, and immutable payload history.
 - SQLite by default or PostgreSQL selected at startup, both behind the same repository contract.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for package boundaries and persistence rules, [docs/tools.md](./docs/tools.md) for tool and execution-target examples, and [docs/payload-workbench.md](./docs/payload-workbench.md) for generator setup and the Transform/Generate/History workflow.
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for package boundaries and persistence rules, [docs/settings-provider.md](./docs/settings-provider.md) for provider endpoints and reasoning controls, [docs/tools.md](./docs/tools.md) for tool and execution-target examples, and [docs/payload-workbench.md](./docs/payload-workbench.md) for generator setup and the Transform/Generate/History workflow.
 
 ## Quick start
 
