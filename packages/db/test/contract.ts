@@ -3,6 +3,14 @@ import { emptyResolvedConfig, nowIso, sha256Json, uuidv7, type AssetKind, type A
 import type { LatheRepository } from "../src/index.js";
 
 export async function repositoryContract(repository: LatheRepository): Promise<void> {
+  expect((await repository.getApplicationSettings()).redactionEnabled).toEqual(expect.any(Boolean));
+  const enabledApplicationSettings = await repository.upsertApplicationSettings({ redactionEnabled: true });
+  expect(enabledApplicationSettings).toMatchObject({ id: "global", redactionEnabled: true });
+  const disabledApplicationSettings = await repository.upsertApplicationSettings({ redactionEnabled: false });
+  expect(disabledApplicationSettings).toMatchObject({ id: "global", redactionEnabled: false });
+  expect(disabledApplicationSettings.createdAt).toBe(enabledApplicationSettings.createdAt);
+  expect(await repository.getApplicationSettings()).toEqual(disabledApplicationSettings);
+
   const project = await repository.createProject({ name: "Research", description: "manual testing", targetName: "Acme support bot" });
   expect(project.targetName).toBe("Acme support bot");
   expect((await repository.listProjects()).map((item) => item.id)).toContain(project.id);

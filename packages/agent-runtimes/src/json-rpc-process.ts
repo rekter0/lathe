@@ -9,7 +9,11 @@ import type {
   RejectedRuntimeRequestKind,
 } from "./types.js";
 import { CodexRuntimeError } from "./types.js";
-import { redactRuntimeJson, redactRuntimeText } from "./redaction.js";
+import {
+  redactRuntimeEvidenceJson,
+  redactRuntimeJson,
+  redactRuntimeText,
+} from "./redaction.js";
 
 type RpcId = number | string;
 
@@ -32,6 +36,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_LINE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_TERMINATION_GRACE_MS = 750;
 const MAX_STDERR_TRACE_BYTES = 1024 * 1024;
+const CONTROL_PLANE_METHOD = /^(?:initialize|initialized|account(?:\/|$)|auth(?:\/|$)|login(?:\/|$))/iu;
+const PROTECTED_CONTROL_PLANE_KEY = /(?:^|[_-])(?:(?:access|refresh|id)?token|password|authorization|cookie|api[_-]?key|email|account[_-]?id|chatgpt[_-]?account|codexhome)(?:$|[_-])/i;
 
 export const LATHE_CODEX_PERMISSION_PROFILE_ID = "lathe_scoped_read_only_v1";
 export const LATHE_CODEX_PERMISSION_PROFILE_CONFIG =
@@ -89,13 +95,17 @@ function requestKind(method: string): RejectedRuntimeRequestKind {
   return "other";
 }
 
-function rpcError(message: Record<string, unknown>, method: string): CodexRuntimeError {
+function rpcError(
+  message: Record<string, unknown>,
+  method: string,
+  sanitizeMessage: (value: string) => string = redactRuntimeText,
+): CodexRuntimeError {
   const value = isRecord(message.error) ? message.error : {};
   const rawMessage = typeof value.message === "string" ? value.message : `Codex request ${method} failed`;
   const code = typeof value.code === "string" || typeof value.code === "number"
     ? String(value.code)
     : undefined;
-  return new CodexRuntimeError("runtime-error", redactRuntimeText(rawMessage), {
+  return new CodexRuntimeError("runtime-error", sanitizeMessage(rawMessage), {
     ...(code === undefined ? {} : { code }),
   });
 }
@@ -132,6 +142,8 @@ export class CodexAppServerProcess {
   readonly #requestTimeoutMs: number;
   readonly #maxLineBytes: number;
   readonly #terminationGraceMs: number;
+  readonly #redactionEnabled: boolean;
+  readonly #protectedValues = new Set<string>();
   readonly #pending = new Map<RpcId, PendingRequest>();
   readonly #exit: Promise<void>;
   #resolveExit!: () => void;
@@ -149,12 +161,14 @@ export class CodexAppServerProcess {
     child: ChildProcessWithoutNullStreams,
     profile: CodexAppServerProfile,
     callbacks: AppServerCallbacks,
+    redactionEnabled: boolean,
   ) {
     this.#child = child;
     this.#callbacks = callbacks;
     this.#requestTimeoutMs = profile.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.#maxLineBytes = profile.maxJsonLineBytes ?? DEFAULT_MAX_LINE_BYTES;
     this.#terminationGraceMs = profile.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
+    this.#redactionEnabled = redactionEnabled;
     this.#exit = new Promise<void>((resolve) => {
       this.#resolveExit = resolve;
     });
@@ -180,6 +194,7 @@ export class CodexAppServerProcess {
     profile: CodexAppServerProfile,
     cwd: string,
     callbacks: AppServerCallbacks,
+    options: { readonly redactionEnabled?: boolean } = {},
   ): Promise<CodexAppServerProcess> {
     const child = spawn(
       profile.executablePath,
@@ -208,7 +223,12 @@ export class CodexAppServerProcess {
         windowsHide: true,
       },
     );
-    const connection = new CodexAppServerProcess(child, profile, callbacks);
+    const connection = new CodexAppServerProcess(
+      child,
+      profile,
+      callbacks,
+      options.redactionEnabled ?? true,
+    );
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new CodexRuntimeError("timeout", "Timed out starting Codex App Server"));
@@ -343,6 +363,9 @@ export class CodexAppServerProcess {
     }
     if (id !== undefined && ("result" in parsed || "error" in parsed)) {
       const pending = this.#pending.get(id);
+      if (pending !== undefined && CONTROL_PLANE_METHOD.test(pending.method)) {
+        this.#captureProtectedValues(parsed);
+      }
       this.#emitTrace("response", responseTraceValue(parsed, pending?.method), pending?.method);
       if (pending === undefined) {
         this.#callbacks.onWarning("unknown-response-id", "Codex returned a response for an unknown request id");
@@ -351,14 +374,17 @@ export class CodexAppServerProcess {
       this.#pending.delete(id);
       clearTimeout(pending.timer);
       if ("error" in parsed && parsed.error !== undefined && parsed.error !== null) {
-        pending.reject(rpcError(parsed, pending.method));
+        pending.reject(rpcError(parsed, pending.method, (rawMessage) => {
+          const safe = this.#redactEvidence(rawMessage, pending.method, "response");
+          return typeof safe === "string" ? safe : redactRuntimeText(rawMessage);
+        }));
       } else {
-        pending.resolve(redactRuntimeJson(parsed.result));
+        pending.resolve(this.#redactEvidence(parsed.result, pending.method, "response"));
       }
       return;
     }
     if (method !== undefined) {
-      const params = redactRuntimeJson(parsed.params ?? {});
+      const params = this.#redactEvidence(parsed.params ?? {}, method, "notification");
       this.#emitTrace("notification", parsed, method);
       this.#callbacks.onNotification(method, params);
       return;
@@ -395,8 +421,42 @@ export class CodexAppServerProcess {
       occurredAt: new Date().toISOString(),
       direction,
       ...(method === undefined ? {} : { method }),
-      data: redactRuntimeJson(data),
+      data: this.#redactEvidence(data, method, direction),
     });
+  }
+
+  #redactEvidence(
+    value: unknown,
+    method: string | undefined,
+    direction: CodexTraceDirection,
+  ): JsonValue {
+    if (
+      this.#redactionEnabled
+      || direction === "stderr"
+      || direction === "internal"
+      || (method !== undefined && CONTROL_PLANE_METHOD.test(method))
+    ) {
+      return redactRuntimeEvidenceJson(redactRuntimeJson(value), [...this.#protectedValues]);
+    }
+    return redactRuntimeEvidenceJson(value, [...this.#protectedValues]);
+  }
+
+  #captureProtectedValues(value: unknown, key = ""): void {
+    if (value === null || value === undefined) return;
+    if (typeof value === "string") {
+      if (PROTECTED_CONTROL_PLANE_KEY.test(key) && value.length > 0) {
+        this.#protectedValues.add(value);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const entry of value) this.#captureProtectedValues(entry, key);
+      return;
+    }
+    if (typeof value !== "object") return;
+    for (const [entryKey, entryValue] of Object.entries(value as Record<string, unknown>)) {
+      this.#captureProtectedValues(entryValue, entryKey);
+    }
   }
 
   #protocolFailure(message: string): void {

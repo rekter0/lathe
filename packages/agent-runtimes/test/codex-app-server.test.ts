@@ -168,6 +168,112 @@ describe("CodexAppServerAdapter", () => {
     expect(normalized).toContainEqual(expect.objectContaining({ type: "run.completed" }));
   });
 
+  it("redacts password and token shaped candidate evidence by default", async () => {
+    const executable = await fixtureExecutable("evidence-redaction");
+    const run = await new CodexAppServerAdapter().start(profile(executable), {
+      model: "gpt-fixture",
+      input: "Return credential-shaped test content",
+      workspace: { mode: "isolated" },
+    });
+    const output = await collect(run);
+    const serialized = JSON.stringify(output);
+
+    expect(output.result.status).toBe("completed");
+    for (const testValue of [
+      "safety-token",
+      "candidate-password",
+      "sk-candidate-token",
+      "reasoning-password",
+      "reasoning-token",
+      "summary-key",
+    ]) {
+      expect(serialized).not.toContain(testValue);
+    }
+    expect(serialized).toContain("[REDACTED]");
+  });
+
+  it("preserves candidate evidence when redaction is disabled while hiding Codex account material", async () => {
+    const executable = await fixtureExecutable("evidence-redaction");
+    const run = await new CodexAppServerAdapter().start(profile(executable), {
+      model: "gpt-fixture",
+      input: "Return credential-shaped test content",
+      workspace: { mode: "isolated" },
+    }, { redactionEnabled: false });
+    const output = await collect(run);
+    const serialized = JSON.stringify(output);
+
+    expect(output.result).toMatchObject({
+      status: "completed",
+      text: 'example text; account-plan=[REDACTED]; tool_call={name:bash,arguments:{command:"Authorization: Bearer safety-token password=candidate-password token=sk-candidate-token"}}',
+      reasoning: "reasoning password=reasoning-password token=reasoning-token",
+      reasoningSummary: "summary api_key=summary-key",
+    });
+    expect(serialized).toContain("example text");
+    for (const testValue of [
+      "safety-token",
+      "candidate-password",
+      "sk-candidate-token",
+      "reasoning-password",
+      "reasoning-token",
+      "summary-key",
+    ]) {
+      expect(serialized).toContain(testValue);
+    }
+    for (const protectedValue of [
+      "operator@example.test",
+      "account-private-123",
+      "sk-fixture-super-secret",
+      "/Users/private-account/.codex",
+    ]) {
+      expect(serialized).not.toContain(protectedValue);
+    }
+    expect(serialized).toContain("[REDACTED]");
+  });
+
+  it("applies the selected evidence policy to turn and request failures", async () => {
+    const terminalExecutable = await fixtureExecutable("evidence-failure");
+    const strictRun = await new CodexAppServerAdapter().start(profile(terminalExecutable), {
+      model: "gpt-fixture",
+      input: "Fail with synthetic evidence",
+      workspace: { mode: "isolated" },
+    });
+    const strict = await collect(strictRun);
+    expect(strict.result.status).toBe("failed");
+    expect(JSON.stringify(strict)).not.toContain("fake-failure-token");
+    expect(JSON.stringify(strict)).not.toContain("fake-failure-password");
+
+    const relaxedRun = await new CodexAppServerAdapter().start(profile(terminalExecutable), {
+      model: "gpt-fixture",
+      input: "Fail with synthetic evidence",
+      workspace: { mode: "isolated" },
+    }, { redactionEnabled: false });
+    const relaxed = await collect(relaxedRun);
+    expect(relaxed.result).toMatchObject({
+      status: "failed",
+      failure: {
+        message: expect.stringContaining("Bearer fake-failure-token"),
+      },
+    });
+    const relaxedSerialized = JSON.stringify(relaxed);
+    expect(relaxedSerialized).toContain("fake-failure-password");
+    expect(relaxedSerialized).toContain("accountId=synthetic-account");
+    expect(relaxedSerialized).not.toContain("account-private-123");
+
+    const requestExecutable = await fixtureExecutable("evidence-request-error");
+    await expect(new CodexAppServerAdapter().start(profile(requestExecutable), {
+      model: "gpt-fixture",
+      input: "Reject with synthetic evidence",
+      workspace: { mode: "isolated" },
+    })).rejects.not.toHaveProperty("message", expect.stringContaining("fake-request-token"));
+    await expect(new CodexAppServerAdapter().start(profile(requestExecutable), {
+      model: "gpt-fixture",
+      input: "Reject with synthetic evidence",
+      workspace: { mode: "isolated" },
+    }, { redactionEnabled: false })).rejects.toMatchObject({
+      message: expect.stringContaining("Bearer fake-request-token"),
+    });
+  });
+
   it("rejects approval, tool, MCP, and app requests and lets the runtime report the outcome", async () => {
     const executable = await fixtureExecutable("rejections");
     const run = await new CodexAppServerAdapter().start(profile(executable), {

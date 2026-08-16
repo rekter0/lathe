@@ -30,6 +30,74 @@ describe("MCP profiles", () => {
     });
   });
 
+  it("can preserve sensitive-looking test content without exposing resolved secrets", () => {
+    expect(redactJson({
+      password: "test-only-password",
+      text: "Bearer fake-red-team-token",
+      shortEvidence: "example text",
+      echoedCredential: "x"
+    }, ["x"], false)).toEqual({
+      password: "test-only-password",
+      text: "Bearer fake-red-team-token",
+      shortEvidence: "example text",
+      echoedCredential: "[REDACTED]"
+    });
+  });
+
+  it("protects a short secret together with its configured prefix and suffix", async () => {
+    const profile: McpServerProfile = {
+      id: "short-secret-server",
+      revision: "rev-1",
+      name: "Short secret fixture",
+      transport: {
+        kind: "streamableHttp",
+        url: "https://example.test/mcp",
+        headers: {
+          "X-Custom-Auth": { kind: "secret", secretId: "short", prefix: "sk-", suffix: "-end" },
+        },
+      },
+    };
+    const resolved = await resolveMcpTransport(profile, async () => "x");
+    expect(resolved.kind).toBe("streamableHttp");
+    if (resolved.kind !== "streamableHttp") return;
+    expect(resolved.headers["X-Custom-Auth"]).toBe("sk-x-end");
+    expect(resolved.secretValues).toEqual(expect.arrayContaining(["x", "sk-x-end"]));
+    expect(redactJson({ text: "example text; credential=sk-x-end" }, resolved.secretValues, false)).toEqual({
+      text: "example text; credential=[REDACTED]",
+    });
+  });
+
+  it("heuristically redacts credential-shaped text only in strict mode", () => {
+    const evidence = {
+      note: "Observed Bearer fake-red-team-token and Basic ZmFrZTpwYXNz",
+      password: "test-only-password",
+      auth: "test-only-auth",
+      credential: "test-only-credential",
+      sessionToken: "test-only-token",
+      inputTokens: 42,
+      echoedCredential: "stored-secret-value"
+    };
+
+    expect(redactJson(evidence, ["stored-secret-value"], true)).toEqual({
+      note: "Observed Bearer [REDACTED] and Basic [REDACTED]",
+      password: "[REDACTED]",
+      auth: "[REDACTED]",
+      credential: "[REDACTED]",
+      sessionToken: "[REDACTED]",
+      inputTokens: 42,
+      echoedCredential: "[REDACTED]"
+    });
+    expect(redactJson(evidence, ["stored-secret-value"], false)).toEqual({
+      note: "Observed Bearer fake-red-team-token and Basic ZmFrZTpwYXNz",
+      password: "test-only-password",
+      auth: "test-only-auth",
+      credential: "test-only-credential",
+      sessionToken: "test-only-token",
+      inputTokens: 42,
+      echoedCredential: "[REDACTED]"
+    });
+  });
+
   it("rejects missing secrets and invalid header values", async () => {
     const missing: McpServerProfile = {
       id: "server-1",

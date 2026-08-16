@@ -1,7 +1,7 @@
 import { anthropicMessagesAdapter } from "./adapters/anthropic.js";
 import { openAiChatAdapter } from "./adapters/openai-chat.js";
 import { openAiResponsesAdapter } from "./adapters/openai-responses.js";
-import { redactHeaders, redactJson, redactText, redactUrl } from "./redaction.js";
+import { providerSecretValues, redactHeaders, redactJson, redactText, redactUrl } from "./redaction.js";
 import {
   asJsonValue,
   classifyProviderError,
@@ -49,38 +49,35 @@ export function compileProviderRequest(
   return getProtocolAdapter(profile.protocol).compile(profile, request);
 }
 
-function secretValues(profile: ProviderProfile): string[] {
-  // Custom provider headers are operator-supplied credential material even
-  // when a gateway uses a non-standard name. Treat every value as secret so a
-  // provider cannot echo it into traces or normalized stream events.
-  const values = [profile.credential ?? "", ...Object.values(profile.headers ?? {})];
-  return values.filter((value) => value.length > 0);
-}
-
-function sanitizeFailure(error: ProviderFailure, secrets: readonly string[]): ProviderFailure {
+function sanitizeFailure(
+  error: ProviderFailure,
+  secrets: readonly string[],
+  redactionEnabled: boolean,
+): ProviderFailure {
   return {
     ...error,
-    message: redactText(error.message, secrets),
-    ...(error.details === undefined ? {} : { details: redactJson(error.details, secrets) }),
+    message: redactText(error.message, secrets, redactionEnabled),
+    ...(error.details === undefined ? {} : { details: redactJson(error.details, secrets, redactionEnabled) }),
   };
 }
 
 function sanitizeEvents(
   events: readonly NormalizedProviderEvent[],
   secrets: readonly string[],
+  redactionEnabled: boolean,
 ): NormalizedProviderEvent[] {
   return events.map((event) =>
-    redactJson(event as unknown as JsonValue, secrets) as unknown as NormalizedProviderEvent
+    redactJson(event as unknown as JsonValue, secrets, redactionEnabled) as unknown as NormalizedProviderEvent
   );
 }
 
-function traceFactory(now: () => Date, secrets: readonly string[]) {
+function traceFactory(now: () => Date, secrets: readonly string[], redactionEnabled: boolean) {
   let sequence = 0;
   return (kind: RawTraceKind, data: JsonValue): RawTraceEvent => ({
     sequence: sequence++,
     occurredAt: now().toISOString(),
     kind,
-    data: redactJson(data, secrets),
+    data: redactJson(data, secrets, redactionEnabled),
   });
 }
 
@@ -150,16 +147,17 @@ export async function* executeProviderRequest(
 ): AsyncGenerator<ProviderStreamItem> {
   const adapter = getProtocolAdapter(profile.protocol);
   const compiled = adapter.compile(profile, request);
-  const secrets = secretValues(profile);
-  const makeTrace = traceFactory(options.now ?? (() => new Date()), secrets);
+  const secrets = providerSecretValues(profile);
+  const redactionEnabled = options.redactionEnabled !== false;
+  const makeTrace = traceFactory(options.now ?? (() => new Date()), secrets, redactionEnabled);
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const abort = linkedAbortSignal(options.signal, options.timeoutMs);
 
   yield item(makeTrace("request", {
     method: compiled.method,
-    url: redactUrl(compiled.url, secrets),
-    headers: redactHeaders(compiled.headers, secrets),
-    body: redactJson(compiled.body, secrets),
+    url: redactUrl(compiled.url, secrets, redactionEnabled),
+    headers: redactHeaders(compiled.headers, secrets, redactionEnabled),
+    body: redactJson(compiled.body, secrets, redactionEnabled),
     warnings: compiled.warnings.map((warning) => ({ code: warning.code, message: warning.message })),
   }));
 
@@ -173,7 +171,7 @@ export async function* executeProviderRequest(
     yield item(makeTrace("response", {
       status: response.status,
       statusText: response.statusText,
-      headers: redactHeaders(response.headers, secrets),
+      headers: redactHeaders(response.headers, secrets, redactionEnabled),
     }));
 
     if (!response.ok) {
@@ -181,9 +179,10 @@ export async function* executeProviderRequest(
       const failure = sanitizeFailure(
         classifyProviderError({ status: response.status, payload: payload.value }),
         secrets,
+        redactionEnabled,
       );
       yield item(
-        makeTrace("error", { raw: redactText(payload.raw, secrets), error: failureData(failure) }),
+        makeTrace("error", { raw: redactText(payload.raw, secrets, redactionEnabled), error: failureData(failure) }),
         [errorEvent(failure)],
       );
       return;
@@ -203,11 +202,11 @@ export async function* executeProviderRequest(
         // Do not collapse completion-looking frames. Some gateways expose an
         // attempted model's policy stop and then continue on a fallback model
         // in the same HTTP 200 stream. Downstream code needs the full sequence.
-        const events = sanitizeEvents(adapter.normalizeSse(frame), secrets);
+        const events = sanitizeEvents(adapter.normalizeSse(frame), secrets, redactionEnabled);
         if (terminal(events)) sawTerminal = true;
         yield item(makeTrace("sse", {
-          raw: redactText(frame.raw, secrets),
-          data: redactText(frame.data, secrets),
+          raw: redactText(frame.raw, secrets, redactionEnabled),
+          data: redactText(frame.data, secrets, redactionEnabled),
           ...(frame.event === undefined ? {} : { event: frame.event }),
           ...(frame.id === undefined ? {} : { id: frame.id }),
           ...(frame.retry === undefined ? {} : { retry: frame.retry }),
@@ -232,13 +231,14 @@ export async function* executeProviderRequest(
           fallback: "parse-failure",
         }),
         secrets,
+        redactionEnabled,
       );
-      yield item(makeTrace("error", { raw: redactText(payload.raw, secrets), error: failureData(failure) }), [
+      yield item(makeTrace("error", { raw: redactText(payload.raw, secrets, redactionEnabled), error: failureData(failure) }), [
         errorEvent(failure),
       ]);
       return;
     }
-    const events = sanitizeEvents(adapter.normalizeJson(payload.value), secrets);
+    const events = sanitizeEvents(adapter.normalizeJson(payload.value), secrets, redactionEnabled);
     yield item(makeTrace("json", payload.value), events);
   } catch (cause) {
     const failure = sanitizeFailure(
@@ -249,6 +249,7 @@ export async function* executeProviderRequest(
         fallback: "transport",
       }),
       secrets,
+      redactionEnabled,
     );
     yield item(makeTrace("error", failureData(failure)), [errorEvent(failure)]);
   } finally {

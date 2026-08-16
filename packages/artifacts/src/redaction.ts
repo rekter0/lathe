@@ -1,4 +1,4 @@
-import type { JsonValue } from "@lathe/domain";
+import { replaceKnownSecrets, type JsonValue } from "@lathe/domain";
 
 export const REDACTED_CREDENTIAL = "[REDACTED CREDENTIAL]";
 
@@ -7,6 +7,7 @@ const RUNTIME_ACCOUNT_KEY = /^(?:auth(?:mode|state)?|account(?:id|identifier|typ
 const REFERENCE_SUFFIX = /(?:id|ref|reference|name)$/i;
 const HEADER_LINE = /^(\s*(?:authorization|proxy-authorization|x-api-key|api-key|cookie)\s*[:=]\s*).+$/gim;
 const ASSIGNMENT = /(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|client[_-]?secret)\b\s*[:=]\s*)["']?[^\s,"';}]+["']?/gi;
+const RUNTIME_ACCOUNT_ASSIGNMENT = /(\b(?:auth(?:mode|state)?|account(?:id|identifier|type|plan)?|planType)\b\s*[:=]\s*)["']?[^\s,"';}]+["']?/gi;
 
 export interface RedactionResult<T> {
   value: T;
@@ -14,21 +15,13 @@ export interface RedactionResult<T> {
 }
 
 function scrubSecrets(value: string, secrets: readonly string[]): RedactionResult<string> {
-  let output = value;
-  let count = 0;
-  for (const secret of new Set(secrets.filter((entry) => entry.length > 0))) {
-    const pieces = output.split(secret);
-    if (pieces.length > 1) {
-      count += pieces.length - 1;
-      output = pieces.join(REDACTED_CREDENTIAL);
-    }
-  }
-  return { value: output, count };
+  return replaceKnownSecrets(value, secrets, REDACTED_CREDENTIAL);
 }
 
 export function redactArtifactJson(
   value: JsonValue,
   secrets: readonly string[] = [],
+  redactionEnabled = true,
 ): RedactionResult<JsonValue> {
   if (typeof value === "string") return scrubSecrets(value, secrets);
   if (value === null || typeof value === "boolean" || typeof value === "number") {
@@ -38,7 +31,7 @@ export function redactArtifactJson(
     const output: JsonValue[] = [];
     let count = 0;
     for (const item of value) {
-      const redacted = redactArtifactJson(item, secrets);
+      const redacted = redactArtifactJson(item, secrets, redactionEnabled);
       output.push(redacted.value);
       count += redacted.count;
     }
@@ -48,12 +41,12 @@ export function redactArtifactJson(
   const output: Record<string, JsonValue> = {};
   let count = 0;
   for (const [key, item] of Object.entries(value)) {
-    if (RUNTIME_ACCOUNT_KEY.test(key) || (SENSITIVE_KEY.test(key) && !REFERENCE_SUFFIX.test(key))) {
+    if (redactionEnabled && (RUNTIME_ACCOUNT_KEY.test(key) || (SENSITIVE_KEY.test(key) && !REFERENCE_SUFFIX.test(key)))) {
       output[key] = REDACTED_CREDENTIAL;
       count += 1;
       continue;
     }
-    const redacted = redactArtifactJson(item, secrets);
+    const redacted = redactArtifactJson(item, secrets, redactionEnabled);
     output[key] = redacted.value;
     count += redacted.count;
   }
@@ -63,22 +56,30 @@ export function redactArtifactJson(
 export function redactArtifactText(
   text: string,
   secrets: readonly string[] = [],
+  redactionEnabled = true,
 ): RedactionResult<string> {
   const explicit = scrubSecrets(text, secrets);
   let count = explicit.count;
-  let output = explicit.value.replace(HEADER_LINE, (_match, prefix: string) => {
-    count += 1;
-    return `${prefix}${REDACTED_CREDENTIAL}`;
-  });
-  output = output.replace(ASSIGNMENT, (_match, prefix: string) => {
-    count += 1;
-    return `${prefix}${REDACTED_CREDENTIAL}`;
-  });
+  let output = explicit.value;
+  if (redactionEnabled) {
+    output = output.replace(RUNTIME_ACCOUNT_ASSIGNMENT, (_match, prefix: string) => {
+      count += 1;
+      return `${prefix}${REDACTED_CREDENTIAL}`;
+    });
+    output = output.replace(HEADER_LINE, (_match, prefix: string) => {
+      count += 1;
+      return `${prefix}${REDACTED_CREDENTIAL}`;
+    });
+    output = output.replace(ASSIGNMENT, (_match, prefix: string) => {
+      count += 1;
+      return `${prefix}${REDACTED_CREDENTIAL}`;
+    });
+  }
   return { value: output, count };
 }
 
 export function containsKnownSecret(bytes: Uint8Array, secrets: readonly string[]): boolean {
   if (secrets.length === 0) return false;
   const text = Buffer.from(bytes).toString("utf8");
-  return secrets.some((secret) => secret.length > 0 && text.includes(secret));
+  return replaceKnownSecrets(text, secrets, "").count > 0;
 }

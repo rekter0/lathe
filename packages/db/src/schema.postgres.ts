@@ -72,6 +72,11 @@ export const automationJobs = pgTable("automation_jobs", {
   id: text("id").primaryKey(), projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }), sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }), kind: text("kind").notNull(), status: text("status").notNull(), concurrency: integer("concurrency").notNull(), plan: jsonb("plan").$type<JsonObject>().notNull(), progress: jsonb("progress").$type<JsonObject>().notNull(), error: jsonb("error").$type<JsonObject>(), createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull()
 }, (table) => [index("automation_jobs_session_idx").on(table.sessionId)]);
 
+export const applicationSettings = pgTable("application_settings", {
+  id: text("id").primaryKey(), redactionEnabled: boolean("redaction_enabled").notNull().default(true),
+  createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull()
+});
+
 export const payloadWorkbenchSettings = pgTable("payload_workbench_settings", {
   id: text("id").primaryKey(),
   defaultGeneratorProfileRevisionId: text("default_generator_profile_revision_id"),
@@ -120,6 +125,6 @@ export const payloadRevisions = pgTable("payload_revisions", {
 
 export const postgresSchema = {
   projects, sessions, messageNodes, branches, configSnapshots, checkpoints, modelRuns, providerProfiles, secrets,
-  assetRevisions, attachments, findings, automationJobs, payloadWorkbenchSettings, sessionPayloadWorkbenchSettings, payloadGenerations,
+  assetRevisions, attachments, findings, automationJobs, applicationSettings, payloadWorkbenchSettings, sessionPayloadWorkbenchSettings, payloadGenerations,
   payloadGenerationAttempts, payloadRevisions
 };

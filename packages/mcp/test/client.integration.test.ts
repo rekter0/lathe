@@ -29,7 +29,7 @@ afterEach(async () => {
   await Promise.allSettled(openFixtures.splice(0).map((fixture) => fixture.close()));
 });
 
-async function connectFixture(kind: TransportKind): Promise<ConnectedFixture> {
+async function connectFixture(kind: TransportKind, redactionEnabled = true): Promise<ConnectedFixture> {
   const secret = `fixture-secret-${kind}`;
   const traces: McpTraceEvent[] = [];
   const approvals: McpApprovalRequest[] = [];
@@ -112,6 +112,7 @@ async function connectFixture(kind: TransportKind): Promise<ConnectedFixture> {
         traces.push(structuredClone(event));
       },
     },
+    redactionEnabled,
   });
 
   let closed = false;
@@ -144,6 +145,38 @@ async function connectFixture(kind: TransportKind): Promise<ConnectedFixture> {
 describe.each<TransportKind>(["stdio", "streamableHttp"])(
   "Lathe MCP client over %s",
   (kind) => {
+    it("preserves sensitive-looking approval data when heuristic redaction is disabled", async () => {
+      const fixture = await connectFixture(kind, false);
+      await fixture.client.callTool({
+        toolRevisionHash: "tool-rev-raw",
+        name: "inspect-secret",
+        arguments: {
+          value: fixture.secret,
+          password: "test-only-password",
+          note: "Bearer fake-red-team-token"
+        }
+      });
+
+      expect(fixture.approvals[0]?.payload).toMatchObject({
+        arguments: {
+          value: "[REDACTED]",
+          password: "test-only-password",
+          note: "Bearer fake-red-team-token"
+        }
+      });
+      expect(JSON.stringify(fixture.traces)).not.toContain(fixture.secret);
+
+      const capabilities = await fixture.client.captureCapabilities();
+      expect(capabilities.tools[0]?.inputSchema).toMatchObject({
+        properties: { password: { type: "string", description: "Synthetic red-team field" } }
+      });
+      expect(capabilities.prompts[0]?.arguments).toContainEqual({
+        name: "password",
+        description: "Synthetic red-team field"
+      });
+      expect(JSON.stringify(capabilities)).not.toContain(fixture.secret);
+    });
+
     it("negotiates capabilities and performs explicitly approved, redacted operations", async () => {
       const fixture = await connectFixture(kind);
 

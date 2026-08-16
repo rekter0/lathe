@@ -5,6 +5,7 @@ import type {
   PayloadGenerationStatus,
   PayloadRevisionOperation,
   PayloadWorkbenchSettings,
+  ApplicationSettings,
   SessionPayloadWorkbenchSettings,
   ResolvedConfig
 } from "./types.js";
@@ -172,6 +173,10 @@ export const appendMessageSchema = z.object({
 export const payloadContextModeSchema = z.enum(["none", "minimal", "full"]);
 export const payloadDiversitySchema = z.enum(["low", "balanced", "high"]);
 
+export const applicationSettingsInputSchema = z.object({
+  redactionEnabled: z.boolean()
+}).strict() satisfies z.ZodType<Omit<ApplicationSettings, "id" | "createdAt" | "updatedAt">>;
+
 export const payloadGenerationOptionsSchema: z.ZodType<PayloadGenerationOptions> = z.object({
   contextMode: payloadContextModeSchema,
   includeProjectBrief: z.boolean(),
@@ -315,6 +320,7 @@ export const createPayloadRevisionSchema = z.object({
 });
 
 export type PayloadWorkbenchSettingsInput = z.input<typeof payloadWorkbenchSettingsInputSchema>;
+export type ApplicationSettingsInput = z.input<typeof applicationSettingsInputSchema>;
 export type SessionPayloadWorkbenchSettingsInput = z.input<typeof sessionPayloadWorkbenchSettingsInputSchema>;
 export type CreatePayloadGenerationInput = z.input<typeof createPayloadGenerationSchema>;
 export type UpdatePayloadGenerationInput = z.input<typeof updatePayloadGenerationSchema>;

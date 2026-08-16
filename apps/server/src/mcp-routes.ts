@@ -86,11 +86,13 @@ async function mcpOperation<T>(
   const writer = await contentStore.createTraceWriter();
   let client: LatheMcpClient | undefined;
   try {
+    const { redactionEnabled } = await repository.getApplicationSettings();
     client = await LatheMcpClient.connect({
       profile,
       resolveSecret: (id) => repository.resolveSecret(id),
       approvals,
       policy: { ...DEFAULT_MCP_POLICY, roots },
+      redactionEnabled,
       trace: traceSink(writer),
       ...await stdioSpawner(repository, profile)
     });
@@ -98,7 +100,7 @@ async function mcpOperation<T>(
     const stored = await writer.finalize();
     return { value, traceHash: stored.sha256 };
   } catch (error) {
-    await writer.append({ direction: "internal", kind: "error", data: { message: "MCP operation failed; see preceding redacted transport events" } });
+    await writer.append({ direction: "internal", kind: "error", data: { message: "MCP operation failed; see preceding captured transport events" } });
     const stored = await writer.finalize();
     throw new HTTPException(502, { message: `MCP operation failed; inspect trace ${stored.sha256}` });
   } finally {

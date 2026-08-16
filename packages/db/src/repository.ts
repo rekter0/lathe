@@ -1,5 +1,6 @@
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import {
+  applicationSettingsInputSchema,
   assetKindSchema,
   createPayloadGenerationAttemptSchema,
   createPayloadGenerationSchema,
@@ -15,6 +16,8 @@ import {
   uuidv7,
   type AssetKind,
   type AssetRevision,
+  type ApplicationSettings,
+  type ApplicationSettingsInput,
   type Attachment,
   type AutomationJob,
   type BranchRef,
@@ -161,6 +164,8 @@ export interface LatheRepository {
   getAutomationJob(id: string): Promise<AutomationJob | null>;
   updateAutomationJob(id: string, patch: Partial<Pick<AutomationJob, "status" | "progress" | "error">>): Promise<AutomationJob | null>;
   listAutomationJobs(sessionId: string): Promise<AutomationJob[]>;
+  getApplicationSettings(): Promise<ApplicationSettings>;
+  upsertApplicationSettings(input: ApplicationSettingsInput): Promise<ApplicationSettings>;
   getPayloadWorkbenchSettings(): Promise<PayloadWorkbenchSettings | null>;
   upsertPayloadWorkbenchSettings(input: PayloadWorkbenchSettingsInput): Promise<PayloadWorkbenchSettings>;
   deletePayloadWorkbenchSettings(): Promise<boolean>;
@@ -926,6 +931,46 @@ export class DrizzleLatheRepository implements LatheRepository {
 
   async listAutomationJobs(sessionId: string): Promise<AutomationJob[]> {
     return this.all(this.db.select().from(this.schema.automationJobs).where(eq(this.schema.automationJobs.sessionId, sessionId)).orderBy(desc(this.schema.automationJobs.createdAt)));
+  }
+
+  async getApplicationSettings(): Promise<ApplicationSettings> {
+    const existing = await this.get<ApplicationSettings>(
+      this.db.select().from(this.schema.applicationSettings).where(eq(this.schema.applicationSettings.id, "global"))
+    );
+    if (existing) return existing;
+
+    const timestamp = nowIso();
+    const defaults: ApplicationSettings = {
+      id: "global",
+      redactionEnabled: true,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    await this.run(
+      this.db.insert(this.schema.applicationSettings).values(defaults).onConflictDoNothing()
+    );
+    const stored = await this.get<ApplicationSettings>(
+      this.db.select().from(this.schema.applicationSettings).where(eq(this.schema.applicationSettings.id, "global"))
+    );
+    if (!stored) throw new Error("Application settings could not be initialized");
+    return stored;
+  }
+
+  async upsertApplicationSettings(input: ApplicationSettingsInput): Promise<ApplicationSettings> {
+    const parsed = applicationSettingsInputSchema.parse(input);
+    const timestamp = nowIso();
+    const settings: ApplicationSettings = {
+      id: "global",
+      ...parsed,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    return this.returning(
+      this.db.insert(this.schema.applicationSettings).values(settings).onConflictDoUpdate({
+        target: this.schema.applicationSettings.id,
+        set: { ...parsed, updatedAt: timestamp }
+      }).returning()
+    );
   }
 
   private async requireAssetRevision(id: string, kind: AssetKind, label: string): Promise<AssetRevision> {

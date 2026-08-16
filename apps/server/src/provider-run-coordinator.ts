@@ -39,6 +39,8 @@ import {
 import {
   compileProviderRequest,
   executeProviderRequest,
+  providerSecretValues,
+  redactText,
   redactUrl,
   type CanonicalContentPart,
   type CanonicalGenerationRequest,
@@ -71,6 +73,7 @@ interface PendingToolRun {
   resolutions: Map<string, ToolResultPart>;
   prepared: Map<string, PreparedToolCall>;
   toolApprovalMode: ToolApprovalMode;
+  redactionEnabled: boolean;
 }
 
 interface PreparedToolCall {
@@ -338,7 +341,8 @@ export class ProviderRunCoordinator implements RunCoordinator {
     if (!session.providerProfileId || !session.modelId) throw new Error("Select a provider and model before starting a run");
     const profile = await this.repository.getProviderProfile(session.providerProfileId);
     if (!profile) throw new Error("Provider profile not found");
-    const config = resolvedProviderConfig(profile, session.modelId, input.configOverride ?? session.draftConfig);
+    const { redactionEnabled } = await this.repository.getApplicationSettings();
+    const config = resolvedProviderConfig(profile, session.modelId, input.configOverride ?? session.draftConfig, redactionEnabled);
     const snapshot = await this.repository.createConfigSnapshot(session.id, config);
     const run = await this.repository.createRun({
       sessionId: session.id,
@@ -347,7 +351,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
       configSnapshotId: snapshot.id
     });
     this.events.publish(`run:${run.id}`, "run.queued", run as unknown as JsonValue);
-    void this.perform(run.id, profile, config, contextNodeId);
+    void this.perform(run.id, profile, config, contextNodeId, redactionEnabled);
     return { id: run.id, status: run.status };
   }
 
@@ -537,7 +541,8 @@ export class ProviderRunCoordinator implements RunCoordinator {
       calls,
       resolutions,
       prepared,
-      toolApprovalMode: snapshot.config.toolApprovalMode ?? "manual"
+      toolApprovalMode: snapshot.config.toolApprovalMode ?? "manual",
+      redactionEnabled: output.redactionEnabled !== false
     };
     this.pendingTools.set(runId, pending);
     this.events.publish(`run:${runId}`, "run.awaiting-tool.restored", {
@@ -614,7 +619,9 @@ export class ProviderRunCoordinator implements RunCoordinator {
         order: 0
       }];
     }
-    const config = resolvedProviderConfig(profile, session.modelId, draft);
+    const parentOutput = asJsonObject(parent.normalizedOutput);
+    const redactionEnabled = parentOutput.redactionEnabled !== false;
+    const config = resolvedProviderConfig(profile, session.modelId, draft, redactionEnabled);
     const snapshot = await this.repository.createConfigSnapshot(session.id, config);
     const nested = await this.repository.createRun({
       sessionId: parent.sessionId,
@@ -661,7 +668,11 @@ export class ProviderRunCoordinator implements RunCoordinator {
       const compiled = compileProviderRequest(transportProviderProfile(profile), generation);
       compileWarnings.push(...compiled.warnings.map((warning) => ({ code: warning.code, message: warning.message })));
       if (compileWarnings.length > 0) this.events.publish(`run:${nested.id}`, "provider.compile-warnings", compileWarnings);
-      for await (const item of executeProviderRequest(transportProviderProfile(profile), generation, { signal: controller.signal, fetch: this.fetchImpl })) {
+      for await (const item of executeProviderRequest(transportProviderProfile(profile), generation, {
+        signal: controller.signal,
+        fetch: this.fetchImpl,
+        redactionEnabled
+      })) {
         await trace.append({
           direction: item.trace.kind === "request" ? "request" : item.trace.kind === "error" ? "internal" : "response",
           kind: item.trace.kind === "sse" ? "sse" : item.trace.kind === "error" ? "error" : "body",
@@ -696,6 +707,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
         text,
         reasoning,
         providerOutcome: providerOutcome.toJson(),
+        redactionEnabled,
         compileWarnings,
         timings
       };
@@ -718,7 +730,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
         recordedFailure = true;
         this.events.publish(`run:${nested.id}`, "run.failed", { parentRunId, classification, traceHash: stored.sha256 });
         this.events.publish(`run:${parentRunId}`, "mcp.sampling.failed", { nestedRunId: nested.id, approvalId: request.id, classification });
-        throw new Error(`MCP sampling provider run ${nested.id} failed; inspect its redacted trace`);
+        throw new Error(`MCP sampling provider run ${nested.id} failed; inspect its captured trace`);
       }
       const response: JsonObject = {
         model: responseModel,
@@ -758,6 +770,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
             reasoning,
             providerOutcome: providerOutcome.toJson(),
             compileWarnings,
+            redactionEnabled,
             timings: { durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()) },
             error: { classification, message: "MCP sampling provider execution failed" }
           },
@@ -769,7 +782,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
         this.events.publish(`run:${parentRunId}`, "mcp.sampling.failed", { nestedRunId: nested.id, approvalId: request.id, classification });
       }
       if (recordedFailure) throw error;
-      throw new Error(`MCP sampling provider run ${nested.id} failed; inspect its redacted trace`);
+      throw new Error(`MCP sampling provider run ${nested.id} failed; inspect its captured trace`);
     } finally {
       this.controllers.delete(nested.id);
       parentSignal?.removeEventListener("abort", abortFromParent);
@@ -805,7 +818,13 @@ export class ProviderRunCoordinator implements RunCoordinator {
     }
   }
 
-  private async perform(runId: string, profile: ProviderProfile, config: ResolvedConfig, contextNodeId: string | null): Promise<void> {
+  private async perform(
+    runId: string,
+    profile: ProviderProfile,
+    config: ResolvedConfig,
+    contextNodeId: string | null,
+    redactionEnabled: boolean,
+  ): Promise<void> {
     const controller = new AbortController();
     this.controllers.set(runId, controller);
     const trace = await this.contentStore.createTraceWriter();
@@ -836,7 +855,11 @@ export class ProviderRunCoordinator implements RunCoordinator {
       }));
       if (compileWarnings.length > 0) this.events.publish(`run:${runId}`, "provider.compile-warnings", compileWarnings);
 
-      for await (const item of executeProviderRequest(transportProviderProfile(profile), request, { signal: controller.signal, fetch: this.fetchImpl })) {
+      for await (const item of executeProviderRequest(transportProviderProfile(profile), request, {
+        signal: controller.signal,
+        fetch: this.fetchImpl,
+        redactionEnabled
+      })) {
         await trace.append({
           direction: item.trace.kind === "request" ? "request" : item.trace.kind === "error" ? "internal" : "response",
           kind: item.trace.kind === "sse" ? "sse" : item.trace.kind === "error" ? "error" : "body",
@@ -899,6 +922,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
             toolCalls: inertToolCallEvidence,
             providerOutcome: providerOutcomeJson,
             compileWarnings,
+            redactionEnabled,
             error: providerFailure as unknown as JsonValue,
           },
           usage: usageValue,
@@ -939,6 +963,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
         reasoning,
         toolCalls: toolCallEvidence,
         providerOutcome: providerOutcomeJson,
+        redactionEnabled,
         compileWarnings,
         ...(providerFailure === undefined ? {} : { error: providerFailure as unknown as JsonValue }),
       };
@@ -963,7 +988,8 @@ export class ProviderRunCoordinator implements RunCoordinator {
           calls: toolParts,
           resolutions: new Map(),
           prepared,
-          toolApprovalMode: config.toolApprovalMode ?? "manual"
+          toolApprovalMode: config.toolApprovalMode ?? "manual",
+          redactionEnabled
         };
         this.pendingTools.set(runId, pending);
         this.events.publish(`run:${runId}`, "run.awaiting-tool", { calls: toolParts } as unknown as JsonValue);
@@ -983,8 +1009,13 @@ export class ProviderRunCoordinator implements RunCoordinator {
         });
       }
     } catch (error) {
+      const message = redactText(
+        error instanceof Error ? error.message : String(error),
+        providerSecretValues(profile),
+        redactionEnabled
+      );
       if (!finalized) {
-        await trace.append({ direction: "internal", kind: "error", data: { message: error instanceof Error ? error.message : String(error) } });
+        await trace.append({ direction: "internal", kind: "error", data: { message } });
         const stored = await trace.finalize();
         finalized = true;
         await this.repository.updateRun(runId, { traceHash: stored.sha256 });
@@ -992,10 +1023,17 @@ export class ProviderRunCoordinator implements RunCoordinator {
       await this.repository.updateRun(runId, {
         status: controller.signal.aborted ? "cancelled" : "failed",
         classification: controller.signal.aborted ? "cancelled" : providerOutcome.classification() ?? "unknown",
-        normalizedOutput: { text, reasoning, providerOutcome: providerOutcome.toJson(), compileWarnings, error: error instanceof Error ? error.message : String(error) },
+        normalizedOutput: {
+          text,
+          reasoning,
+          providerOutcome: providerOutcome.toJson(),
+          compileWarnings,
+          redactionEnabled,
+          error: message
+        },
         finishedAt: new Date().toISOString()
       });
-      this.events.publish(`run:${runId}`, "run.failed", { message: error instanceof Error ? error.message : String(error) });
+      this.events.publish(`run:${runId}`, "run.failed", { message });
     } finally {
       this.controllers.delete(runId);
       if (!finalized) await trace.abort();
@@ -1338,6 +1376,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
         resolveSecret: (id) => this.repository.resolveSecret(id),
         approvals,
         policy: { ...DEFAULT_MCP_POLICY, roots: explicitMcpRoots(resolution.roots, prepared.mcpProfile.roots ?? []) },
+        redactionEnabled: pending.redactionEnabled,
         handlers: {
           sampling: async () => {
             const approved = approvedSampling.shift();
@@ -1382,7 +1421,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
       this.events.publish(`run:${pending.runId}`, "mcp.tool.completed", { callId: prepared.call.callId, traceHash: stored.sha256 });
       return result;
     } catch (error) {
-      const message = "MCP tool operation failed; inspect the redacted trace";
+      const message = "MCP tool operation failed; inspect the captured trace";
       await writer.append({ direction: "internal", kind: "error", data: { message } });
       const stored = await writer.finalize();
       prepared.traceHash = stored.sha256;

@@ -84,7 +84,7 @@ export async function resolveMcpTransport(
       }
       const resolved = await resolveStaticValue(staticValue, resolveSecret);
       resolvedEnv[name] = resolved.value;
-      if (resolved.secret) secretValues.push(resolved.secret);
+      if (resolved.secret) secretValues.push(resolved.secret, resolved.value);
     }
 
     return {
@@ -141,7 +141,7 @@ export async function resolveMcpTransport(
       throw new McpProfileError("invalid_static_value", "HTTP header values cannot contain newlines");
     }
     headers[name] = resolved.value;
-    if (resolved.secret) secretValues.push(resolved.secret);
+    if (resolved.secret) secretValues.push(resolved.secret, resolved.value);
   }
 
   return {

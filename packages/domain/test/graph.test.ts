@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { commonAncestor, compareBranches, pathToRoot, redactJson, sha256, uuidv7 } from "../src/index.js";
+import { commonAncestor, compareBranches, pathToRoot, redactJson, replaceKnownSecrets, sha256, uuidv7 } from "../src/index.js";
 import type { MessageNode } from "../src/index.js";
 
 const node = (id: string, parentId: string | null): MessageNode => ({
@@ -39,6 +39,17 @@ describe("domain utilities", () => {
     expect(redactJson({ authorization: "Bearer x", nested: { apiKey: "x", ok: true } })).toEqual({
       authorization: "<redacted>",
       nested: { apiKey: "<redacted>", ok: true }
+    });
+  });
+
+  it("redacts short exact secrets only as complete credential-like tokens", () => {
+    expect(replaceKnownSecrets(
+      "example text; Bearer x; auth=x; x-ray; exact long-secret-value",
+      ["x", "long-secret-value"],
+      "[REDACTED]",
+    )).toEqual({
+      value: "example text; Bearer [REDACTED]; auth=[REDACTED]; x-ray; exact [REDACTED]",
+      count: 3,
     });
   });
 

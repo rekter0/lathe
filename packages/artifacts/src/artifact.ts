@@ -75,6 +75,7 @@ function isTextFile(file: ArtifactFileInput, mediaType: string): boolean {
 function sanitizeFile(
   file: ArtifactFileInput,
   secretValues: readonly string[],
+  redactionEnabled: boolean,
 ): { bytes: Uint8Array; redactions: number } {
   const mediaType = file.mediaType ?? inferMediaType(file.path);
   const original = typeof file.data === "string" ? utf8(file.data) : new Uint8Array(file.data);
@@ -95,7 +96,7 @@ function sanitizeFile(
       let count = 0;
       const lines = text.split(/\r?\n/u).map((line) => {
         if (line.trim() === "") return "";
-        const redacted = redactArtifactJson(JSON.parse(line) as JsonValue, secretValues);
+        const redacted = redactArtifactJson(JSON.parse(line) as JsonValue, secretValues, redactionEnabled);
         count += redacted.count;
         return JSON.stringify(redacted.value);
       });
@@ -109,14 +110,14 @@ function sanitizeFile(
   if (mediaType === "application/json" || mediaType.endsWith("+json") || file.path.endsWith(".json")) {
     try {
       const parsed = JSON.parse(text) as JsonValue;
-      const redacted = redactArtifactJson(parsed, secretValues);
+      const redacted = redactArtifactJson(parsed, secretValues, redactionEnabled);
       return { bytes: utf8(`${JSON.stringify(redacted.value, null, 2)}\n`), redactions: redacted.count };
     } catch (error) {
       if (!(error instanceof SyntaxError)) throw error;
       // Provider traces may be JSON fragments; text redaction still applies.
     }
   }
-  const redacted = redactArtifactText(text, secretValues);
+  const redacted = redactArtifactText(text, secretValues, redactionEnabled);
   return { bytes: utf8(redacted.value), redactions: redacted.count };
 }
 
@@ -157,9 +158,10 @@ export function exportArtifact(options: ExportArtifactOptions): Uint8Array {
 
   const archiveFiles = new Map<string, Uint8Array>();
   const entries: ArtifactEntryManifest[] = [];
+  const redactionEnabled = options.redactionEnabled ?? true;
   let redactionCount = 0;
   for (const file of files.sort((left, right) => left.path.localeCompare(right.path))) {
-    const sanitized = sanitizeFile(file, options.secretValues ?? []);
+    const sanitized = sanitizeFile(file, options.secretValues ?? [], redactionEnabled);
     if (containsKnownSecret(sanitized.bytes, options.secretValues ?? [])) {
       throw new ArtifactError(
         "credential_leak",
@@ -172,7 +174,7 @@ export function exportArtifact(options: ExportArtifactOptions): Uint8Array {
     redactionCount += sanitized.redactions;
   }
 
-  const metadata = redactArtifactJson(options.metadata, options.secretValues ?? []);
+  const metadata = redactArtifactJson(options.metadata, options.secretValues ?? [], redactionEnabled);
   redactionCount += metadata.count;
   const manifest: ArtifactManifestV1 = {
     schema: ARTIFACT_SCHEMA,

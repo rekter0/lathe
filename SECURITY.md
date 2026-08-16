@@ -25,13 +25,15 @@ The data directory is created as `0700` and the SQLite database as `0600` where 
 
 Backups, filesystem snapshots, shell history, process inspection, database administration tools, and crash dumps may expose plaintext data. Treat the full data directory and database as sensitive.
 
-Lathe omits credentials from ordinary provider APIs and redacts configured secret fields/values in traces and artifacts. Redaction is best-effort and context-aware, not a general data-loss-prevention system. A prompt, response, attachment, tool output, or operator note may contain a secret that Lathe was never told about. Review every export before sharing it.
+Lathe always omits managed credentials from ordinary provider and asset APIs. Exact configured provider/MCP credentials, custom-header values, sensitive provider-body values, and known secret references remain scrubbed from captured evidence and artifacts.
+
+Heuristic evidence redaction is enabled by default and can be disabled from the global **Interface settings** cog when it would alter a safety test. The setting is installation-wide and applies only to new operations; existing immutable evidence is not rewritten. When disabled, Lathe preserves credential-shaped keys and strings such as synthetic bearer tokens in provider output, MCP content, helper-model output, traces, and exports. This is a `credentials-only` evidence mode, not a credential-reveal mode: control-plane secrets managed by Lathe remain protected. The relaxed mode can nevertheless retain real secrets that Lathe was never configured to recognize. Redaction is not a general data-loss-prevention system, so review every export before sharing it.
 
 ## Provider requests
 
 Provider profiles may point at arbitrary HTTP(S) endpoints. The selected endpoint receives the compiled system prompt, branch transcript, enabled tool schemas, supported attachments, and configured request metadata. A gateway compatible with an OpenAI or Anthropic wire format is still a separate trust domain; inspect its URL and policy before use.
 
-Extra profile/request body fields cannot overwrite Lathe-owned fields such as `model`, `input`/`messages`, `tools`, or `stream`. There are no automatic retries, preventing Lathe from silently repeating a sensitive or costly request. Raw response frames are retained in redacted traces because failures may arrive after an HTTP 200 streaming response.
+Extra profile/request body fields cannot overwrite Lathe-owned fields such as `model`, `input`/`messages`, `tools`, or `stream`. There are no automatic retries, preventing Lathe from silently repeating a sensitive or costly request. Raw response frames are retained in policy-filtered traces because failures may arrive after an HTTP 200 streaming response. Each operation snapshots the active evidence-redaction setting, so changing it cannot alter a stream already in flight.
 
 ## Tool execution
 
@@ -65,7 +67,7 @@ Private SSH keys are referenced by path and are not copied into Lathe. Strict ho
 
 MCP servers are code and content from another trust domain. A stdio server executes as a local/target process; a Streamable HTTP server receives requests over the configured URL. Lathe does not support MCP OAuth in v1, so static bearer/custom headers and stdio environment values are sensitive plaintext configuration.
 
-Roots default to none and must be explicitly selected. Sampling and elicitation always require separate operator approval and never inherit normal tool trust. Prompts/resources are treated as untrusted content until the operator explicitly imports or attaches them. Negotiated schemas and JSON-RPC/progress/logging evidence are snapshotted and redacted, but may still contain sensitive task data.
+Roots default to none and must be explicitly selected. Sampling and elicitation always require separate operator approval and never inherit normal tool trust. Prompts/resources are treated as untrusted content until the operator explicitly imports or attaches them. Negotiated schemas and JSON-RPC/progress/logging evidence are snapshotted under the selected evidence policy and may contain sensitive task data. Exact resolved MCP credentials remain scrubbed in both modes.
 
 ## Attachments and artifacts
 

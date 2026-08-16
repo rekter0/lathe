@@ -8,7 +8,7 @@ export {
   executeProviderRequest,
   getProtocolAdapter,
 } from "./client.js";
-export { REDACTED, redactHeaders, redactJson, redactText, redactUrl } from "./redaction.js";
+export { providerSecretValues, REDACTED, redactHeaders, redactJson, redactText, redactUrl } from "./redaction.js";
 export { classifyProviderError, isPolicyStopReason, stopDetailsFrom } from "./shared.js";
 export { parseSseChunks, parseSseStream } from "./sse.js";
 export * from "./types.js";

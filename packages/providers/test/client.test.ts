@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   discoverProviderModels,
   executeProviderRequest,
+  providerSecretValues,
   redactJson,
   redactUrl,
 } from "../src/index.js";
@@ -82,6 +83,44 @@ describe("provider HTTP client", () => {
     expect(serialized).not.toContain("super-secret-key");
     expect(serialized).not.toContain("another-secret");
     expect(serialized).toContain("[REDACTED]");
+  });
+
+  it("preserves sensitive-looking test evidence when heuristic redaction is disabled", async () => {
+    const redTeamText = "Bearer fake-red-team-token";
+    const configuredBodySecret = "x";
+    const configuredProfile = {
+      ...profile,
+      extraBody: { api_key: configuredBodySecret },
+    };
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toMatchObject({ api_key: configuredBodySecret });
+      return sseResponse([
+        `data: ${JSON.stringify({ id: "r1", choices: [{ index: 0, delta: { content: `example text; ${redTeamText}; exact=${configuredBodySecret}` } }] })}\n\n`,
+        "data: [DONE]\n\n",
+      ]);
+    });
+    const values = await collect(executeProviderRequest(configuredProfile, {
+      ...request,
+      messages: [{ role: "user", content: redTeamText }],
+    }, {
+      fetch: fetchMock as unknown as typeof fetch,
+      redactionEnabled: false,
+    }));
+
+    expect(values.flatMap((value) => value.events)).toContainEqual({
+      type: "content.delta",
+      text: `example text; ${redTeamText}; exact=[REDACTED]`,
+      index: 0,
+    });
+    const serialized = JSON.stringify(values);
+    expect(serialized).toContain("example text");
+    expect(serialized).toContain(redTeamText);
+    expect(serialized).not.toContain("super-secret-key");
+    expect(serialized).not.toContain("another-secret");
+    expect(serialized).not.toContain("exact=x");
+    expect(values.find((value) => value.trace.kind === "request")?.trace.data).toMatchObject({
+      body: { api_key: "[REDACTED]" },
+    });
   });
 
   it("recognizes an OpenRouter-style midstream error after HTTP 200", async () => {
@@ -197,5 +236,33 @@ describe("model discovery and redaction", () => {
     expect(url).not.toContain("operator");
     expect(url).not.toContain("password");
     expect(url).not.toContain("query-secret");
+  });
+
+  it("recognizes common provider credential option names as exact secrets", () => {
+    const configured = {
+      ...profile,
+      baseUrl: "https://gateway.example/v1?auth=url-secret",
+      extraBody: {
+        accessToken: "access-secret",
+        nested: {
+          refreshToken: "refresh-secret",
+          clientSecret: "client-secret",
+          credentials: ["first-secret", "second-secret"],
+        },
+      },
+    };
+
+    expect(new Set(providerSecretValues(configured))).toEqual(new Set([
+      "super-secret-key",
+      "another-secret",
+      "url-secret",
+      "access-secret",
+      "refresh-secret",
+      "client-secret",
+      "first-secret",
+      "second-secret",
+    ]));
+    const serialized = JSON.stringify(redactJson(configured.extraBody, providerSecretValues(configured), false));
+    for (const secret of providerSecretValues(configured)) expect(serialized).not.toContain(secret);
   });
 });

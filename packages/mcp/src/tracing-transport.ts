@@ -5,6 +5,7 @@ import { redactJson } from "./redaction.js";
 interface TracingTransportOptions {
   profile: McpServerProfile;
   secrets: readonly string[];
+  redactionEnabled: boolean;
   sink?: McpTraceSink;
 }
 
@@ -91,7 +92,7 @@ export class TracingTransport implements Transport {
       level,
       event,
       ...(method === undefined ? {} : { method }),
-      ...(payload === undefined ? {} : { payload: redactJson(payload, this.#options.secrets) }),
+      ...(payload === undefined ? {} : { payload: redactJson(payload, this.#options.secrets, this.#options.redactionEnabled) }),
     });
   }
 }

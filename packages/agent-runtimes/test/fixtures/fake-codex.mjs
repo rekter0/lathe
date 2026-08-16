@@ -60,7 +60,7 @@ const account = {
     email: "operator@example.test",
     accountId: "account-private-123",
   },
-  accessToken: "sk-fixture-super-secret",
+  accessToken: scenario === "evidence-redaction" ? "x" : "sk-fixture-super-secret",
   requiresOpenaiAuth: true,
 };
 
@@ -110,7 +110,7 @@ async function rejectUnnegotiatedExperimentalField(id, method, params) {
   return true;
 }
 
-async function finishTurn(text = "hello") {
+async function finishTurn(text = "hello", reasoning = "analysis", reasoningSummary = "summary") {
   await send({ method: "turn/started", params: { threadId: activeThreadId, turn: { id: "turn-fixture" } } });
   await send({
     method: "item/agentMessage/delta",
@@ -122,11 +122,11 @@ async function finishTurn(text = "hello") {
   });
   await send({
     method: "item/reasoning/textDelta",
-    params: { threadId: activeThreadId, turnId: "turn-fixture", itemId: "reason-1", contentIndex: 0, delta: "analysis" },
+    params: { threadId: activeThreadId, turnId: "turn-fixture", itemId: "reason-1", contentIndex: 0, delta: reasoning },
   });
   await send({
     method: "item/reasoning/summaryTextDelta",
-    params: { threadId: activeThreadId, turnId: "turn-fixture", itemId: "reason-1", summaryIndex: 0, delta: "summary" },
+    params: { threadId: activeThreadId, turnId: "turn-fixture", itemId: "reason-1", summaryIndex: 0, delta: reasoningSummary },
   });
   await send({
     method: "item/completed",
@@ -145,8 +145,27 @@ async function finishTurn(text = "hello") {
         status: "completed",
         items: [
           { id: "message-1", type: "agentMessage", text },
-          { id: "reason-1", type: "reasoning", content: ["analysis"], summary: ["summary"] },
+          { id: "reason-1", type: "reasoning", content: [reasoning], summary: [reasoningSummary] },
         ],
+      },
+    },
+  });
+}
+
+async function failTurn() {
+  await send({ method: "turn/started", params: { threadId: activeThreadId, turn: { id: "turn-fixture" } } });
+  await send({
+    method: "turn/completed",
+    params: {
+      threadId: activeThreadId,
+      turn: {
+        id: "turn-fixture",
+        status: "failed",
+        items: [],
+        error: {
+          code: "fixture_failure",
+          message: "Authorization: Bearer fake-failure-token password=fake-failure-password accountId=synthetic-account actual=account-private-123",
+        },
       },
     },
   });
@@ -282,6 +301,16 @@ async function handle(message) {
       process.exit(17);
       return;
     }
+    if (scenario === "evidence-request-error") {
+      await send({
+        id,
+        error: {
+          code: -32092,
+          message: "Authorization: Bearer fake-request-token password=fake-request-password actual=account-private-123",
+        },
+      });
+      return;
+    }
     await send({ id, result: { turn: { id: "turn-fixture", status: "inProgress", items: [] } } });
     if (scenario === "cancellation") {
       childProcess = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
@@ -293,6 +322,18 @@ async function handle(message) {
       await send({ id: "server-tool", method: "item/tool/call", params: { name: "unsafe" } });
       await send({ id: "server-mcp", method: "mcpServer/elicitation/request", params: { secret: "do not return" } });
       await send({ id: "server-app", method: "app/request", params: { accountId: "account-private-123" } });
+      return;
+    }
+    if (scenario === "evidence-redaction") {
+      await finishTurn(
+        'example text; account-plan=x; tool_call={name:bash,arguments:{command:"Authorization: Bearer safety-token password=candidate-password token=sk-candidate-token"}}',
+        "reasoning password=reasoning-password token=reasoning-token",
+        "summary api_key=summary-key",
+      );
+      return;
+    }
+    if (scenario === "evidence-failure") {
+      await failTurn();
       return;
     }
     await finishTurn();

@@ -14,6 +14,51 @@ afterEach(async () => {
 });
 
 describe("Lathe API", () => {
+  it("persists application redaction settings with a secure default", async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), "lathe-api-application-settings-"));
+    directories.push(dataDirectory);
+    const persistence = await createPersistence({ dataDirectory });
+    const token = "test-token";
+    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+    const app = createApp({
+      repository: persistence.repository,
+      contentStore: persistence.contentStore,
+      events: new EventHub(),
+      runCoordinator: new UnavailableRunCoordinator(),
+      apiToken: token,
+      dataDirectory
+    });
+    try {
+      const initial = await app.request("/api/application-settings", { headers });
+      expect(initial.status).toBe(200);
+      expect(initial.headers.get("cache-control")).toBe("no-store");
+      expect(await initial.json()).toMatchObject({ settings: { id: "global", redactionEnabled: true } });
+
+      const updated = await app.request("/api/application-settings", {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ redactionEnabled: false })
+      });
+      expect(updated.status).toBe(200);
+      expect(updated.headers.get("cache-control")).toBe("no-store");
+      expect(await updated.json()).toMatchObject({ settings: { id: "global", redactionEnabled: false } });
+      expect(await persistence.repository.getApplicationSettings()).toMatchObject({ redactionEnabled: false });
+
+      const reread = await app.request("/api/application-settings", { headers });
+      expect(await reread.json()).toMatchObject({ settings: { redactionEnabled: false } });
+
+      const invalid = await app.request("/api/application-settings", {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ redactionEnabled: true, unexpected: true })
+      });
+      expect(invalid.status).toBe(400);
+      expect(await persistence.repository.getApplicationSettings()).toMatchObject({ redactionEnabled: false });
+    } finally {
+      await persistence.repository.close();
+    }
+  });
+
   it("redacts credential-bearing asset fields and rejects new inline MCP URL credentials", async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), "lathe-api-asset-secrets-"));
     directories.push(dataDirectory);
@@ -267,9 +312,15 @@ describe("Lathe API", () => {
     const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
     try {
       const provider = await persistence.repository.createProviderProfile({
-        label: "Fixture", protocol: "openai-chat", baseUrl: "https://fixture.invalid/v1?token=url-secret", endpointOverride: "https://fixture.invalid/chat?api_key=endpoint-secret", credential: "provider-secret",
+        label: "Fixture", protocol: "openai-chat", baseUrl: "https://fixture.invalid/v1?token=url-secret&auth=url-auth-z9", endpointOverride: "https://fixture.invalid/chat?api_key=endpoint-secret&passwd=url-pass-z9", credential: "provider-secret",
         headers: { "x-private-header": "header-secret" },
-        extraBody: { api_key: "body-secret", neutral: "prefix-header-secret-suffix" }
+        extraBody: {
+          api_key: "body-secret",
+          auth: "body-auth-z9",
+          passwd: "body-pass-z9",
+          privateKey: "body-private-z9",
+          neutral: "prefix-header-secret-suffix"
+        }
       });
       const providerList = await app.request("/api/providers", { headers });
       const providerListText = await providerList.text();
@@ -277,8 +328,10 @@ describe("Lathe API", () => {
       expect(providerListText).not.toContain("provider-secret");
       expect(providerListText).not.toContain("header-secret");
       expect(providerListText).not.toContain("body-secret");
-      expect(providerListText).not.toContain("url-secret");
-      expect(providerListText).not.toContain("endpoint-secret");
+      for (const secret of [
+        "url-secret", "url-auth-z9", "endpoint-secret", "url-pass-z9",
+        "body-auth-z9", "body-pass-z9", "body-private-z9"
+      ]) expect(providerListText).not.toContain(secret);
       const discovery = await app.request(`/api/providers/${provider.id}/discover`, { method: "POST", headers });
       expect(discovery.status).toBe(200);
       const discoveryBody = await discovery.json();
@@ -304,16 +357,27 @@ describe("Lathe API", () => {
       expect(storedRevision).toMatchObject({
         credential: "provider-secret",
         headers: { "x-private-header": "header-secret" },
-        extraBody: { api_key: "body-secret", neutral: "updated-neutral" }
+        extraBody: {
+          api_key: "body-secret",
+          auth: "body-auth-z9",
+          passwd: "body-pass-z9",
+          privateKey: "body-private-z9",
+          neutral: "updated-neutral"
+        }
       });
       expect(storedRevision?.baseUrl).toContain("url-secret");
+      expect(storedRevision?.baseUrl).toContain("url-auth-z9");
       expect(storedRevision?.endpointOverride).toContain("endpoint-secret");
+      expect(storedRevision?.endpointOverride).toContain("url-pass-z9");
       expect((await persistence.repository.listProviderProfiles()).map((item) => item.id)).toEqual([revisionBody.provider.id]);
       const allRevisions = await app.request("/api/providers?includeArchived=true", { headers });
       const allRevisionsText = await allRevisions.text();
       expect((JSON.parse(allRevisionsText) as { providers: unknown[] }).providers).toHaveLength(2);
       expect(allRevisionsText).not.toContain("provider-secret");
       expect(allRevisionsText).not.toContain("header-secret");
+      for (const secret of ["body-auth-z9", "body-pass-z9", "body-private-z9", "url-auth-z9", "url-pass-z9"]) {
+        expect(allRevisionsText).not.toContain(secret);
+      }
       expect((await persistence.repository.getProviderProfile(provider.id))?.archivedAt).not.toBeNull();
       expect((await app.request(`/api/providers/${provider.id}/revisions`, {
         method: "POST", headers, body: JSON.stringify({ label: "Invalid fork" })

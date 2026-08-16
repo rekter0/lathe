@@ -201,7 +201,7 @@ export interface RawTraceEvent {
   readonly sequence: number;
   readonly occurredAt: string;
   readonly kind: RawTraceKind;
-  /** Redacted before it crosses the provider package boundary. */
+  /** Subject to the invocation's evidence-redaction policy. */
   readonly data: JsonValue;
 }
 
@@ -215,6 +215,8 @@ export interface ExecuteOptions {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly now?: () => Date;
+  /** Heuristic evidence redaction. Exact configured credentials remain protected. */
+  readonly redactionEnabled?: boolean;
 }
 
 export interface ModelDiscoveryOptions {

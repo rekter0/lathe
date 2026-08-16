@@ -111,6 +111,51 @@ export function redactJson(value: JsonValue, secretKeys = DEFAULT_SECRET_KEYS): 
   return value;
 }
 
+export interface KnownSecretReplacement {
+  value: string;
+  count: number;
+}
+
+const SHORT_SECRET_NEIGHBOR = "[\\p{L}\\p{N}_.~+-]";
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Replace configured secret values without letting very short values corrupt
+ * every matching character inside unrelated evidence. Values shorter than four
+ * characters are matched only as credential-like tokens.
+ */
+export function replaceKnownSecrets(
+  value: string,
+  secrets: readonly string[],
+  replacement = "<redacted>",
+): KnownSecretReplacement {
+  let output = value;
+  let count = 0;
+  const candidates = [...new Set(secrets.filter(Boolean))].toSorted((left, right) => right.length - left.length);
+  for (const secret of candidates) {
+    if (secret.length >= 4) {
+      const pieces = output.split(secret);
+      if (pieces.length > 1) {
+        count += pieces.length - 1;
+        output = pieces.join(replacement);
+      }
+      continue;
+    }
+    const expression = new RegExp(
+      `(?<!${SHORT_SECRET_NEIGHBOR})${escapeRegExp(secret)}(?!${SHORT_SECRET_NEIGHBOR})`,
+      "gu",
+    );
+    output = output.replace(expression, () => {
+      count += 1;
+      return replacement;
+    });
+  }
+  return { value: output, count };
+}
+
 export function compileSystemPrompt(blocks: PromptBlockSnapshot[]): string {
   return blocks
     .filter((block) => block.enabled)

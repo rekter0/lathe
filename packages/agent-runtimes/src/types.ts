@@ -70,6 +70,12 @@ export interface CodexGenerationRequest {
 
 export interface CodexRunOptions {
   readonly signal?: AbortSignal;
+  /**
+   * Applies heuristic redaction to generation evidence. Defaults to true.
+   * Codex authentication, account identity, stderr, and runtime environment
+   * evidence remain protected even when disabled.
+   */
+  readonly redactionEnabled?: boolean;
 }
 
 export interface CodexRuntimeIdentity {
@@ -111,7 +117,7 @@ export interface CodexTraceEvent {
   readonly occurredAt: string;
   readonly direction: CodexTraceDirection;
   readonly method?: string;
-  /** Always redacted before leaving the package. */
+  /** Authentication/account material is always redacted before leaving the package. */
   readonly data: JsonValue;
 }
 

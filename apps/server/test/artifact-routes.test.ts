@@ -28,7 +28,12 @@ describe("artifact routes", () => {
     const app = createApp({ repository: persistence.repository, contentStore: persistence.contentStore, events: new EventHub(), runCoordinator: new UnavailableRunCoordinator(), apiToken: token, dataDirectory });
     const headers = { authorization: `Bearer ${token}` };
     try {
-      const spec = revision("tool-spec", "remote_tool", { name: "remote_tool", description: "Remote", inputSchema: { type: "object" } });
+      await persistence.repository.upsertApplicationSettings({ redactionEnabled: false });
+      const spec = revision("tool-spec", "remote_tool", {
+        name: "remote_tool",
+        description: "Remote",
+        inputSchema: { type: "object", properties: { password: { type: "string" }, accessToken: { type: "string" } } }
+      });
       const target = revision("target", "Target", {
         id: "target", label: "Existing container", kind: "container", runtime: "docker", container: "fixture-container",
         environment: { NON_OBVIOUS_NAME: "target-environment-secret" }
@@ -68,6 +73,11 @@ describe("artifact routes", () => {
       expect(serialized).toContain("fixture-container");
       expect(serialized).toContain("application/json");
       expect(serialized).toContain("symbolic-secret-id");
+      const exportedSpec = imported.files.find((file) => file.role === "tool-spec");
+      const exportedSpecJson = JSON.parse(new TextDecoder().decode(exportedSpec!.data)) as AssetRevision;
+      expect(exportedSpecJson.value).toMatchObject({
+        inputSchema: { properties: { password: { type: "string" }, accessToken: { type: "string" } } }
+      });
 
       const form = new FormData();
       form.set("file", new File([archive], "credential-safe.lathe-harness", { type: "application/zip" }));
@@ -124,7 +134,7 @@ describe("artifact routes", () => {
     }
   });
 
-  it("redacts historical provider credentials from textual evidence traces", async () => {
+  it("preserves synthetic sensitive evidence with redaction disabled while scrubbing exact credentials", async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), "lathe-finding-redaction-"));
     directories.push(dataDirectory);
     const persistence = await createPersistence({ dataDirectory });
@@ -132,12 +142,18 @@ describe("artifact routes", () => {
     const app = createApp({ repository: persistence.repository, contentStore: persistence.contentStore, events: new EventHub(), runCoordinator: new UnavailableRunCoordinator(), apiToken: token, dataDirectory });
     const headers = { authorization: `Bearer ${token}` };
     try {
+      await persistence.repository.upsertApplicationSettings({ redactionEnabled: false });
       const project = await persistence.repository.createProject({ name: "Historical trace" });
       const oldProvider = await persistence.repository.createProviderProfile({
         label: "Rotating gateway",
         protocol: "openai-chat",
-        baseUrl: "https://gateway.example/v1",
+        baseUrl: "https://gateway.example/v1?auth=managed-url-z9",
         credential: "archived-provider-secret",
+        extraBody: {
+          auth: "managed-auth-z9",
+          passwd: "managed-pass-z9",
+          privateKey: "managed-private-z9"
+        },
         models: [{
           id: "fixture", label: "Fixture", discovered: false,
           capabilities: { streaming: true, tools: true, images: false, files: false, jsonMode: false, maxContextTokens: null }
@@ -149,7 +165,17 @@ describe("artifact routes", () => {
       const snapshot = await persistence.repository.createConfigSnapshot(session.id, emptyResolvedConfig());
       const run = await persistence.repository.createRun({ sessionId: session.id, branchId: branch.id, contextNodeId: user.id, configSnapshotId: snapshot.id });
       const assistant = await persistence.repository.appendNode({ sessionId: session.id, branchId: branch.id, parentId: user.id, role: "assistant", parts: [{ type: "text", text: "observed" }], sourceRunId: run.id, configSnapshotId: snapshot.id });
-      const trace = await persistence.contentStore.put(new TextEncoder().encode('{"authorization":"archived-provider-secret"}\n'));
+      const trace = await persistence.contentStore.put(new TextEncoder().encode(`${JSON.stringify({
+        authorization: "archived-provider-secret",
+        password: "dummy-password",
+        accessToken: "dummy-token",
+        authMode: "chatgpt-subscription",
+        accountId: "operator-account",
+        configuredAuth: "managed-auth-z9",
+        configuredPasswd: "managed-pass-z9",
+        configuredPrivateKey: "managed-private-z9",
+        configuredUrlAuth: "managed-url-z9"
+      })}\n`));
       await persistence.repository.updateRun(run.id, { status: "completed", resultNodeId: assistant.id, traceHash: trace.sha256, finishedAt: nowIso() });
       const finding = await persistence.repository.createFinding({
         projectId: project.id, sessionId: session.id, branchId: branch.id, nodeId: assistant.id,
@@ -163,6 +189,13 @@ describe("artifact routes", () => {
       expect(evidence?.mediaType).toBe("application/x-ndjson");
       const text = new TextDecoder().decode(evidence!.data);
       expect(text).not.toContain("archived-provider-secret");
+      for (const secret of ["managed-auth-z9", "managed-pass-z9", "managed-private-z9", "managed-url-z9"]) {
+        expect(text).not.toContain(secret);
+      }
+      expect(text).toContain('"password":"dummy-password"');
+      expect(text).toContain('"accessToken":"dummy-token"');
+      expect(text).toContain('"authMode":"chatgpt-subscription"');
+      expect(text).toContain('"accountId":"operator-account"');
       expect(text).toContain("REDACTED");
     } finally {
       await persistence.repository.close();

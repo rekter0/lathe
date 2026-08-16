@@ -235,8 +235,10 @@ describe("CodexAppServerPayloadGenerator", () => {
   it("streams text and reasoning separately and persists redacted probe/run evidence", async () => {
     const store = await contentStoreFixture();
     let request: CodexGenerationRequest | undefined;
-    const start = vi.fn(async (_profile, nextRequest: CodexGenerationRequest) => {
+    let startOptions: { redactionEnabled?: boolean } | undefined;
+    const start = vi.fn(async (_profile, nextRequest: CodexGenerationRequest, options?: { redactionEnabled?: boolean }) => {
       request = nextRequest;
+      startOptions = options;
       return completedRun({
         text: "payload",
         reasoning: "private analysis",
@@ -281,6 +283,7 @@ describe("CodexAppServerPayloadGenerator", () => {
       parentNativeTurnId: null,
       isRefinement: false,
       signal: new AbortController().signal,
+      redactionEnabled: false,
       onText,
       onReasoning,
     });
@@ -309,6 +312,7 @@ describe("CodexAppServerPayloadGenerator", () => {
       workspace: { mode: "isolated", directory: expect.any(String) },
     });
     expect(request).not.toHaveProperty("continuity");
+    expect(startOptions).toMatchObject({ redactionEnabled: false });
     await expect(stat((request?.workspace as { directory: string }).directory)).rejects.toMatchObject({ code: "ENOENT" });
 
     const trace = (await store.get(result.traceHash!)).toString("utf8");
@@ -353,6 +357,7 @@ describe("CodexAppServerPayloadGenerator", () => {
       stagingDirectory: store.stagingDirectory,
       isRefinement: true,
       signal: new AbortController().signal,
+      redactionEnabled: true,
       onText: vi.fn(),
       onReasoning: vi.fn(),
     };
@@ -417,6 +422,7 @@ describe("CodexAppServerPayloadGenerator", () => {
       parentNativeTurnId: null,
       isRefinement: true,
       signal: new AbortController().signal,
+      redactionEnabled: true,
       onText: vi.fn(),
       onReasoning: vi.fn(),
     });
@@ -437,6 +443,7 @@ describe("PayloadGenerationCoordinator Codex integration", () => {
     const persistence = await createPersistence({ dataDirectory });
     try {
       const fixture = await generatorRepositoryFixture(persistence.repository);
+      await persistence.repository.upsertApplicationSettings({ redactionEnabled: false });
       const beforeNodes = await persistence.repository.listNodes(fixture.session.id);
       const calls: Parameters<CodexPayloadGenerator["generate"]>[0][] = [];
       const fakeGenerator: CodexPayloadGenerator = {
@@ -487,13 +494,16 @@ describe("PayloadGenerationCoordinator Codex integration", () => {
       expect(firstAttempt).toMatchObject({
         status: "completed",
         classification: null,
-        normalizedOutput: { text: "first payload", reasoning: "first reasoning" },
+        backendSnapshot: { redactionEnabled: false },
+        normalizedOutput: { text: "first payload", reasoning: "first reasoning", redactionEnabled: false },
         traceHash: "1".repeat(64),
         nativeThreadId: "native-thread-1",
         nativeTurnId: "native-turn-1",
       });
       expect(firstRevision).toMatchObject({ operation: "generated", text: "first payload" });
+      expect(calls[0]?.redactionEnabled).toBe(false);
 
+      await persistence.repository.upsertApplicationSettings({ redactionEnabled: true });
       const refined = await coordinator.refine(firstRevision!.id, { feedback: "Make it shorter." });
       await waitFor(
         async () => (await persistence.repository.getPayloadGeneration(refined.generation.id))?.status === "completed",
@@ -505,6 +515,7 @@ describe("PayloadGenerationCoordinator Codex integration", () => {
         parentNativeThreadId: "native-thread-1",
         parentNativeTurnId: "native-turn-1",
         isRefinement: true,
+        redactionEnabled: true,
       });
       expect(calls[1]?.operatorPrompt).toContain("Previous candidate:\nfirst payload");
       expect(calls[1]?.operatorPrompt).toContain("Refinement feedback:\nMake it shorter.");

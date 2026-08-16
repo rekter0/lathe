@@ -100,6 +100,69 @@ describe("provider run coordinator", () => {
     }
   });
 
+  it("applies a persisted redaction change only to new runs and still protects configured credentials", async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), "lathe-redaction-run-"));
+    directories.push(dataDirectory);
+    const persistence = await createPersistence({ dataDirectory });
+    try {
+      const project = await persistence.repository.createProject({ name: "Project" });
+      const profile = await persistence.repository.createProviderProfile({
+        label: "Fixture",
+        protocol: "openai-chat",
+        baseUrl: "https://fixture.invalid",
+        credential: "x",
+        models: [{
+          id: "fixture-model", label: "Fixture model", discovered: false,
+          capabilities: { streaming: true, tools: true, images: false, files: false, jsonMode: false, maxContextTokens: null }
+        }]
+      });
+      const { session, branch } = await persistence.repository.createSession({
+        projectId: project.id,
+        name: "Session",
+        providerProfileId: profile.id,
+        modelId: "fixture-model"
+      });
+      const evidenceText = "example text | Bearer fake-red-team-token | exact=x";
+      const fetchFixture: typeof fetch = async () => new Response(
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: evidenceText }, finish_reason: "stop" }] })}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      );
+      const coordinator = new ProviderRunCoordinator(persistence.repository, persistence.contentStore, new EventHub(), fetchFixture);
+
+      const strict = await coordinator.start({ sessionId: session.id, branchId: branch.id, userMessage: "strict" });
+      await waitFor(async () => (await persistence.repository.getRun(strict.id))?.status === "completed");
+      const strictRun = await persistence.repository.getRun(strict.id);
+      const strictNodes = await persistence.repository.listNodes(session.id);
+      expect(JSON.stringify(strictNodes.at(-1)?.parts)).not.toContain("fake-red-team-token");
+      expect(strictRun?.normalizedOutput).toMatchObject({ redactionEnabled: true });
+
+      await persistence.repository.upsertApplicationSettings({ redactionEnabled: false });
+      const currentBranch = (await persistence.repository.listBranches(session.id)).find((item) => item.id === branch.id)!;
+      const relaxed = await coordinator.start({
+        sessionId: session.id,
+        branchId: branch.id,
+        contextNodeId: currentBranch.headNodeId,
+        userMessage: "relaxed"
+      });
+      await waitFor(async () => (await persistence.repository.getRun(relaxed.id))?.status === "completed");
+      const relaxedRun = await persistence.repository.getRun(relaxed.id);
+      const relaxedNodes = await persistence.repository.listNodes(session.id);
+      const relaxedText = JSON.stringify(relaxedNodes.at(-1)?.parts);
+      expect(relaxedText).toContain("example text");
+      expect(relaxedText).toContain("Bearer fake-red-team-token");
+      expect(relaxedText).not.toContain("exact=x");
+      expect(relaxedRun?.normalizedOutput).toMatchObject({ redactionEnabled: false });
+      const relaxedTrace = (await persistence.contentStore.get(relaxedRun!.traceHash!)).toString();
+      expect(relaxedTrace).toContain("example text");
+      expect(relaxedTrace).not.toContain("exact=x");
+      expect(relaxedTrace).not.toContain('"authorization":"Bearer x"');
+
+      expect(JSON.stringify(strictNodes.at(-1)?.parts)).not.toContain("fake-red-team-token");
+    } finally {
+      await persistence.repository.close();
+    }
+  });
+
   it("prepares, approves, executes, and formats a real QuickJS-backed tool call", async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), "lathe-tool-run-"));
     directories.push(dataDirectory);

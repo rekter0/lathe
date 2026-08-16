@@ -1,7 +1,12 @@
 import { timingSafeEqual } from "node:crypto";
 import type { MiddlewareHandler } from "hono";
-import { redactJson, type AssetKind, type AssetRevision, type JsonObject, type JsonValue } from "@lathe/domain";
+import { replaceKnownSecrets, type AssetKind, type AssetRevision, type JsonObject, type JsonValue } from "@lathe/domain";
 import type { LatheRepository } from "@lathe/db";
+import {
+  providerSecretValues,
+  redactJson as redactProviderJson,
+  redactUrl as redactProviderUrl,
+} from "@lathe/providers";
 
 export const REDACTED_ASSET_VALUE = "<redacted>";
 
@@ -132,43 +137,30 @@ export function assetCredentialValues(asset: AssetRevision): string[] {
 }
 
 /** Collect every credential value known to Lathe before emitting export data. */
-export async function collectExportSecrets(repository: LatheRepository): Promise<string[]> {
+export async function collectExportSecrets(
+  repository: LatheRepository,
+  redactionEnabled = true,
+): Promise<string[]> {
   // Historical branches can reference superseded revisions, so include archived
   // provider and executable/MCP profiles rather than only the active heads.
   const providers = await repository.listProviderProfiles(true);
-  const values = providers.flatMap((profile) => [profile.credential, ...Object.values(profile.headers)]);
-  const sensitive = /authorization|api[-_]?key|token|secret|password|credential|cookie/i;
+  const values = providers.flatMap((profile) => providerSecretValues(profile));
+  const sensitive = ASSET_CREDENTIAL_NAME;
   const symbolicReference = /(?:id|ref|reference|name)$/i;
   const collect = (value: JsonValue, key = "") => {
     if (typeof value === "string" && sensitive.test(key) && !symbolicReference.test(key)) values.push(value);
     else if (Array.isArray(value)) value.forEach((item) => collect(item, key));
     else if (value && typeof value === "object") for (const [childKey, item] of Object.entries(value)) collect(item, childKey);
   };
-  for (const profile of providers) {
-    collect(profile.extraBody);
-    for (const urlValue of [profile.baseUrl, profile.endpointOverride]) {
-      if (!urlValue) continue;
-      try {
-        const url = new URL(urlValue);
-        for (const value of [url.username, url.password]) {
-          if (!value) continue;
-          try { values.push(decodeURIComponent(value)); } catch { values.push(value); }
-        }
-        for (const [name, value] of url.searchParams) if (sensitive.test(name)) values.push(value);
-      } catch {
-        // Invalid legacy URLs are rejected on use; other known values are still scrubbed.
-      }
-    }
-  }
   for (const asset of await repository.listAssetRevisions(undefined, true)) {
-    collect(asset.value);
+    if (redactionEnabled) collect(asset.value);
     values.push(...assetCredentialValues(asset));
   }
   for (const secret of await repository.listSecrets()) {
     const value = await repository.resolveSecret(secret.id);
     if (value) values.push(value);
   }
-  return [...new Set(values.filter((value) => value.length >= 4))];
+  return [...new Set(values.filter((value) => value.length > 0))];
 }
 
 export class UnsafeAssetCredentialError extends Error {
@@ -286,38 +278,21 @@ export function localSecurity(token: string): MiddlewareHandler {
 }
 
 export function redactKnownValues(value: JsonValue, secrets: readonly string[]): JsonValue {
-  if (typeof value === "string") return secrets.reduce((result, secret) => secret.length >= 4 ? result.split(secret).join("<redacted>") : result, value);
+  if (typeof value === "string") return replaceKnownSecrets(value, secrets, "<redacted>").value;
   if (Array.isArray(value)) return value.map((item) => redactKnownValues(item, secrets));
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactKnownValues(item, secrets)]));
   return value;
 }
 
-function redactProviderUrl(value: string | null, secrets: string[]): string | null {
-  if (value === null) return null;
-  let redacted = value;
-  try {
-    const url = new URL(value);
-    if (url.username) url.username = "<redacted>";
-    if (url.password) url.password = "<redacted>";
-    for (const key of [...url.searchParams.keys()]) {
-      if (/authorization|api[-_]?key|token|secret|password|credential|cookie/i.test(key)) url.searchParams.set(key, "<redacted>");
-    }
-    redacted = url.toString();
-  } catch {
-    // Persisted legacy profiles may contain invalid URLs; still scrub known values.
-  }
-  return redactKnownValues(redacted, secrets) as string;
-}
-
 export function sanitizeProvider<T extends { credential: string; headers: Record<string, string>; extraBody: JsonObject; baseUrl: string; endpointOverride: string | null }>(provider: T): Omit<T, "credential" | "headers" | "extraBody" | "baseUrl" | "endpointOverride"> & { hasCredential: boolean; headers: Record<string, string>; extraBody: JsonObject; baseUrl: string; endpointOverride: string | null } {
   const { credential, headers, extraBody, baseUrl, endpointOverride, ...safe } = provider;
-  const secrets = [credential, ...Object.values(headers)].filter(Boolean);
+  const secrets = providerSecretValues({ credential, headers, extraBody, baseUrl, endpointOverride });
   return {
     ...safe,
     headers: Object.fromEntries(Object.keys(headers).map((name) => [name, "<redacted>"])),
-    extraBody: redactKnownValues(redactJson(extraBody), secrets) as JsonObject,
-    baseUrl: redactProviderUrl(baseUrl, secrets)!,
-    endpointOverride: redactProviderUrl(endpointOverride, secrets),
+    extraBody: redactProviderJson(extraBody, secrets, true) as JsonObject,
+    baseUrl: redactProviderUrl(baseUrl, secrets, true),
+    endpointOverride: endpointOverride === null ? null : redactProviderUrl(endpointOverride, secrets, true),
     hasCredential: credential.length > 0
   };
 }

@@ -50,8 +50,9 @@ describe("Lathe artifact bundles", () => {
         title: "Header disclosure",
         credentialRef: "safe-reference",
         apiKey: "should-not-survive",
+        password: "synthetic-password",
       },
-      summaryMarkdown: "Authorization: Bearer very-secret-token\n",
+      summaryMarkdown: "Authorization: Bearer synthetic-header-token\n",
       secretValues: ["very-secret-token", "should-not-survive"],
       files: [
         {
@@ -65,10 +66,71 @@ describe("Lathe artifact bundles", () => {
 
     const imported = importFindingArtifact(bundle);
     expect(JSON.stringify(imported.manifest)).not.toContain("should-not-survive");
-    expect(imported.manifest.metadata).toMatchObject({ credentialRef: "safe-reference" });
+    expect(imported.manifest.metadata).toMatchObject({
+      credentialRef: "safe-reference",
+      password: "[REDACTED CREDENTIAL]",
+    });
+    const summary = imported.files.find((file) => file.path === "summary.md");
+    expect(new TextDecoder().decode(summary!.data)).toContain("Authorization: [REDACTED CREDENTIAL]");
     for (const file of imported.files) {
       expect(Buffer.from(file.data).toString("utf8")).not.toContain("very-secret-token");
     }
+  });
+
+  it("preserves synthetic credential-shaped evidence when heuristics are disabled while retaining hard boundaries", () => {
+    const exactSecret = "x";
+    const bundle = exportFindingArtifact({
+      artifactId: "finding-raw-evidence",
+      generatorVersion: "0.1.0",
+      redactionEnabled: false,
+      secretValues: [exactSecret],
+      metadata: {
+        password: "dummy-password",
+        accessToken: "dummy-token",
+        authMode: "chatgpt-subscription",
+        accountId: "operator-account"
+      },
+      summaryMarkdown: [
+        "example text remains exact",
+        "Authorization: Bearer dummy-token",
+        "password=dummy-password",
+        "authMode=chatgpt-subscription",
+        `known=${exactSecret}`
+      ].join("\n"),
+      files: [{
+        path: "traces/raw.json",
+        mediaType: "application/json",
+        data: JSON.stringify({
+          password: "dummy-password",
+          api_key: "dummy-api-key",
+          accessToken: "dummy-token",
+          accountIdentifier: "operator-account",
+          exactSecret
+        })
+      }]
+    });
+
+    const imported = importFindingArtifact(bundle);
+    expect(imported.manifest.metadata).toMatchObject({
+      password: "dummy-password",
+      accessToken: "dummy-token",
+      authMode: "chatgpt-subscription",
+      accountId: "operator-account"
+    });
+    const summary = new TextDecoder().decode(imported.files.find((file) => file.path === "summary.md")!.data);
+    expect(summary).toContain("example text remains exact");
+    expect(summary).toContain("Authorization: Bearer dummy-token");
+    expect(summary).toContain("password=dummy-password");
+    expect(summary).toContain("authMode=chatgpt-subscription");
+    expect(summary).not.toContain("known=x");
+    const raw = JSON.parse(new TextDecoder().decode(imported.files.find((file) => file.path === "traces/raw.json")!.data)) as Record<string, unknown>;
+    expect(raw).toMatchObject({
+      password: "dummy-password",
+      api_key: "dummy-api-key",
+      accessToken: "dummy-token",
+      accountIdentifier: "operator-account",
+      exactSecret: "[REDACTED CREDENTIAL]"
+    });
   });
 
   it("rejects traversal paths before extraction", () => {

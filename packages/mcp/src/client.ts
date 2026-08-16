@@ -53,6 +53,8 @@ export interface ConnectMcpClientOptions {
   clientInfo?: { name: string; version: string };
   /** Required when a stdio profile selects a container or SSH target. */
   spawnStdio?: McpStdioSpawner;
+  /** Heuristic evidence redaction. Resolved secret values are always removed. */
+  redactionEnabled?: boolean;
 }
 
 export interface CallMcpToolOptions {
@@ -108,6 +110,14 @@ function asApprovedPayload(
   return decision.editedPayload ?? original;
 }
 
+function redactFor(
+  options: Pick<ConnectMcpClientOptions, "redactionEnabled">,
+  resolved: ResolvedMcpTransport,
+  value: unknown,
+): JsonValue {
+  return redactJson(value, resolved.secretValues, options.redactionEnabled !== false);
+}
+
 export class LatheMcpClient {
   readonly profile: McpServerProfile;
   readonly policy: McpPolicy;
@@ -117,6 +127,7 @@ export class LatheMcpClient {
   readonly #resolved: ResolvedMcpTransport;
   readonly #approvals: McpApprovalBroker;
   readonly #trace?: McpTraceSink;
+  readonly #redactionEnabled: boolean;
 
   private constructor(
     options: ConnectMcpClientOptions,
@@ -130,6 +141,7 @@ export class LatheMcpClient {
     this.#transport = transport;
     this.#resolved = resolved;
     this.#approvals = options.approvals;
+    this.#redactionEnabled = options.redactionEnabled !== false;
     if (options.trace !== undefined) this.#trace = options.trace;
   }
 
@@ -159,6 +171,7 @@ export class LatheMcpClient {
     const transport = new TracingTransport(officialTransport, {
       profile: options.profile,
       secrets: resolved.secretValues,
+      redactionEnabled: options.redactionEnabled !== false,
       ...(options.trace === undefined ? {} : { sink: options.trace }),
     });
 
@@ -169,8 +182,8 @@ export class LatheMcpClient {
         level: "info",
         event: "connect.ready",
         payload: {
-          server: redactJson(client.getServerVersion(), resolved.secretValues),
-          capabilities: redactJson(client.getServerCapabilities(), resolved.secretValues),
+          server: redactFor(options, resolved, client.getServerVersion()),
+          capabilities: redactFor(options, resolved, client.getServerCapabilities()),
         },
       });
       return new LatheMcpClient(options, client, transport, resolved);
@@ -190,6 +203,10 @@ export class LatheMcpClient {
     await this.#client.close();
   }
 
+  #redact(value: unknown): JsonValue {
+    return redactJson(value, this.#resolved.secretValues, this.#redactionEnabled);
+  }
+
   async captureCapabilities(): Promise<McpCapabilitySnapshot> {
     const protocolVersion = (this.#transport as TracingTransport).protocolVersion;
     return this.#operation("capabilities/snapshot", {}, async () =>
@@ -198,64 +215,50 @@ export class LatheMcpClient {
         profileRevision: this.profile.revision,
         ...(protocolVersion === undefined ? {} : { protocolVersion }),
         secretValues: this.#resolved.secretValues,
+        redactionEnabled: this.#redactionEnabled,
       }),
     );
   }
 
   async listTools(cursor?: string): Promise<JsonValue> {
     return this.#operation("tools/list", { cursor: cursor ?? null }, async () =>
-      redactJson(
-        await this.#client.listTools(cursor ? { cursor } : undefined),
-        this.#resolved.secretValues,
-      ),
+      this.#redact(await this.#client.listTools(cursor ? { cursor } : undefined)),
     );
   }
 
   async listPrompts(cursor?: string): Promise<JsonValue> {
     return this.#operation("prompts/list", { cursor: cursor ?? null }, async () =>
-      redactJson(
-        await this.#client.listPrompts(cursor ? { cursor } : undefined),
-        this.#resolved.secretValues,
-      ),
+      this.#redact(await this.#client.listPrompts(cursor ? { cursor } : undefined)),
     );
   }
 
   async listResources(cursor?: string): Promise<JsonValue> {
     return this.#operation("resources/list", { cursor: cursor ?? null }, async () =>
-      redactJson(
-        await this.#client.listResources(cursor ? { cursor } : undefined),
-        this.#resolved.secretValues,
-      ),
+      this.#redact(await this.#client.listResources(cursor ? { cursor } : undefined)),
     );
   }
 
   async listResourceTemplates(cursor?: string): Promise<JsonValue> {
     return this.#operation("resources/templates/list", { cursor: cursor ?? null }, async () =>
-      redactJson(
-        await this.#client.listResourceTemplates(cursor ? { cursor } : undefined),
-        this.#resolved.secretValues,
-      ),
+      this.#redact(await this.#client.listResourceTemplates(cursor ? { cursor } : undefined)),
     );
   }
 
   async getPrompt(name: string, args?: Record<string, string>): Promise<JsonValue> {
     return this.#operation("prompts/get", { name, arguments: args ?? {} }, async () =>
-      redactJson(
-        await this.#client.getPrompt({ name, arguments: args }),
-        this.#resolved.secretValues,
-      ),
+      this.#redact(await this.#client.getPrompt({ name, arguments: args })),
     );
   }
 
   async readResource(uri: string): Promise<JsonValue> {
     return this.#operation("resources/read", { uri }, async () =>
-      redactJson(await this.#client.readResource({ uri }), this.#resolved.secretValues),
+      this.#redact(await this.#client.readResource({ uri })),
     );
   }
 
   async callTool(options: CallMcpToolOptions): Promise<JsonValue> {
     const original = { name: options.name, arguments: options.arguments ?? {} } satisfies JsonValue;
-    const approvalPayload = redactJson(original, this.#resolved.secretValues);
+    const approvalPayload = this.#redact(original);
     const approval = await this.#approve({
       id: randomUUID(),
       kind: "toolCall",
@@ -276,7 +279,7 @@ export class LatheMcpClient {
     if (typeof approvedName !== "string") throw new Error("Approved MCP tool payload needs a name");
 
     return this.#operation("tools/call", approved, async () =>
-      redactJson(
+      this.#redact(
         await this.#client.callTool({
           name: approvedName,
           arguments:
@@ -286,7 +289,6 @@ export class LatheMcpClient {
               ? approvedArguments
               : {},
         }),
-        this.#resolved.secretValues,
       ),
     );
   }
@@ -298,7 +300,7 @@ export class LatheMcpClient {
    */
   async *callToolTask(options: CallMcpToolTaskOptions): AsyncGenerator<JsonValue> {
     const original = { name: options.name, arguments: options.arguments ?? {} } satisfies JsonValue;
-    const approvalPayload = redactJson(original, this.#resolved.secretValues);
+    const approvalPayload = this.#redact(original);
     const approval = await this.#approve({
       id: randomUUID(),
       kind: "toolCall",
@@ -335,7 +337,7 @@ export class LatheMcpClient {
         },
       });
       for await (const message of stream) {
-        const safe = redactJson(message, this.#resolved.secretValues);
+        const safe = this.#redact(message);
         await this.#record("inbound", message.type === "error" ? "error" : "info", message.type === "error" ? "operation.error" : "operation.result", "tasks/tools/call", safe);
         yield safe;
       }
@@ -347,25 +349,25 @@ export class LatheMcpClient {
 
   async listTasks(cursor?: string): Promise<JsonValue> {
     return this.#operation("tasks/list", { cursor: cursor ?? null }, async () =>
-      redactJson(await this.#client.experimental.tasks.listTasks(cursor), this.#resolved.secretValues),
+      this.#redact(await this.#client.experimental.tasks.listTasks(cursor)),
     );
   }
 
   async getTask(taskId: string): Promise<JsonValue> {
     return this.#operation("tasks/get", { taskId }, async () =>
-      redactJson(await this.#client.experimental.tasks.getTask(taskId), this.#resolved.secretValues),
+      this.#redact(await this.#client.experimental.tasks.getTask(taskId)),
     );
   }
 
   async getToolTaskResult(taskId: string): Promise<JsonValue> {
     return this.#operation("tasks/result", { taskId }, async () =>
-      redactJson(await this.#client.experimental.tasks.getTaskResult(taskId, CallToolResultSchema), this.#resolved.secretValues),
+      this.#redact(await this.#client.experimental.tasks.getTaskResult(taskId, CallToolResultSchema)),
     );
   }
 
   async cancelTask(taskId: string): Promise<JsonValue> {
     return this.#operation("tasks/cancel", { taskId }, async () =>
-      redactJson(await this.#client.experimental.tasks.cancelTask(taskId), this.#resolved.secretValues),
+      this.#redact(await this.#client.experimental.tasks.cancelTask(taskId)),
     );
   }
 
@@ -377,7 +379,7 @@ export class LatheMcpClient {
       "info",
       "approval.resolved",
       request.kind,
-      redactJson(decision),
+      this.#redact(decision),
     );
     return decision;
   }
@@ -414,7 +416,7 @@ export class LatheMcpClient {
         ...(method === undefined ? {} : { method }),
         ...(payload === undefined
           ? {}
-          : { payload: redactJson(payload, this.#resolved.secretValues) }),
+          : { payload: this.#redact(payload) }),
       });
     } catch {
       // Tracing is observational and may not alter protocol behavior.
@@ -454,7 +456,7 @@ function installInboundHandlers(
   if (options.handlers?.sampling) {
     client.setRequestHandler(CreateMessageRequestSchema, async (request) => {
       const original = request.params as JsonValue;
-      const approvalPayload = redactJson(original, resolved.secretValues);
+      const approvalPayload = redactFor(options, resolved, original);
       const decision = await requestInboundApproval(options, resolved, "sampling", approvalPayload);
       const approved = asApprovedPayload(decision, original);
       return (await options.handlers?.sampling?.(approved)) as never;
@@ -464,7 +466,7 @@ function installInboundHandlers(
   if (options.handlers?.elicitation) {
     client.setRequestHandler(ElicitRequestSchema, async (request) => {
       const original = request.params as JsonValue;
-      const approvalPayload = redactJson(original, resolved.secretValues);
+      const approvalPayload = redactFor(options, resolved, original);
       const decision = await requestInboundApproval(options, resolved, "elicitation", approvalPayload);
       const approved = asApprovedPayload(decision, original);
       return (await options.handlers?.elicitation?.(approved)) as never;
@@ -473,7 +475,7 @@ function installInboundHandlers(
 
   if (options.handlers?.onLoggingMessage) {
     client.setNotificationHandler(LoggingMessageNotificationSchema, async (notification) => {
-      const payload = redactJson(notification.params, resolved.secretValues);
+      const payload = redactFor(options, resolved, notification.params);
       await record(options, resolved, {
         direction: "inbound",
         level: "info",
@@ -487,7 +489,7 @@ function installInboundHandlers(
 
   if (options.handlers?.onProgress) {
     client.setNotificationHandler(ProgressNotificationSchema, async (notification) => {
-      const payload = redactJson(notification.params, resolved.secretValues);
+      const payload = redactFor(options, resolved, notification.params);
       await record(options, resolved, {
         direction: "inbound",
         level: "debug",
@@ -527,7 +529,7 @@ async function requestInboundApproval(
     level: "info",
     event: "approval.resolved",
     method: kind,
-    payload: redactJson(decision),
+    payload: redactFor(options, resolved, decision),
   });
   return decision;
 }
@@ -546,16 +548,17 @@ function attachStderrTrace(
       direction: "inbound",
       level: "warning",
       event: "stdio.stderr",
-      payload: redactJson(
+      payload: redactFor(
+        options,
+        resolved,
         typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"),
-        resolved.secretValues,
       ),
     });
   });
 }
 
 async function record(
-  options: Pick<ConnectMcpClientOptions, "profile" | "trace">,
+  options: Pick<ConnectMcpClientOptions, "profile" | "trace" | "redactionEnabled">,
   resolved: ResolvedMcpTransport,
   event: Omit<McpTraceEvent, "at" | "profileId" | "profileRevision" | "transport">,
 ): Promise<void> {
@@ -569,7 +572,7 @@ async function record(
       ...event,
       ...(event.payload === undefined
         ? {}
-        : { payload: redactJson(event.payload, resolved.secretValues) }),
+        : { payload: redactFor(options, resolved, event.payload) }),
     });
   } catch {
     // Trace persistence failure must not mutate MCP behavior.

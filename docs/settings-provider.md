@@ -97,6 +97,14 @@ and custom header values are redacted from ordinary API responses and exports,
 but the local database and running process must still be protected. See
 [SECURITY.md](../SECURITY.md).
 
+The global **Interface settings → Evidence redaction** switch controls
+heuristic filtering of new model output, tool-shaped content, and raw evidence.
+It is enabled by default. Disable it only when synthetic credential-shaped
+content is part of the test and must remain exact. Exact credentials, custom
+header values, and sensitive provider options already configured in Lathe stay
+scrubbed in either mode. The setting does not rewrite earlier runs and is not a
+substitute for reviewing traces or exports before sharing them.
+
 When editing a profile, leaving **API credential** blank preserves the stored
 credential. Select **Clear the stored credential in the new revision** to
 remove it. Redacted header/body markers likewise preserve the stored value when
@@ -427,7 +435,7 @@ through Lathe's dedicated controls.
 - Anthropic: use `display: "summarized"` on models that support it.
 - Direct OpenAI Chat: reasoning effort does not guarantee readable reasoning
   output; use Responses and request a supported summary when appropriate.
-- Inspect **Run → raw events** and the downloadable redacted NDJSON trace to see
+- Inspect **Run → raw events** and the downloadable NDJSON trace to see
   the provider's actual response shape.
 
 ### Model discovery fails

@@ -360,6 +360,8 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
     const assets = await repository.listAssetRevisions();
     const harness = assets.find((asset) => asset.id === context.req.param("id") && asset.kind === "harness");
     if (!harness) throw new HTTPException(404, { message: "Harness revision not found" });
+    const applicationSettings = await repository.getApplicationSettings();
+    const exportSecrets = await collectExportSecrets(repository, applicationSettings.redactionEnabled);
     const referencedIds = new Set<string>();
     const value = harness.value as JsonObject;
     for (const binding of [...(Array.isArray(value.promptBindings) ? value.promptBindings : []), ...(Array.isArray(value.toolBindings) ? value.toolBindings : [])]) {
@@ -385,7 +387,8 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
       metadata: { name: harness.name, revision: harness.revision, provenance: harness.provenance },
       summaryMarkdown: `# ${harness.name}\n\n${harness.description}\n\nExported from Lathe at ${nowIso()}.\n`,
       files,
-      secretValues: await collectExportSecrets(repository)
+      secretValues: exportSecrets,
+      redactionEnabled: applicationSettings.redactionEnabled
     });
     return bytesResponse(archive, `${harness.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lathe-harness`);
   });
@@ -395,6 +398,8 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
     if (!projectId) throw new HTTPException(400, { message: "projectId is required" });
     const finding = (await repository.listFindings(projectId)).find((item) => item.id === context.req.param("id"));
     if (!finding) throw new HTTPException(404, { message: "Finding not found" });
+    const applicationSettings = await repository.getApplicationSettings();
+    const exportSecrets = await collectExportSecrets(repository, applicationSettings.redactionEnabled);
     const [session, nodes, branches, runs] = await Promise.all([
       repository.getSession(finding.sessionId), repository.listNodes(finding.sessionId), repository.listBranches(finding.sessionId), repository.listRuns(finding.sessionId)
     ]);
@@ -461,7 +466,8 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
       metadata: finding as unknown as JsonValue,
       summaryMarkdown: `# ${finding.title}\n\n**Severity:** ${finding.severity}\n\n${finding.summary}\n\n## Expected\n\n${finding.expected}\n\n## Observed\n\n${finding.observed}\n`,
       files,
-      secretValues: await collectExportSecrets(repository)
+      secretValues: exportSecrets,
+      redactionEnabled: applicationSettings.redactionEnabled
     });
     return bytesResponse(archive, `${finding.title.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lathe-finding`);
   });

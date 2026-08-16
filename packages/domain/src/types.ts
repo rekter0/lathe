@@ -308,6 +308,14 @@ export interface AutomationJob {
   updatedAt: IsoDateTime;
 }
 
+/** Mutable application-wide settings for the local Lathe server. */
+export interface ApplicationSettings {
+  id: Id;
+  redactionEnabled: boolean;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+}
+
 export type PayloadContextMode = "none" | "minimal" | "full";
 export type PayloadDiversity = "low" | "balanced" | "high";
 

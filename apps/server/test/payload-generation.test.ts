@@ -418,6 +418,7 @@ describe("payload generation server behavior", () => {
         parts: [{ type: "text", text: "Existing target turn" }],
       });
       const { profileAsset } = await createHttpGeneratorFixture(persistence.repository);
+      await persistence.repository.upsertApplicationSettings({ redactionEnabled: false });
       const requestBodies: JsonObject[] = [];
       const fetchFixture: typeof fetch = async (_input, init) => {
         const body = JSON.parse(String(init?.body)) as JsonObject;
@@ -425,8 +426,8 @@ describe("payload generation server behavior", () => {
         const serialized = JSON.stringify(body);
         if (serialized.includes("Candidate 1 of 2")) {
           return sseResponse([
-            '{"choices":[{"index":0,"delta":{"reasoning":"candidate-one-reasoning"}}]}',
-            '{"choices":[{"index":0,"delta":{"content":"payload-one"},"finish_reason":"stop"}]}',
+            '{"choices":[{"index":0,"delta":{"reasoning":"candidate-one-reasoning password=reasoning-password"}}]}',
+            '{"choices":[{"index":0,"delta":{"content":"payload-one Bearer fake-generator-token generator-secret"},"finish_reason":"stop"}]}',
             "[DONE]",
           ]);
         }
@@ -484,7 +485,12 @@ describe("payload generation server behavior", () => {
         ordinal: 1,
         status: "completed",
         classification: null,
-        normalizedOutput: { text: "payload-one", reasoning: "candidate-one-reasoning" },
+        backendSnapshot: { redactionEnabled: false },
+        normalizedOutput: {
+          text: "payload-one Bearer fake-generator-token [REDACTED]",
+          reasoning: "candidate-one-reasoning password=reasoning-password",
+          redactionEnabled: false,
+        },
       });
       expect(attempts[1]).toMatchObject({
         ordinal: 2,
@@ -497,7 +503,7 @@ describe("payload generation server behavior", () => {
         },
       });
       expect(revisions.map((revision) => [revision.ordinal, revision.text])).toEqual([
-        [1, "payload-one"],
+        [1, "payload-one Bearer fake-generator-token [REDACTED]"],
         [2, "partial-two"],
       ]);
       expect(revisions.every((revision) => revision.operation === "generated")).toBe(true);
@@ -514,6 +520,11 @@ describe("payload generation server behavior", () => {
       for (const attempt of attempts) {
         expect(attempt.traceHash).toMatch(/^[a-f0-9]{64}$/);
       }
+      const evidence = await Promise.all(attempts.map(async (attempt) =>
+        new TextDecoder().decode(await persistence.contentStore.get(attempt.traceHash!))
+      ));
+      expect(evidence.join("\n")).toContain("Bearer fake-generator-token");
+      expect(evidence.join("\n")).not.toContain("generator-secret");
     } finally {
       await persistence.repository.close();
     }

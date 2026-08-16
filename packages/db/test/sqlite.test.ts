@@ -40,6 +40,25 @@ describe("SQLite repository", () => {
     }
   });
 
+  it("persists application settings across restarts", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "lathe-settings-"));
+    directories.push(directory);
+    const first = await createPersistence({ dataDirectory: directory });
+    try {
+      expect(await first.repository.getApplicationSettings()).toMatchObject({ redactionEnabled: true });
+      await first.repository.upsertApplicationSettings({ redactionEnabled: false });
+    } finally {
+      await first.repository.close();
+    }
+
+    const reopened = await createPersistence({ dataDirectory: directory });
+    try {
+      expect(await reopened.repository.getApplicationSettings()).toMatchObject({ id: "global", redactionEnabled: false });
+    } finally {
+      await reopened.repository.close();
+    }
+  });
+
   it("migrates existing checkpoint-state databases without losing project or session data", async () => {
     const directory = await mkdtemp(join(tmpdir(), "lathe-migration-"));
     directories.push(directory);
@@ -79,6 +98,7 @@ describe("SQLite repository", () => {
       expect(await persistence.repository.getSession("legacy-session")).toMatchObject({ description: "" });
       expect(await persistence.repository.getPayloadWorkbenchSettings()).toBeNull();
       expect(await persistence.repository.getSessionPayloadWorkbenchSettings("legacy-session")).toBeNull();
+      expect(await persistence.repository.getApplicationSettings()).toMatchObject({ id: "global", redactionEnabled: true });
       expect(await persistence.repository.upsertPayloadWorkbenchSettings({
         defaultGeneratorProfileRevisionId: null,
         defaultInstructionRevisionId: null,

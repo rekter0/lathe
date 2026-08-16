@@ -48,3 +48,47 @@ export function redactRuntimeJson(value: unknown, key = ""): JsonValue {
   }
   return String(value);
 }
+
+function redactKnownRuntimeValues(value: string, protectedValues: readonly string[]): string {
+  let output = value;
+  const candidates = [...new Set(protectedValues.filter(Boolean))].toSorted((left, right) => right.length - left.length);
+  for (const protectedValue of candidates) {
+    if (protectedValue.length >= 4) {
+      output = output.split(protectedValue).join(REDACTED);
+      continue;
+    }
+    const escaped = protectedValue.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    output = output.replace(
+      new RegExp(`(?<![\\p{L}\\p{N}_.~+-])${escaped}(?![\\p{L}\\p{N}_.~+-])`, "gu"),
+      REDACTED,
+    );
+  }
+  return output;
+}
+
+/**
+ * Credentials-only evidence mode. It deliberately preserves generic
+ * password/token/API-key-shaped test content while continuing to remove the
+ * exact authentication and account values observed at the App Server control
+ * boundary.
+ */
+export function redactRuntimeEvidenceJson(
+  value: unknown,
+  protectedValues: readonly string[] = [],
+): JsonValue {
+  if (value === null) return null;
+  if (typeof value === "string") return redactKnownRuntimeValues(value, protectedValues);
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "boolean") return value;
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactRuntimeEvidenceJson(entry, protectedValues));
+  }
+  if (typeof value === "object") {
+    const result: Record<string, JsonValue> = {};
+    for (const [entryKey, entryValue] of Object.entries(value as Record<string, unknown>)) {
+      result[entryKey] = redactRuntimeEvidenceJson(entryValue, protectedValues);
+    }
+    return result;
+  }
+  return String(value);
+}

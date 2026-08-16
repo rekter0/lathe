@@ -28,7 +28,7 @@ recomputed or requested against the current session state.
 
 ### HTTP generator profile
 
-An HTTP generator reuses Lathe's existing provider adapters, credentials, redaction, trace capture, streaming, and error classification.
+An HTTP generator reuses Lathe's existing provider adapters, credentials, evidence-redaction policy, trace capture, streaming, and error classification.
 
 1. Open the regular **Settings** page and create a provider revision. Select OpenAI Responses, OpenAI Chat Completions, or Anthropic Messages according to the endpoint's actual protocol. Configure its base URL, credential, and model catalog. See [Provider settings](./settings-provider.md) for endpoint, header, request-body, and reasoning details.
 2. Open **Payload Workbench settings → Profiles**, choose **HTTP provider**, and select the exact provider revision and model.
@@ -55,7 +55,7 @@ Workspace modes are deliberately narrow:
 
 Lathe disables target-tool bridging, dynamic tools, apps/connectors, and network access for Codex generation. Any approval request from the helper process is rejected. Candidates run sequentially in fresh native threads. Refinement continues the candidate's native thread when available; if that state is unavailable, Lathe replays the exact stored request and marks the continuation as lossy.
 
-Only sanitized auth mode/plan information, executable version/hash, effective sandbox, native thread/turn identifiers, and redacted JSON-RPC evidence are retained. Account identifiers and auth state are excluded from finding exports.
+Only sanitized auth mode/plan information, executable version/hash, effective sandbox, and native thread/turn identifiers are retained. JSON-RPC evidence follows the snapshotted evidence-redaction setting, while Codex auth/account control-plane data stays protected in both modes. Account identifiers and auth state are excluded from finding exports.
 
 ## Add project and session briefing
 

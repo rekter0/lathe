@@ -1,6 +1,5 @@
 import {
   nowIso,
-  redactJson,
   sha256Json,
   type AssetRevision,
   type JsonObject,
@@ -19,6 +18,7 @@ import {
 import {
   compileProviderRequest,
   executeProviderRequest,
+  providerSecretValues,
   redactHeaders,
   redactJson as redactProviderJson,
   redactText as redactProviderText,
@@ -88,6 +88,7 @@ export interface CodexPayloadGenerator {
     /** True when the stored parent payload is being replayed for refinement. */
     isRefinement: boolean;
     signal: AbortSignal;
+    redactionEnabled: boolean;
     onText(delta: string): void;
     onReasoning(delta: string): void;
   }): Promise<CodexGenerationResult>;
@@ -106,6 +107,10 @@ function jsonClone<T>(value: T): T {
 
 function object(value: JsonValue | null): JsonObject {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function attemptRedactionEnabled(attempt: PayloadGenerationAttempt): boolean {
+  return attempt.backendSnapshot.redactionEnabled !== false;
 }
 
 function activeAsset(assets: readonly AssetRevision[], revisionId: string, kind: AssetRevision["kind"]): AssetRevision {
@@ -148,29 +153,36 @@ function providerAdapterProfile(profile: ProviderProfile) {
   } as const;
 }
 
-function safeHttpBackendSnapshot(profile: ProviderProfile, backend: Extract<PayloadGeneratorProfileValue["backend"], { kind: "http-provider" }>, temperature: number): JsonObject {
-  const knownSecrets = [profile.credential, ...Object.values(profile.headers)].filter(Boolean);
+function safeHttpBackendSnapshot(
+  profile: ProviderProfile,
+  backend: Extract<PayloadGeneratorProfileValue["backend"], { kind: "http-provider" }>,
+  temperature: number,
+  redactionEnabled: boolean,
+): JsonObject {
+  const knownSecrets = providerSecretValues(profile);
   return {
     kind: "http-provider",
     providerProfileId: profile.id,
     providerRevision: profile.revision,
     protocol: profile.protocol,
     label: profile.label,
-    baseUrl: redactUrl(profile.baseUrl, knownSecrets),
-    endpointOverride: profile.endpointOverride === null ? null : redactUrl(profile.endpointOverride, knownSecrets),
+    baseUrl: redactUrl(profile.baseUrl, knownSecrets, redactionEnabled),
+    endpointOverride: profile.endpointOverride === null ? null : redactUrl(profile.endpointOverride, knownSecrets, redactionEnabled),
     modelId: backend.modelId,
     temperature,
     maxOutputTokens: backend.maxOutputTokens,
     reasoning: backend.reasoning,
-    headers: redactHeaders(profile.headers, knownSecrets),
-    extraBody: redactProviderJson(profile.extraBody, knownSecrets)
+    headers: redactHeaders(profile.headers, knownSecrets, redactionEnabled),
+    extraBody: redactProviderJson(profile.extraBody, knownSecrets, redactionEnabled),
+    redactionEnabled
   };
 }
 
-function safeProviderErrorMessage(profile: ProviderProfile, error: unknown): string {
+function safeProviderErrorMessage(profile: ProviderProfile, error: unknown, redactionEnabled: boolean): string {
   return redactProviderText(
     error instanceof Error ? error.message : String(error),
-    [profile.credential, ...Object.values(profile.headers)].filter(Boolean)
+    providerSecretValues(profile),
+    redactionEnabled
   );
 }
 
@@ -614,6 +626,7 @@ export class PayloadGenerationCoordinator {
 
   private async prepareAttempts(generation: PayloadGeneration, profileAsset: AssetRevision): Promise<PayloadGenerationDetail> {
     const value = payloadGeneratorProfileValueSchema.parse(profileAsset.value);
+    const { redactionEnabled } = await this.repository.getApplicationSettings();
     let provider: ProviderProfile | null = null;
     if (value.backend.kind === "http-provider") {
       provider = await this.repository.getProviderProfile(value.backend.providerProfileRevisionId);
@@ -628,8 +641,11 @@ export class PayloadGenerationCoordinator {
     for (let ordinal = 1; ordinal <= generation.candidateCount; ordinal += 1) {
       const temperature = value.backend.kind === "http-provider" ? value.backend.temperatures[generation.diversity] : null;
       const backendSnapshot = value.backend.kind === "http-provider" && provider
-        ? safeHttpBackendSnapshot(provider, value.backend, temperature ?? 0.7)
-        : redactJson(jsonClone(value.backend) as unknown as JsonValue) as JsonObject;
+        ? safeHttpBackendSnapshot(provider, value.backend, temperature ?? 0.7, redactionEnabled)
+        : {
+            ...(redactProviderJson(jsonClone(value.backend) as unknown as JsonValue, [], redactionEnabled) as JsonObject),
+            redactionEnabled
+          };
       attempts.push(await this.repository.createPayloadGenerationAttempt({
         generationId: generation.id,
         ordinal,
@@ -737,6 +753,7 @@ export class PayloadGenerationCoordinator {
   ): Promise<void> {
     const provider = await this.repository.getProviderProfile(backend.providerProfileRevisionId);
     if (!provider) throw new Error("Generator provider revision disappeared");
+    const redactionEnabled = attemptRedactionEnabled(attempt);
     const request: CanonicalGenerationRequest = {
       model: backend.modelId,
       messages: [{ role: "user", content: operatorPrompt }],
@@ -757,7 +774,11 @@ export class PayloadGenerationCoordinator {
     let compileWarnings: string[] = [];
     try {
       compileWarnings = compileProviderRequest(providerAdapterProfile(provider), request).warnings.map((warning) => warning.message);
-      for await (const item of executeProviderRequest(providerAdapterProfile(provider), request, { signal, fetch: this.fetchImpl })) {
+      for await (const item of executeProviderRequest(providerAdapterProfile(provider), request, {
+        signal,
+        fetch: this.fetchImpl,
+        redactionEnabled
+      })) {
         await trace.append({
           direction: item.trace.kind === "request" ? "request" : item.trace.kind === "error" ? "internal" : "response",
           kind: item.trace.kind === "sse" ? "sse" : item.trace.kind === "error" ? "error" : "body",
@@ -817,6 +838,7 @@ export class PayloadGenerationCoordinator {
           providerOutcome: outcome.toJson(),
           compileWarnings,
           techniqueWarnings,
+          redactionEnabled,
           ...(failure ? { error: failure as unknown as JsonValue } : {})
         },
         usage: usageValue,
@@ -852,7 +874,7 @@ export class PayloadGenerationCoordinator {
         });
         revisionCreated = true;
       }
-      const errorMessage = safeProviderErrorMessage(provider, error);
+      const errorMessage = safeProviderErrorMessage(provider, error, redactionEnabled);
       if (!finalized) {
         await trace.append({ direction: "internal", kind: "error", data: { message: errorMessage } });
         const stored = await trace.finalize();
@@ -863,7 +885,7 @@ export class PayloadGenerationCoordinator {
       await this.repository.updatePayloadGenerationAttempt(attempt.id, {
         status: cancelled ? "cancelled" : "failed",
         classification: cancelled ? "cancelled" : "unknown",
-        normalizedOutput: { text, reasoning, providerOutcome: outcome.toJson(), error: errorMessage },
+        normalizedOutput: { text, reasoning, providerOutcome: outcome.toJson(), redactionEnabled, error: errorMessage },
         finishedAt: nowIso()
       });
       this.events.publish(`payload-generation:${generation.id}`, "candidate.failed", { attemptId: attempt.id, ordinal: attempt.ordinal, classification: cancelled ? "cancelled" : "unknown", text, reasoning });
@@ -882,6 +904,7 @@ export class PayloadGenerationCoordinator {
     signal: AbortSignal
   ): Promise<void> {
     if (!this.codex) throw new Error("Codex App Server support is unavailable");
+    const redactionEnabled = attemptRedactionEnabled(attempt);
     const project = await this.repository.getProject(generation.projectId);
     if (!project) throw new Error("Project disappeared");
     const parentAttempt = generation.parentRevisionId
@@ -901,6 +924,7 @@ export class PayloadGenerationCoordinator {
         parentNativeTurnId: parentAttempt?.nativeTurnId ?? null,
         isRefinement: generation.parentRevisionId !== null,
         signal,
+        redactionEnabled,
         onText: (delta) => {
           streamedText += delta;
           this.events.publish(`payload-generation:${generation.id}`, "candidate.text.delta", { attemptId: attempt.id, ordinal: attempt.ordinal, text: delta });
@@ -927,7 +951,7 @@ export class PayloadGenerationCoordinator {
       await this.repository.updatePayloadGenerationAttempt(attempt.id, {
         status: result.classification === "cancelled" ? "cancelled" : result.classification ? "failed" : "completed",
         classification: result.classification,
-        normalizedOutput: { text: result.text, reasoning: result.reasoning, metadata: result.metadata, techniqueWarnings },
+        normalizedOutput: { text: result.text, reasoning: result.reasoning, metadata: result.metadata, techniqueWarnings, redactionEnabled },
         usage: result.usage,
         traceHash: result.traceHash,
         nativeThreadId: result.nativeThreadId,
@@ -970,7 +994,12 @@ export class PayloadGenerationCoordinator {
       await this.repository.updatePayloadGenerationAttempt(attempt.id, {
         status: cancelled ? "cancelled" : "failed",
         classification,
-        normalizedOutput: { text: streamedText, reasoning: streamedReasoning, error: error instanceof Error ? error.message : String(error) },
+        normalizedOutput: {
+          text: streamedText,
+          reasoning: streamedReasoning,
+          redactionEnabled,
+          error: error instanceof Error ? error.message : String(error)
+        },
         ...(typeof details.traceHash === "string" ? { traceHash: details.traceHash } : {}),
         finishedAt: nowIso()
       });

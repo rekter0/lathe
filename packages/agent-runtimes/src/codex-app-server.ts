@@ -653,6 +653,7 @@ class CodexRunController {
   readonly #queue = new AsyncQueue<CodexStreamItem>();
   readonly #completion = deferred<CodexRunResult>();
   readonly #cleanupWorkspace: () => Promise<void>;
+  readonly #redactionEnabled: boolean;
   readonly #textByItem = new Map<string, string>();
   readonly #reasoningByItem = new Map<string, string>();
   readonly #summaryByItem = new Map<string, string>();
@@ -673,8 +674,9 @@ class CodexRunController {
   #signal: AbortSignal | undefined;
   #abortListener: (() => void) | undefined;
 
-  constructor(cleanupWorkspaceImpl: () => Promise<void>) {
+  constructor(cleanupWorkspaceImpl: () => Promise<void>, redactionEnabled: boolean) {
     this.#cleanupWorkspace = cleanupWorkspaceImpl;
+    this.#redactionEnabled = redactionEnabled;
   }
 
   bindConnection(connection: CodexAppServerProcess): void {
@@ -694,7 +696,7 @@ class CodexRunController {
   }
 
   onWarning(code: string, message: string): void {
-    this.#emit({ type: "runtime.warning", code, message: redactRuntimeText(message) });
+    this.#emit({ type: "runtime.warning", code, message: this.#evidenceText(message) });
   }
 
   onRequestRejected(method: string, kind: RejectedRuntimeRequestKind): void {
@@ -756,7 +758,7 @@ class CodexRunController {
       const errorCode = stringValue(error.code);
       const terminal = (): void => this.#finishFailed(new CodexRuntimeError(
         "runtime-error",
-        redactRuntimeText(message),
+        this.#evidenceText(message),
         errorCode === undefined ? {} : { code: errorCode },
       ));
       if (this.#ready) terminal();
@@ -882,7 +884,7 @@ class CodexRunController {
     const errorCode = stringValue(error.code, status);
     this.#finishFailed(new CodexRuntimeError(
       "runtime-error",
-      redactRuntimeText(stringValue(error.message) ?? `Codex turn ended with status ${status}`),
+      this.#evidenceText(stringValue(error.message) ?? `Codex turn ended with status ${status}`),
       errorCode === undefined ? {} : { code: errorCode },
     ), status);
   }
@@ -944,13 +946,13 @@ class CodexRunController {
       continuity: this.#continuity,
       failure: {
         classification: error.classification,
-        message: redactRuntimeText(error.message),
+        message: this.#evidenceText(error.message),
         ...(error.code === undefined ? {} : { code: error.code }),
       },
     }, {
       type: "run.failed",
       classification: error.classification,
-      message: redactRuntimeText(error.message),
+      message: this.#evidenceText(error.message),
     }, "failed");
   }
 
@@ -965,6 +967,10 @@ class CodexRunController {
 
   #emit(event: CodexNormalizedEvent): void {
     this.#queue.push({ events: [event] });
+  }
+
+  #evidenceText(value: string): string {
+    return this.#redactionEnabled ? redactRuntimeText(value) : value;
   }
 
   #startCleanup(reason: string): Promise<void> {
@@ -1077,7 +1083,7 @@ export class CodexAppServerAdapter implements CodexAppServerAdapterContract {
   async start(
     profile: CodexAppServerProfile,
     request: CodexGenerationRequest,
-    options: { readonly signal?: AbortSignal } = {},
+    options: { readonly signal?: AbortSignal; readonly redactionEnabled?: boolean } = {},
   ): Promise<CodexRuntimeRun> {
     validateProfile(profile);
     if (options.signal?.aborted === true) {
@@ -1095,13 +1101,18 @@ export class CodexAppServerAdapter implements CodexAppServerAdapterContract {
       await cleanupWorkspace(workspace);
       throw new CodexRuntimeError("cancelled", "Codex run was cancelled during startup");
     }
-    const controller = new CodexRunController(async () => await cleanupWorkspace(workspace));
+    const redactionEnabled = options.redactionEnabled ?? true;
+    const controller = new CodexRunController(
+      async () => await cleanupWorkspace(workspace),
+      redactionEnabled,
+    );
     let connection: CodexAppServerProcess | undefined;
     try {
       connection = await CodexAppServerProcess.spawn(
         profile,
         workspace.cwd,
         controllerCallbacks(controller),
+        { redactionEnabled },
       );
       controller.bindConnection(connection);
       controller.bindSignal(options.signal);

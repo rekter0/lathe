@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { ZodError, z, type ZodType } from "zod";
 import {
+  applicationSettingsInputSchema,
   appendMessageSchema,
   compareBranches,
   createAutomationSchema,
@@ -32,6 +33,7 @@ import {
   ProviderCompileError,
   compileProviderRequest,
   discoverProviderModels,
+  providerSecretValues,
   redactJson as redactProviderJson,
   redactText
 } from "@lathe/providers";
@@ -188,7 +190,7 @@ export function createApp(dependencies: AppDependencies): Hono {
     if (error instanceof HTTPException) return context.json({ error: { code: "http-error", message: error.message } }, error.status);
     const correlationId = uuidv7();
     console.error(`[lathe:${correlationId}] Internal request failure`);
-    return context.json({ error: { code: "internal-error", message: "The request failed internally. Inspect the redacted run/operation trace for details.", correlationId } }, 500);
+    return context.json({ error: { code: "internal-error", message: "The request failed internally. Inspect the captured run/operation trace for details.", correlationId } }, 500);
   });
 
   app.get("/api/health", (context) => context.json({ ok: true, service: "lathe", version: "0.1.0" }));
@@ -198,6 +200,17 @@ export function createApp(dependencies: AppDependencies): Hono {
     dataDirectory: dependencies.dataDirectory,
     warnings: ["Credentials are stored plaintext in the Lathe database. Exports and ordinary API responses exclude them."]
   }));
+
+  app.get("/api/application-settings", async (context) => {
+    context.header("Cache-Control", "no-store");
+    return context.json({ settings: await repository.getApplicationSettings() });
+  });
+  app.patch("/api/application-settings", async (context) => {
+    const input = await parseBody(context.req.raw, applicationSettingsInputSchema);
+    const settings = await repository.upsertApplicationSettings(input);
+    context.header("Cache-Control", "no-store");
+    return context.json({ settings });
+  });
 
   app.get("/api/projects", async (context) => context.json({ projects: await repository.listProjects() }));
   app.post("/api/projects", async (context) => {
@@ -408,19 +421,20 @@ export function createApp(dependencies: AppDependencies): Hono {
     } catch {
       throw new HTTPException(409, { message: "The branch graph is incomplete and cannot be exported" });
     }
-    const secrets = await collectExportSecrets(repository);
+    const { redactionEnabled } = await repository.getApplicationSettings();
+    const secrets = await collectExportSecrets(repository, redactionEnabled);
     await validateBranchExportAttachments(repository, contentStore, session.projectId, path, secrets);
-    const config = resolvedProviderConfig(profile, session.modelId, session.draftConfig);
+    const config = resolvedProviderConfig(profile, session.modelId, session.draftConfig, redactionEnabled);
 
     try {
       const request = await buildCanonicalGenerationRequest(repository, contentStore, path, config, profile, false);
       const safeProfile = {
         ...transportProviderProfile(profile),
-        extraBody: redactProviderJson(profile.extraBody, secrets) as JsonObject
+        extraBody: redactProviderJson(profile.extraBody, secrets, redactionEnabled) as JsonObject
       };
       const safeRequest = {
         ...request,
-        extraBody: redactProviderJson(request.extraBody ?? {}, secrets) as JsonObject
+        extraBody: redactProviderJson(request.extraBody ?? {}, secrets, redactionEnabled) as JsonObject
       };
       const compiled = compileProviderRequest(safeProfile, safeRequest);
       const body = redactKnownValues(compiled.body, secrets);
@@ -523,10 +537,11 @@ export function createApp(dependencies: AppDependencies): Hono {
     const result = await discoverProviderModels(profile, {
       ...(dependencies.providerFetch ? { fetch: dependencies.providerFetch } : {})
     });
-    const secrets = [profile.credential, ...Object.values(profile.headers)].filter((value) => value.length >= 4);
+    const { redactionEnabled } = await repository.getApplicationSettings();
+    const secrets = providerSecretValues(profile);
     return context.json({
       models: result.models,
-      warnings: result.warnings.map((warning) => redactText(warning, secrets))
+      warnings: result.warnings.map((warning) => redactText(warning, secrets, redactionEnabled))
     });
   });
   app.post("/api/providers/:id/revisions", async (context) => {

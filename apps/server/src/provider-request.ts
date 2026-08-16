@@ -11,6 +11,7 @@ import {
   redactHeaders,
   redactJson,
   redactUrl,
+  providerSecretValues,
   type CanonicalContentPart,
   type CanonicalGenerationRequest,
   type CanonicalMessage,
@@ -18,9 +19,14 @@ import {
   type ProviderProfile as TransportProviderProfile
 } from "@lathe/providers";
 
-export function resolvedProviderConfig(profile: ProviderProfile, modelId: string, config: ResolvedConfig): ResolvedConfig {
-  const knownSecrets = [profile.credential, ...Object.values(profile.headers)].filter(Boolean);
-  const headers = redactHeaders(profile.headers, knownSecrets);
+export function resolvedProviderConfig(
+  profile: ProviderProfile,
+  modelId: string,
+  config: ResolvedConfig,
+  redactionEnabled = true,
+): ResolvedConfig {
+  const knownSecrets = providerSecretValues(profile);
+  const headers = redactHeaders(profile.headers, knownSecrets, redactionEnabled);
   const model = profile.models.find((entry) => entry.id === modelId);
   return {
     ...structuredClone(config),
@@ -30,13 +36,13 @@ export function resolvedProviderConfig(profile: ProviderProfile, modelId: string
       profileRevision: profile.revision,
       protocol: profile.protocol,
       label: profile.label,
-      baseUrl: redactUrl(profile.baseUrl, knownSecrets),
+      baseUrl: redactUrl(profile.baseUrl, knownSecrets, redactionEnabled),
       endpointOverride: profile.endpointOverride === null
         ? null
-        : redactUrl(profile.endpointOverride, knownSecrets),
+        : redactUrl(profile.endpointOverride, knownSecrets, redactionEnabled),
       modelId,
       headers,
-      extraBody: redactJson(profile.extraBody, knownSecrets) as JsonObject,
+      extraBody: redactJson(profile.extraBody, knownSecrets, redactionEnabled) as JsonObject,
       capabilities: model?.capabilities ?? {
         streaming: true,
         tools: true,

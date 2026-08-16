@@ -99,6 +99,7 @@ export class CodexAppServerPayloadGenerator implements CodexPayloadGenerator {
     parentNativeTurnId: string | null;
     isRefinement: boolean;
     signal: AbortSignal;
+    redactionEnabled: boolean;
     onText(delta: string): void;
     onReasoning(delta: string): void;
   }): Promise<CodexGenerationResult> {
@@ -160,7 +161,7 @@ export class CodexAppServerPayloadGenerator implements CodexPayloadGenerator {
             onUnavailable: "fresh-with-warning" as const
           }
         })
-      }, { signal });
+      }, { signal, redactionEnabled: input.redactionEnabled });
 
       for await (const item of run.events) {
         if (item.trace) {

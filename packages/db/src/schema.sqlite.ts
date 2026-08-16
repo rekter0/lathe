@@ -227,6 +227,13 @@ export const automationJobs = sqliteTable(
   (table) => [index("automation_jobs_session_idx").on(table.sessionId)]
 );
 
+export const applicationSettings = sqliteTable("application_settings", {
+  id: text("id").primaryKey(),
+  redactionEnabled: integer("redaction_enabled", { mode: "boolean" }).notNull().default(true),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+});
+
 export const payloadWorkbenchSettings = sqliteTable("payload_workbench_settings", {
   id: text("id").primaryKey(),
   defaultGeneratorProfileRevisionId: text("default_generator_profile_revision_id"),
@@ -360,6 +367,7 @@ export const sqliteSchema = {
   attachments,
   findings,
   automationJobs,
+  applicationSettings,
   payloadWorkbenchSettings,
   sessionPayloadWorkbenchSettings,
   payloadGenerations,

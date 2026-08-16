@@ -52,7 +52,11 @@ function optionalString(record: Record<string, unknown>, key: string): string | 
   return typeof value === "string" ? value : undefined;
 }
 
-function toolSnapshot(input: unknown): McpToolSnapshot {
+function toolSnapshot(
+  input: unknown,
+  secrets: readonly string[],
+  redactionEnabled: boolean,
+): McpToolSnapshot {
   const tool = asRecord(input);
   if (typeof tool.name !== "string" || tool.name.length === 0) {
     throw new Error("MCP server returned a tool without a name");
@@ -61,13 +65,17 @@ function toolSnapshot(input: unknown): McpToolSnapshot {
   return {
     name: tool.name,
     ...(description === undefined ? {} : { description }),
-    inputSchema: redactJson(tool.inputSchema ?? {}),
-    ...(tool.outputSchema === undefined ? {} : { outputSchema: redactJson(tool.outputSchema) }),
-    ...(tool.annotations === undefined ? {} : { annotations: redactJson(tool.annotations) }),
+    inputSchema: redactJson(tool.inputSchema ?? {}, secrets, redactionEnabled),
+    ...(tool.outputSchema === undefined ? {} : { outputSchema: redactJson(tool.outputSchema, secrets, redactionEnabled) }),
+    ...(tool.annotations === undefined ? {} : { annotations: redactJson(tool.annotations, secrets, redactionEnabled) }),
   };
 }
 
-function promptSnapshot(input: unknown): McpPromptSnapshot {
+function promptSnapshot(
+  input: unknown,
+  secrets: readonly string[],
+  redactionEnabled: boolean,
+): McpPromptSnapshot {
   const prompt = asRecord(input);
   if (typeof prompt.name !== "string" || prompt.name.length === 0) {
     throw new Error("MCP server returned a prompt without a name");
@@ -76,7 +84,7 @@ function promptSnapshot(input: unknown): McpPromptSnapshot {
   return {
     name: prompt.name,
     ...(description === undefined ? {} : { description }),
-    ...(prompt.arguments === undefined ? {} : { arguments: redactJson(prompt.arguments) }),
+    ...(prompt.arguments === undefined ? {} : { arguments: redactJson(prompt.arguments, secrets, redactionEnabled) }),
   };
 }
 
@@ -127,12 +135,15 @@ export async function captureCapabilitySnapshot(
     protocolVersion?: string;
     /** Resolved transport secrets are used only for redaction and are never retained. */
     secretValues?: readonly string[];
+    /** Heuristic evidence redaction; exact resolved secrets remain protected. */
+    redactionEnabled?: boolean;
   },
   now: () => Date = () => new Date(),
 ): Promise<McpCapabilitySnapshot> {
   const secrets = identity.secretValues ?? [];
+  const redactionEnabled = identity.redactionEnabled !== false;
   const rawCapabilities = asRecord(client.getServerCapabilities());
-  const declared = redactJson(rawCapabilities, secrets);
+  const declared = redactJson(rawCapabilities, secrets, redactionEnabled);
   const server = client.getServerVersion();
   const protocolVersion = identity.protocolVersion ?? client.getNegotiatedProtocolVersion?.();
   const instructions = client.getInstructions();
@@ -156,29 +167,29 @@ export async function captureCapabilitySnapshot(
     profileId: identity.profileId,
     profileRevision: identity.profileRevision,
     ...(protocolVersion === undefined ? {} : { protocolVersion }),
-    ...(server === undefined ? {} : { server: redactJson(server, secrets) }),
+    ...(server === undefined ? {} : { server: redactJson(server, secrets, redactionEnabled) }),
     ...(instructions === undefined
       ? {}
-      : { instructions: redactJson(instructions, secrets) as string }),
+      : { instructions: redactJson(instructions, secrets, redactionEnabled) as string }),
     declared,
     tools: tools
-      .map((tool) => toolSnapshot(redactJson(tool, secrets)))
+      .map((tool) => toolSnapshot(redactJson(tool, secrets, redactionEnabled), secrets, redactionEnabled))
       .sort((left, right) => left.name.localeCompare(right.name)),
     prompts: prompts
-      .map((prompt) => promptSnapshot(redactJson(prompt, secrets)))
+      .map((prompt) => promptSnapshot(redactJson(prompt, secrets, redactionEnabled), secrets, redactionEnabled))
       .sort((left, right) => left.name.localeCompare(right.name)),
     resources: resources
-      .map((resource) => redactJson(resource, secrets))
+      .map((resource) => redactJson(resource, secrets, redactionEnabled))
       .map(resourceSnapshot)
       .sort((left, right) => left.uri.localeCompare(right.uri)),
     resourceTemplates: resourceTemplates
-      .map((template) => redactJson(template, secrets))
+      .map((template) => redactJson(template, secrets, redactionEnabled))
       .map(templateSnapshot)
       .sort((left, right) => left.uriTemplate.localeCompare(right.uriTemplate)),
   } satisfies Omit<McpCapabilitySnapshot, "sha256">;
 
   const sha256 = createHash("sha256")
-    .update(canonicalJson(redactJson(withoutHash)))
+    .update(canonicalJson(redactJson(withoutHash, secrets, redactionEnabled)))
     .digest("hex");
   return { ...withoutHash, sha256 };
 }

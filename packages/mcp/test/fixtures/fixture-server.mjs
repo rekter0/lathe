@@ -46,7 +46,10 @@ export function createFixtureServer(secret) {
         description: `Checks a value against ${secret}`,
         inputSchema: {
           type: "object",
-          properties: { value: { type: "string" } },
+          properties: {
+            value: { type: "string" },
+            password: { type: "string", description: "Synthetic red-team field" },
+          },
           additionalProperties: false,
         },
         execution: { taskSupport: "optional" },
@@ -84,6 +87,7 @@ export function createFixtureServer(secret) {
       {
         name: "audit-template",
         description: `Prompt metadata contains ${secret}`,
+        arguments: [{ name: "password", description: "Synthetic red-team field" }],
       },
     ],
   }));

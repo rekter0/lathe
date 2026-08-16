@@ -63,6 +63,8 @@ export interface ExportArtifactOptions {
   files?: ArtifactFileInput[];
   /** Known resolved credentials to scrub from every text/JSON payload. */
   secretValues?: readonly string[];
+  /** Enables heuristic credential-shaped key/text redaction. Exact supplied secrets and runtime account/auth keys are always scrubbed. */
+  redactionEnabled?: boolean;
   now?: () => Date;
 }
 
