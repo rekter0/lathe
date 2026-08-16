@@ -7,6 +7,7 @@ import {
   emptyResolvedConfig,
   payloadWorkbenchSettingsInputSchema,
   resolvedConfigSchema,
+  sessionPayloadWorkbenchSettingsInputSchema,
   updateSessionMetadataSchema
 } from "../src/index.js";
 
@@ -119,5 +120,28 @@ describe("payload workbench schemas", () => {
     expect(createPayloadGenerationSchema.safeParse({ ...generation, diversity: "maximum" }).success).toBe(false);
     expect(createPayloadGenerationSchema.safeParse({ ...generation, contextOptions: { ...options, contextMode: "project" } }).success).toBe(false);
     expect(createPayloadGenerationSchema.safeParse({ ...generation, techniqueRevisionIds: ["technique", "technique"] }).success).toBe(false);
+  });
+
+  it("validates a complete session-scoped workbench draft", () => {
+    const settings = {
+      generatorProfileRevisionId: "profile-r2",
+      instructionRevisionId: "instruction-r3",
+      techniqueRevisionIds: ["technique-r1", "technique-r2"],
+      pipelineRevisionId: "pipeline-r4",
+      operatorInstruction: "Generate a concise variation.",
+      variables: { objective: "Test hierarchy handling" },
+      candidateCount: 3,
+      diversity: "high" as const,
+      ...options
+    };
+    expect(sessionPayloadWorkbenchSettingsInputSchema.parse(settings)).toEqual(settings);
+    expect(sessionPayloadWorkbenchSettingsInputSchema.safeParse({
+      ...settings,
+      techniqueRevisionIds: ["technique-r1", "technique-r1"]
+    }).success).toBe(false);
+    expect(sessionPayloadWorkbenchSettingsInputSchema.safeParse({
+      ...settings,
+      variables: { objective: "x".repeat(20_001) }
+    }).success).toBe(false);
   });
 });

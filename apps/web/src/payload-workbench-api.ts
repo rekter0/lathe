@@ -29,6 +29,18 @@ export interface PayloadWorkbenchSettings extends PayloadGenerationOptions {
   diversity: PayloadDiversity;
 }
 
+/** The operator's last Payload Workbench choices for one session. */
+export interface PayloadWorkbenchSessionSettings extends PayloadGenerationOptions {
+  generatorProfileRevisionId: string | null;
+  instructionRevisionId: string | null;
+  techniqueRevisionIds: string[];
+  pipelineRevisionId: string | null;
+  variables: Record<string, string>;
+  operatorInstruction: string;
+  candidateCount: 1 | 2 | 3 | 4;
+  diversity: PayloadDiversity;
+}
+
 export const defaultPayloadWorkbenchSettings: PayloadWorkbenchSettings = {
   defaultGeneratorProfileRevisionId: null,
   defaultInstructionRevisionId: null,
@@ -230,6 +242,42 @@ export function normalizePayloadWorkbenchSettings(value: unknown): PayloadWorkbe
     includeSessionBrief: booleanValue(source.includeSessionBrief ?? context.includeSessionBrief) ?? defaultPayloadWorkbenchSettings.includeSessionBrief,
     includeTargetConfig: booleanValue(source.includeTargetConfig ?? context.includeTargetConfig) ?? defaultPayloadWorkbenchSettings.includeTargetConfig,
     budgetChars: Math.max(2_000, Math.min(200_000, Math.round(numberValue(source.budgetChars ?? context.budgetChars) ?? defaultPayloadWorkbenchSettings.budgetChars)))
+  };
+}
+
+function nullableString(source: Record<string, unknown>, key: string, fallback: string | null): string | null {
+  if (source[key] === null) return null;
+  return stringValue(source[key]) ?? fallback;
+}
+
+/**
+ * Session choices are a copy-on-write layer over the operator's global
+ * defaults. Older/missing rows therefore continue to receive safe defaults.
+ */
+export function normalizePayloadWorkbenchSessionSettings(
+  value: unknown,
+  fallback: PayloadWorkbenchSettings
+): PayloadWorkbenchSessionSettings {
+  const source = objectValue(value) ?? {};
+  const normalized = normalizePayloadWorkbenchSettings({ ...fallback, ...source });
+  const variables = objectValue(source.variables) ?? {};
+  const techniqueIds = Array.isArray(source.techniqueRevisionIds)
+    ? source.techniqueRevisionIds.filter((item): item is string => typeof item === "string" && item.length > 0)
+    : [];
+  return {
+    generatorProfileRevisionId: nullableString(source, "generatorProfileRevisionId", fallback.defaultGeneratorProfileRevisionId),
+    instructionRevisionId: nullableString(source, "instructionRevisionId", fallback.defaultInstructionRevisionId),
+    techniqueRevisionIds: [...new Set(techniqueIds)],
+    pipelineRevisionId: nullableString(source, "pipelineRevisionId", null),
+    variables: Object.fromEntries(Object.entries(variables).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
+    operatorInstruction: stringValue(source.operatorInstruction) ?? "",
+    candidateCount: normalized.candidateCount,
+    diversity: normalized.diversity,
+    contextMode: normalized.contextMode,
+    includeProjectBrief: normalized.includeProjectBrief,
+    includeSessionBrief: normalized.includeSessionBrief,
+    includeTargetConfig: normalized.includeTargetConfig,
+    budgetChars: normalized.budgetChars
   };
 }
 

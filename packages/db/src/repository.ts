@@ -7,6 +7,7 @@ import {
   emptyResolvedConfig,
   nowIso,
   payloadWorkbenchSettingsInputSchema,
+  sessionPayloadWorkbenchSettingsInputSchema,
   sha256Json,
   updatePayloadGenerationAttemptSchema,
   updatePayloadGenerationSchema,
@@ -39,7 +40,9 @@ import {
   type RunClassification,
   type RunStatus,
   type SecretMetadata,
-  type Session
+  type Session,
+  type SessionPayloadWorkbenchSettings,
+  type SessionPayloadWorkbenchSettingsInput
 } from "@lathe/domain";
 
 export interface CreateProjectInput {
@@ -161,6 +164,8 @@ export interface LatheRepository {
   getPayloadWorkbenchSettings(): Promise<PayloadWorkbenchSettings | null>;
   upsertPayloadWorkbenchSettings(input: PayloadWorkbenchSettingsInput): Promise<PayloadWorkbenchSettings>;
   deletePayloadWorkbenchSettings(): Promise<boolean>;
+  getSessionPayloadWorkbenchSettings(sessionId: string): Promise<SessionPayloadWorkbenchSettings | null>;
+  upsertSessionPayloadWorkbenchSettings(sessionId: string, input: SessionPayloadWorkbenchSettingsInput): Promise<SessionPayloadWorkbenchSettings>;
   createPayloadGeneration(input: CreatePayloadGenerationInput): Promise<PayloadGeneration>;
   getPayloadGeneration(id: string, includeDeleted?: boolean): Promise<PayloadGeneration | null>;
   getActivePayloadGeneration(sessionId: string): Promise<PayloadGeneration | null>;
@@ -724,11 +729,12 @@ export class DrizzleLatheRepository implements LatheRepository {
     assets: AssetRevision[];
     jobs: AutomationJob[];
     payloadSettings: PayloadWorkbenchSettings | null;
+    sessionPayloadSettings: SessionPayloadWorkbenchSettings[];
     payloadGenerations: PayloadGeneration[];
     payloadAttempts: PayloadGenerationAttempt[];
     payloadRevisions: PayloadRevision[];
   }> {
-    const [projects, sessions, checkpoints, snapshots, assets, jobs, payloadSettings, payloadGenerations, payloadAttempts, payloadRevisions] = await Promise.all([
+    const [projects, sessions, checkpoints, snapshots, assets, jobs, payloadSettings, sessionPayloadSettings, payloadGenerations, payloadAttempts, payloadRevisions] = await Promise.all([
       this.all<Project>(this.db.select().from(this.schema.projects)),
       this.all<Session>(this.db.select().from(this.schema.sessions)),
       this.all<Checkpoint>(this.db.select().from(this.schema.checkpoints)),
@@ -736,11 +742,12 @@ export class DrizzleLatheRepository implements LatheRepository {
       this.listAssetRevisions(),
       this.all<AutomationJob>(this.db.select().from(this.schema.automationJobs)),
       this.getPayloadWorkbenchSettings(),
+      this.all<SessionPayloadWorkbenchSettings>(this.db.select().from(this.schema.sessionPayloadWorkbenchSettings)),
       this.all<PayloadGeneration>(this.db.select().from(this.schema.payloadGenerations)),
       this.all<PayloadGenerationAttempt>(this.db.select().from(this.schema.payloadGenerationAttempts)),
       this.all<PayloadRevision>(this.db.select().from(this.schema.payloadRevisions))
     ]);
-    return { projects, sessions, checkpoints, snapshots, assets, jobs, payloadSettings, payloadGenerations, payloadAttempts, payloadRevisions };
+    return { projects, sessions, checkpoints, snapshots, assets, jobs, payloadSettings, sessionPayloadSettings, payloadGenerations, payloadAttempts, payloadRevisions };
   }
 
   private async providerReferences(id: string): Promise<ResourceReference[]> {
@@ -772,7 +779,7 @@ export class DrizzleLatheRepository implements LatheRepository {
   }
 
   private async assetReferences(id: string): Promise<ResourceReference[]> {
-    const { projects, sessions, snapshots, assets, jobs, payloadSettings, payloadGenerations } = await this.referenceRows();
+    const { projects, sessions, snapshots, assets, jobs, payloadSettings, sessionPayloadSettings, payloadGenerations } = await this.referenceRows();
     const references: ResourceReference[] = [];
     for (const project of projects) {
       if (project.defaultHarnessRevisionId === id) references.push({ kind: "project", id: project.id, label: project.name, detail: "default harness" });
@@ -792,6 +799,22 @@ export class DrizzleLatheRepository implements LatheRepository {
     if (payloadSettings?.defaultGeneratorProfileRevisionId === id || payloadSettings?.defaultInstructionRevisionId === id) {
       references.push({ kind: "payload-settings", id: payloadSettings.id, label: "Payload workbench defaults", detail: "selected default revision" });
     }
+    for (const settings of sessionPayloadSettings) {
+      if (
+        settings.generatorProfileRevisionId === id
+        || settings.instructionRevisionId === id
+        || settings.pipelineRevisionId === id
+        || settings.techniqueRevisionIds.includes(id)
+      ) {
+        const session = sessions.find((item) => item.id === settings.sessionId);
+        references.push({
+          kind: "payload-settings",
+          id: settings.sessionId,
+          label: session?.name ?? settings.sessionId,
+          detail: "selected session Payload Workbench revision"
+        });
+      }
+    }
     for (const generation of payloadGenerations) {
       if (
         generation.generatorProfileRevisionId === id
@@ -806,7 +829,7 @@ export class DrizzleLatheRepository implements LatheRepository {
   }
 
   private async secretReferences(id: string): Promise<ResourceReference[]> {
-    const { sessions, snapshots, assets, jobs, payloadGenerations, payloadAttempts, payloadRevisions } = await this.referenceRows();
+    const { sessions, snapshots, assets, jobs, sessionPayloadSettings, payloadGenerations, payloadAttempts, payloadRevisions } = await this.referenceRows();
     const references: ResourceReference[] = [];
     for (const session of sessions) {
       if (jsonReferences(session.draftConfig as unknown as JsonValue, id)) references.push({ kind: "session", id: session.id, label: session.name, detail: "session draft" });
@@ -819,6 +842,12 @@ export class DrizzleLatheRepository implements LatheRepository {
     }
     for (const job of jobs) {
       if (jsonReferences(job.plan, id)) references.push({ kind: "automation", id: job.id, label: job.kind, detail: "saved automation plan" });
+    }
+    for (const settings of sessionPayloadSettings) {
+      if (jsonReferences(settings.variables, id)) {
+        const session = sessions.find((item) => item.id === settings.sessionId);
+        references.push({ kind: "payload-settings", id: settings.sessionId, label: session?.name ?? settings.sessionId, detail: "session Payload Workbench variables" });
+      }
     }
     for (const generation of payloadGenerations) {
       if (
@@ -938,6 +967,47 @@ export class DrizzleLatheRepository implements LatheRepository {
         .where(eq(this.schema.payloadWorkbenchSettings.id, "global"))
         .returning()
     ));
+  }
+
+  async getSessionPayloadWorkbenchSettings(sessionId: string): Promise<SessionPayloadWorkbenchSettings | null> {
+    return this.get(
+      this.db.select().from(this.schema.sessionPayloadWorkbenchSettings)
+        .where(eq(this.schema.sessionPayloadWorkbenchSettings.sessionId, sessionId))
+    );
+  }
+
+  async upsertSessionPayloadWorkbenchSettings(
+    sessionId: string,
+    input: SessionPayloadWorkbenchSettingsInput
+  ): Promise<SessionPayloadWorkbenchSettings> {
+    const parsed = sessionPayloadWorkbenchSettingsInputSchema.parse(input);
+    if (!await this.getSession(sessionId)) throw new Error("Payload Workbench session does not exist");
+    if (parsed.generatorProfileRevisionId) {
+      await this.requireAssetRevision(parsed.generatorProfileRevisionId, "payload-generator-profile", "Generator profile");
+    }
+    if (parsed.instructionRevisionId) {
+      await this.requireAssetRevision(parsed.instructionRevisionId, "payload-generator-instruction", "Generator instruction");
+    }
+    for (const techniqueRevisionId of parsed.techniqueRevisionIds) {
+      await this.requireAssetRevision(techniqueRevisionId, "payload-technique", "Technique");
+    }
+    if (parsed.pipelineRevisionId) {
+      await this.requireAssetRevision(parsed.pipelineRevisionId, "payload-pipeline", "Pipeline");
+    }
+
+    const timestamp = nowIso();
+    const settings: SessionPayloadWorkbenchSettings = {
+      sessionId,
+      ...parsed,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    return this.returning(
+      this.db.insert(this.schema.sessionPayloadWorkbenchSettings).values(settings).onConflictDoUpdate({
+        target: this.schema.sessionPayloadWorkbenchSettings.sessionId,
+        set: { ...parsed, updatedAt: timestamp }
+      }).returning()
+    );
   }
 
   private async validatePayloadGenerationReferences(input: {

@@ -330,6 +330,21 @@ export interface PayloadWorkbenchSettings extends PayloadGenerationOptions {
   updatedAt: IsoDateTime;
 }
 
+/** Mutable Payload Workbench choices scoped to one session. */
+export interface SessionPayloadWorkbenchSettings extends PayloadGenerationOptions {
+  sessionId: Id;
+  generatorProfileRevisionId: Id | null;
+  instructionRevisionId: Id | null;
+  techniqueRevisionIds: Id[];
+  pipelineRevisionId: Id | null;
+  operatorInstruction: string;
+  variables: Record<string, string>;
+  candidateCount: number;
+  diversity: PayloadDiversity;
+  createdAt: IsoDateTime;
+  updatedAt: IsoDateTime;
+}
+
 export type PayloadGenerationStatus =
   | "queued"
   | "streaming"

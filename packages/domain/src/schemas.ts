@@ -5,6 +5,7 @@ import type {
   PayloadGenerationStatus,
   PayloadRevisionOperation,
   PayloadWorkbenchSettings,
+  SessionPayloadWorkbenchSettings,
   ResolvedConfig
 } from "./types.js";
 
@@ -191,6 +192,25 @@ export const payloadWorkbenchSettingsInputSchema = z.object({
   budgetChars: z.number().int().min(2_000).max(200_000)
 }) satisfies z.ZodType<Omit<PayloadWorkbenchSettings, "id" | "createdAt" | "updatedAt">>;
 
+export const sessionPayloadWorkbenchSettingsInputSchema = z.object({
+  generatorProfileRevisionId: idSchema.nullable(),
+  instructionRevisionId: idSchema.nullable(),
+  techniqueRevisionIds: z.array(idSchema).max(100).refine(
+    (ids) => new Set(ids).size === ids.length,
+    "Payload technique revision IDs must be unique"
+  ),
+  pipelineRevisionId: idSchema.nullable(),
+  operatorInstruction: z.string().max(200_000),
+  variables: z.record(z.string(), z.string().max(20_000)),
+  candidateCount: z.number().int().min(1).max(4),
+  diversity: payloadDiversitySchema,
+  contextMode: payloadContextModeSchema,
+  includeProjectBrief: z.boolean(),
+  includeSessionBrief: z.boolean(),
+  includeTargetConfig: z.boolean(),
+  budgetChars: z.number().int().min(2_000).max(200_000)
+}) satisfies z.ZodType<Omit<SessionPayloadWorkbenchSettings, "sessionId" | "createdAt" | "updatedAt">>;
+
 export const payloadGenerationStatusSchema = z.enum([
   "queued",
   "streaming",
@@ -295,6 +315,7 @@ export const createPayloadRevisionSchema = z.object({
 });
 
 export type PayloadWorkbenchSettingsInput = z.input<typeof payloadWorkbenchSettingsInputSchema>;
+export type SessionPayloadWorkbenchSettingsInput = z.input<typeof sessionPayloadWorkbenchSettingsInputSchema>;
 export type CreatePayloadGenerationInput = z.input<typeof createPayloadGenerationSchema>;
 export type UpdatePayloadGenerationInput = z.input<typeof updatePayloadGenerationSchema>;
 export type CreatePayloadGenerationAttemptInput = z.input<typeof createPayloadGenerationAttemptSchema>;

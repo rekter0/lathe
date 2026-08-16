@@ -12,6 +12,7 @@ import {
   candidatesFromDetail,
   defaultPayloadWorkbenchSettings,
   normalizePayloadContextPreview,
+  normalizePayloadWorkbenchSessionSettings,
   normalizePayloadWorkbenchSettings,
   payloadContextRequestOptions,
   reducePayloadGenerationEvent,
@@ -25,6 +26,7 @@ import {
   type PayloadRevision,
   type PayloadOutcome,
   type PayloadWorkbenchSettings,
+  type PayloadWorkbenchSessionSettings,
   type StreamingPayloadCandidate
 } from "../payload-workbench-api.js";
 import { Button, Field, Input, Select, Textarea } from "./forms.js";
@@ -299,7 +301,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
   const [undoStack, setUndoStack] = useState<string[]>([]);
   const [transformError, setTransformError] = useState<string | null>(null);
   const [settingsDraft, setSettingsDraft] = useState(defaultPayloadWorkbenchSettings);
-  const [defaultsApplied, setDefaultsApplied] = useState(false);
+  const [hydratedSettingsKey, setHydratedSettingsKey] = useState<string | null>(null);
   const [operatorInstruction, setOperatorInstruction] = useState("");
   const [profileRevisionId, setProfileRevisionId] = useState("");
   const [instructionRevisionId, setInstructionRevisionId] = useState("");
@@ -317,8 +319,18 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
   const [candidates, setCandidates] = useState<StreamingPayloadCandidate[]>([]);
   const [revisions, setRevisions] = useState<PayloadRevision[]>([]);
   const [diffIds, setDiffIds] = useState<string[]>([]);
+  const [sessionSettingsError, setSessionSettingsError] = useState<{ sessionId: string; message: string } | null>(null);
+  const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastScheduledSessionSettings = useRef(new Map<string, string>());
+  const pendingSessionSettings = useRef(new Map<string, { settings: PayloadWorkbenchSessionSettings; serialized: string }>());
 
   const settingsQuery = useQuery({ queryKey: ["payload-workbench", "settings"], queryFn: () => api<{ settings: unknown }>("/api/payload-workbench/settings"), enabled: open });
+  const sessionSettingsQuery = useQuery({
+    queryKey: ["payload-workbench", "session-settings", context?.sessionId],
+    queryFn: () => api<{ settings: unknown }>(`/api/sessions/${context!.sessionId}/payload-workbench/settings`),
+    enabled: open && Boolean(context),
+    refetchOnMount: "always"
+  });
   const profileAssets = usePayloadAssets("payload-generator-profile", open);
   const instructionAssets = usePayloadAssets("payload-generator-instruction", open);
   const techniqueAssets = usePayloadAssets("payload-technique", open);
@@ -360,17 +372,99 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
       return status && ["queued", "streaming"].includes(status) ? 1_000 : false;
     }
   });
+  const sessionSettingsDraft: PayloadWorkbenchSessionSettings = {
+    generatorProfileRevisionId: profileRevisionId || null,
+    instructionRevisionId: instructionRevisionId || null,
+    techniqueRevisionIds,
+    pipelineRevisionId: pipelineRevisionId || null,
+    variables: variablesAsStrings(variables),
+    operatorInstruction,
+    candidateCount: settingsDraft.candidateCount,
+    diversity: settingsDraft.diversity,
+    contextMode: settingsDraft.contextMode,
+    includeProjectBrief: settingsDraft.includeProjectBrief,
+    includeSessionBrief: settingsDraft.includeSessionBrief,
+    includeTargetConfig: settingsDraft.includeTargetConfig,
+    budgetChars: settingsDraft.budgetChars
+  };
+  const serializedSessionSettings = JSON.stringify(sessionSettingsDraft);
+  const currentSettingsKey = context?.sessionId ?? "standalone";
+  const sessionSettingsReady = open && hydratedSettingsKey === currentSettingsKey;
+  const saveSessionSettings = useMutation({
+    scope: { id: "payload-workbench-session-settings" },
+    mutationFn: ({ sessionId, settings }: { sessionId: string; settings: PayloadWorkbenchSessionSettings; serialized: string }) =>
+      api<{ settings: unknown }>(`/api/sessions/${sessionId}/payload-workbench/settings`, { method: "PUT", ...jsonBody(settings) }),
+    onSuccess: (response, request) => {
+      queryClient.setQueryData(["payload-workbench", "session-settings", request.sessionId], { settings: response.settings ?? request.settings });
+      if (pendingSessionSettings.current.get(request.sessionId)?.serialized === request.serialized) {
+        pendingSessionSettings.current.delete(request.sessionId);
+      }
+      setSessionSettingsError((current) => current?.sessionId === request.sessionId ? null : current);
+    },
+    onError: (error, request) => {
+      if (lastScheduledSessionSettings.current.get(request.sessionId) === request.serialized) {
+        lastScheduledSessionSettings.current.delete(request.sessionId);
+      }
+      setSessionSettingsError({ sessionId: request.sessionId, message: error.message });
+    }
+  });
+  const persistSessionSettings = (force = false): Promise<void> => {
+    if (!context || !sessionSettingsReady) return Promise.resolve();
+    if (autosaveTimer.current) {
+      clearTimeout(autosaveTimer.current);
+      autosaveTimer.current = null;
+    }
+    const sessionId = context.sessionId;
+    if (!force && lastScheduledSessionSettings.current.get(sessionId) === serializedSessionSettings) return Promise.resolve();
+    pendingSessionSettings.current.set(sessionId, { settings: sessionSettingsDraft, serialized: serializedSessionSettings });
+    lastScheduledSessionSettings.current.set(sessionId, serializedSessionSettings);
+    return saveSessionSettings.mutateAsync({ sessionId, settings: sessionSettingsDraft, serialized: serializedSessionSettings }).then(() => undefined);
+  };
 
   useEffect(() => {
-    if (!open || defaultsApplied || generationId || !settingsQuery.data) return;
-    const saved = normalizePayloadWorkbenchSettings(settingsQuery.data.settings);
-    setSettingsDraft(saved);
-    setProfileRevisionId(saved.defaultGeneratorProfileRevisionId ?? "");
-    setInstructionRevisionId(saved.defaultInstructionRevisionId ?? "");
-    setTechniqueRevisionIds([]);
-    setPipelineRevisionId("");
-    setDefaultsApplied(true);
-  }, [defaultsApplied, generationId, open, settingsQuery.data]);
+    if (!open || hydratedSettingsKey === currentSettingsKey || !settingsQuery.data || settingsQuery.isFetching) return;
+    if (context && (!sessionSettingsQuery.data || sessionSettingsQuery.isFetching)) return;
+    const globalSettings = normalizePayloadWorkbenchSettings(settingsQuery.data.settings);
+    const fromServer = normalizePayloadWorkbenchSessionSettings(sessionSettingsQuery.data?.settings, globalSettings);
+    const saved = context ? pendingSessionSettings.current.get(context.sessionId)?.settings ?? fromServer : fromServer;
+    setSettingsDraft({
+      ...globalSettings,
+      defaultGeneratorProfileRevisionId: saved.generatorProfileRevisionId,
+      defaultInstructionRevisionId: saved.instructionRevisionId,
+      candidateCount: saved.candidateCount,
+      diversity: saved.diversity,
+      contextMode: saved.contextMode,
+      includeProjectBrief: saved.includeProjectBrief,
+      includeSessionBrief: saved.includeSessionBrief,
+      includeTargetConfig: saved.includeTargetConfig,
+      budgetChars: saved.budgetChars
+    });
+    setOperatorInstruction(saved.operatorInstruction);
+    setProfileRevisionId(saved.generatorProfileRevisionId ?? "");
+    setInstructionRevisionId(saved.instructionRevisionId ?? "");
+    setTechniqueRevisionIds(saved.techniqueRevisionIds);
+    setPipelineRevisionId(saved.pipelineRevisionId ?? "");
+    setVariables(variableRows(saved.variables));
+    if (context) lastScheduledSessionSettings.current.set(context.sessionId, JSON.stringify(saved));
+    setHydratedSettingsKey(currentSettingsKey);
+  }, [context?.sessionId, currentSettingsKey, hydratedSettingsKey, open, sessionSettingsQuery.data, sessionSettingsQuery.isFetching, settingsQuery.data, settingsQuery.isFetching]);
+
+  useEffect(() => {
+    if (!open || !context || !sessionSettingsReady) return;
+    if (lastScheduledSessionSettings.current.get(context.sessionId) === serializedSessionSettings) return;
+    pendingSessionSettings.current.set(context.sessionId, { settings: sessionSettingsDraft, serialized: serializedSessionSettings });
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = setTimeout(() => {
+      autosaveTimer.current = null;
+      void persistSessionSettings().catch(() => undefined);
+    }, 300);
+    return () => {
+      if (autosaveTimer.current) {
+        clearTimeout(autosaveTimer.current);
+        autosaveTimer.current = null;
+      }
+    };
+  }, [context?.sessionId, open, serializedSessionSettings, sessionSettingsReady]);
 
   useEffect(() => {
     if (!open || generationId || !historyQuery.data) return;
@@ -385,23 +479,6 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
     setRevisions(active.revisions);
     setCandidates(candidatesFromDetail(active));
     setDiffIds([]);
-    setOperatorInstruction(item.operatorInstruction ?? "");
-    setProfileRevisionId(item.generatorProfileRevisionId ?? "");
-    setInstructionRevisionId(item.instructionRevisionId ?? "");
-    setTechniqueRevisionIds(item.techniqueRevisionIds ?? []);
-    setPipelineRevisionId(item.pipelineRevisionId ?? "");
-    setVariables(variableRows(item.variables));
-    if (item.contextOptions) {
-      const candidateCount = Math.max(1, Math.min(4, Math.round(item.candidateCount ?? 1))) as 1 | 2 | 3 | 4;
-      setSettingsDraft((current) => ({ ...current, ...item.contextOptions, candidateCount, diversity: item.diversity ?? current.diversity }));
-    }
-    setDefaultsApplied(true);
-    setSnapshotBranchId(item.branchId);
-    setSnapshotHeadId(item.contextNodeId);
-    if (context) {
-      const contextIndex = item.contextNodeId ? context.path.findIndex((node) => node.id === item.contextNodeId) : -1;
-      setSnapshotPath(contextIndex >= 0 ? context.path.slice(0, contextIndex + 1) : context.path);
-    }
     setContextPreview(null);
     setTab("generate");
   }, [context, generationId, historyQuery.data, open]);
@@ -449,6 +526,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
     mutationFn: async ({ confirmProjectReadOnly }: { confirmProjectReadOnly: boolean }) => {
       if (!context) throw new Error("Open the workbench from a session to generate candidates");
       if (!profileRevisionId) throw new Error("Select a generator profile");
+      await persistSessionSettings(true);
       return api<GenerationResponse>("/api/payload-generations", { method: "POST", ...jsonBody({
         sessionId: context.sessionId,
         branchId: snapshotBranchId ?? context.branchId,
@@ -562,8 +640,13 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
       setUndoStack([]);
       setTransformError(null);
       setTab("transform");
-      setDefaultsApplied(false);
+      setHydratedSettingsKey(null);
+      setSettingsDraft(defaultPayloadWorkbenchSettings);
       setOperatorInstruction("");
+      setProfileRevisionId("");
+      setInstructionRevisionId("");
+      setTechniqueRevisionIds([]);
+      setPipelineRevisionId("");
       setVariables([]);
       setContextPreview(null);
       setSnapshotBranchId(context?.branchId ?? null);
@@ -574,6 +657,8 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
       setCandidates([]);
       setRevisions([]);
       setDiffIds([]);
+    } else {
+      void persistSessionSettings(true).catch(() => undefined);
     }
     setOpen(nextOpen);
   };
@@ -652,7 +737,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
   };
   const useCandidate = (candidate: StreamingPayloadCandidate, revision?: PayloadRevision) => {
     onUse({ text: candidate.text, sourcePayloadRevisionId: revision?.id ?? null });
-    setOpen(false);
+    changeOpen(false);
   };
   const requestGenerate = async () => {
     if (!context || contextIsStale || (generation && ["queued", "streaming"].includes(generation.status))) return;
@@ -685,25 +770,26 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
       derive.mutate({ seedText: draft, body: null }, {
         onSuccess: ({ revision }) => {
           onUse({ text: revision.text, sourcePayloadRevisionId: revision.id });
-          setOpen(false);
+          changeOpen(false);
         }
       });
       return;
     }
     if (!draftSource || draft === draftSource.text) {
       onUse({ text: draft, sourcePayloadRevisionId: draftSource?.id ?? null });
-      setOpen(false);
+      changeOpen(false);
       return;
     }
     derive.mutate({ revisionId: draftSource.id, body: { kind: "edit", text: draft } }, {
       onSuccess: ({ revision }) => {
         onUse({ text: revision.text, sourcePayloadRevisionId: revision.id });
-        setOpen(false);
+        changeOpen(false);
       }
     });
   };
   const byteCount = new TextEncoder().encode(draft).byteLength;
-  const libraryError = settingsQuery.error ?? profileAssets.error ?? instructionAssets.error ?? techniqueAssets.error ?? pipelineAssets.error;
+  const libraryError = settingsQuery.error ?? sessionSettingsQuery.error ?? profileAssets.error ?? instructionAssets.error ?? techniqueAssets.error ?? pipelineAssets.error;
+  const visibleSessionSettingsError = context && sessionSettingsError?.sessionId === context.sessionId ? sessionSettingsError.message : null;
   const snapshotContext = context ? { ...context, branchId: snapshotBranchId ?? context.branchId, contextNodeId: snapshotHeadId, path: snapshotPath } : undefined;
   const historyPages = historyQuery.data?.pages ?? [];
   const historyGenerations = uniqueById(historyPages.flatMap((page) => page.generations).map((detail) => ({ ...detail, id: detail.generation.id }))).map(({ id: _, ...detail }) => detail);
@@ -730,6 +816,9 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
           <div className="payload-generate-layout"><aside className="payload-generate-controls">
             {!context && <div className="form-error">Open this workbench from a session to generate candidates.</div>}
             {libraryError && <div className="form-error">{libraryError.message}</div>}
+            {visibleSessionSettingsError && <div className="form-error" role="alert">Session workbench settings could not be saved: {visibleSessionSettingsError}. Lathe will retry after your next change or when this workbench closes.</div>}
+            {context && !sessionSettingsReady && !libraryError && <div className="payload-session-settings-loading" role="status"><span className="spinner small" /> Loading this session's workbench settings…</div>}
+            <fieldset className="payload-session-settings-controls" disabled={Boolean(context && !sessionSettingsReady)}>
             <Field label="Generator profile"><Select value={profileRevisionId} onChange={(event) => setProfileRevisionId(event.target.value)}><option value="">Select profile…</option>{profiles.map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · r{asset.revision}</option>)}</Select></Field>
             <Field label="Reusable instruction"><Select value={instructionRevisionId} onChange={(event) => setInstructionRevisionId(event.target.value)}><option value="">None</option>{instructions.map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · r{asset.revision}</option>)}</Select></Field>
             <Field label="Operator instruction"><Textarea value={operatorInstruction} onChange={(event) => setOperatorInstruction(event.target.value)} rows={5} placeholder="Describe the attack objective, constraints, and variations to explore…" /></Field>
@@ -741,6 +830,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
             {snapshotContext && <ContextControls value={settingsDraft} onChange={setSettingsDraft} onPreview={() => preview.mutate({ requestKey: currentPreviewKey })} preview={contextPreview} pending={preview.isPending} error={preview.error?.message} context={snapshotContext} />}
             {(generate.error || refine.error) && <div className="form-error">{generate.error?.message ?? refine.error?.message}</div>}
             <div className="payload-generate-actions">{generation && ["queued", "streaming"].includes(generation.status) && <Button type="button" variant="danger" aria-label="Cancel payload generation" onClick={() => cancel.mutate(generation.id)} disabled={cancel.isPending}><CircleStop size={13} /> Cancel</Button>}<Button type="button" onClick={() => void requestGenerate()} disabled={!context || contextIsStale || contextPreview?.fits === false || !profileRevisionId || !operatorInstruction.trim() || generate.isPending || Boolean(generation && ["queued", "streaming"].includes(generation.status))}><Sparkles size={13} />{generate.isPending ? "Starting…" : "Generate candidates"}</Button></div>
+            </fieldset>
           </aside>
           <main className="payload-generate-results"><GenerationCandidates generation={generation} candidates={candidates} revisions={revisions} original={original} diffIds={diffIds} onDiffChange={setDiffIds} onRefine={(revision, feedback) => refine.mutate({ revision, feedback })} onTransform={sendCandidateToTransform} onUse={useCandidate} refinePending={refine.isPending} />{detailQuery.error && <div className="form-error">{detailQuery.error.message}</div>}</main></div>
         </Tabs.Content>

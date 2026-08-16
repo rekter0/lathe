@@ -16,6 +16,16 @@ Open **Payload Workbench settings** from the top-right toolbar. Its five tabs st
 
 Saving an edited library item creates a new revision. Existing generations remain pinned to the old revision. Deletion uses the confirmation dialog and is refused when saved settings, generation history, or evidence still references that revision.
 
+Global defaults seed a session only until the operator changes that session's
+workbench. Lathe then saves the session's generator profile, reusable
+instruction, ordered techniques, pipeline selection, operator instruction,
+variable overrides, candidate count, diversity, context mode, briefing/config
+switches, and context budget. Closing and reopening the Payload Workbench in the
+same session restores those choices; another session keeps its own independent
+draft. Conversation branch/head snapshots, context previews, transform text,
+and runtime-access confirmations are deliberately not restored. They are
+recomputed or requested against the current session state.
+
 ### HTTP generator profile
 
 An HTTP generator reuses Lathe's existing provider adapters, credentials, redaction, trace capture, streaming, and error classification.

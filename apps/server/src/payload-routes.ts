@@ -12,6 +12,7 @@ import {
   payloadContextPreviewInputSchema,
   payloadGeneratorProfileValueSchema,
   payloadPipelineValueSchema,
+  sessionPayloadWorkbenchSettingsInputSchema,
   payloadWorkbenchSettingsInputSchema,
   refinePayloadRevisionInputSchema
 } from "./payload-schemas.js";
@@ -79,6 +80,32 @@ export function registerPayloadRoutes(app: Hono, dependencies: {
       ...input,
       contextMode: input.contextMode
     }) });
+  });
+
+  app.get("/api/sessions/:id/payload-workbench/settings", async (context) => {
+    const sessionId = context.req.param("id");
+    if (!await repository.getSession(sessionId)) throw new HTTPException(404, { message: "Session not found" });
+    return context.json({ settings: await repository.getSessionPayloadWorkbenchSettings(sessionId) });
+  });
+
+  app.put("/api/sessions/:id/payload-workbench/settings", async (context) => {
+    const sessionId = context.req.param("id");
+    if (!await repository.getSession(sessionId)) throw new HTTPException(404, { message: "Session not found" });
+    const input = await parseBody(context.req.raw, sessionPayloadWorkbenchSettingsInputSchema);
+    await assertAssetKind(repository, input.generatorProfileRevisionId, "payload-generator-profile");
+    await assertAssetKind(repository, input.instructionRevisionId, "payload-generator-instruction");
+    for (const techniqueRevisionId of input.techniqueRevisionIds) {
+      await assertAssetKind(repository, techniqueRevisionId, "payload-technique");
+    }
+    await assertAssetKind(repository, input.pipelineRevisionId, "payload-pipeline");
+    try {
+      return context.json({ settings: await repository.upsertSessionPayloadWorkbenchSettings(sessionId, input) });
+    } catch (error) {
+      if (error instanceof Error && error.message === "Payload Workbench session does not exist") {
+        throw new HTTPException(404, { message: "Session not found" });
+      }
+      requestError(error);
+    }
   });
 
   app.post("/api/payload-generator-profiles/:revisionId/probe", async (context) => {

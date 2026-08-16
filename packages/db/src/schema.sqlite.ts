@@ -242,6 +242,25 @@ export const payloadWorkbenchSettings = sqliteTable("payload_workbench_settings"
   updatedAt: text("updated_at").notNull()
 });
 
+export const sessionPayloadWorkbenchSettings = sqliteTable("session_payload_workbench_settings", {
+  sessionId: text("session_id").primaryKey().references(() => sessions.id, { onDelete: "cascade" }),
+  generatorProfileRevisionId: text("generator_profile_revision_id"),
+  instructionRevisionId: text("instruction_revision_id"),
+  techniqueRevisionIds: text("technique_revision_ids", { mode: "json" }).$type<string[]>().notNull(),
+  pipelineRevisionId: text("pipeline_revision_id"),
+  operatorInstruction: text("operator_instruction").notNull(),
+  variables: text("variables", { mode: "json" }).$type<Record<string, string>>().notNull(),
+  candidateCount: integer("candidate_count").notNull(),
+  diversity: text("diversity").$type<PayloadDiversity>().notNull(),
+  contextMode: text("context_mode").$type<PayloadGenerationOptions["contextMode"]>().notNull(),
+  includeProjectBrief: integer("include_project_brief", { mode: "boolean" }).notNull(),
+  includeSessionBrief: integer("include_session_brief", { mode: "boolean" }).notNull(),
+  includeTargetConfig: integer("include_target_config", { mode: "boolean" }).notNull(),
+  budgetChars: integer("budget_chars").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+});
+
 export const payloadGenerations = sqliteTable(
   "payload_generations",
   {
@@ -342,6 +361,7 @@ export const sqliteSchema = {
   findings,
   automationJobs,
   payloadWorkbenchSettings,
+  sessionPayloadWorkbenchSettings,
   payloadGenerations,
   payloadGenerationAttempts,
   payloadRevisions

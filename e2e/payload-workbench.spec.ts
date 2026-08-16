@@ -147,11 +147,42 @@ test("generates, refines, compares, transforms, restores, and explicitly uses a 
   await workbenchDialog.getByRole("tab", { name: "Generate" }).click();
   await workbenchDialog.getByLabel("Generator profile").selectOption(profile.id);
   await workbenchDialog.getByLabel("Reusable instruction").selectOption(instruction.id);
-  await workbenchDialog.getByLabel("Operator instruction").fill(`Generate a safe test variation for ${suffix}.`);
+  const operatorInstruction = `Generate a safe test variation for ${suffix}.`;
+  await workbenchDialog.getByLabel("Operator instruction").fill(operatorInstruction);
   await workbenchDialog.getByLabel("Add technique").selectOption(technique.id);
   await workbenchDialog.getByLabel("Candidates").selectOption("2");
   await workbenchDialog.getByLabel("Diversity").selectOption("high");
   await workbenchDialog.getByLabel("Conversation").selectOption("minimal");
+  await workbenchDialog.getByRole("button", { name: "Add variable" }).click();
+  await workbenchDialog.getByLabel("Variable 1 name").fill("format_hint");
+  await workbenchDialog.getByLabel("Variable format_hint value").fill("terse");
+
+  await workbenchDialog.getByRole("button", { name: "Close payload workbench" }).click();
+  await expect(workbenchDialog).toBeHidden();
+  await expect.poll(async () => {
+    const response = await request.get(`/api/sessions/${sessionId}/payload-workbench/settings`, { headers: apiHeaders });
+    return (await body<{ settings: Record<string, unknown> }>(response, 200)).settings;
+  }).toMatchObject({
+    generatorProfileRevisionId: profile.id,
+    instructionRevisionId: instruction.id,
+    techniqueRevisionIds: [technique.id],
+    operatorInstruction,
+    variables: { format_hint: "terse" },
+    candidateCount: 2,
+    diversity: "high",
+    contextMode: "minimal",
+  });
+
+  await page.getByRole("button", { name: "Open payload workbench" }).click();
+  await expect(workbenchDialog).toBeVisible();
+  await workbenchDialog.getByRole("tab", { name: "Generate" }).click();
+  await expect(workbenchDialog.getByLabel("Generator profile")).toHaveValue(profile.id);
+  await expect(workbenchDialog.getByLabel("Reusable instruction")).toHaveValue(instruction.id);
+  await expect(workbenchDialog.getByLabel("Operator instruction")).toHaveValue(operatorInstruction);
+  await expect(workbenchDialog.getByLabel("Variable format_hint value")).toHaveValue("terse");
+  await expect(workbenchDialog.getByLabel("Candidates")).toHaveValue("2");
+  await expect(workbenchDialog.getByLabel("Diversity")).toHaveValue("high");
+  await expect(workbenchDialog.getByLabel("Conversation")).toHaveValue("minimal");
   await workbenchDialog.getByRole("button", { name: "Preview" }).click();
 
   const preview = workbenchDialog.locator(".payload-context-preview");

@@ -139,6 +139,58 @@ export async function repositoryContract(repository: LatheRepository): Promise<v
   const technique = await savePayloadAsset("payload-technique", "Role-play technique");
   const pipeline = await savePayloadAsset("payload-pipeline", "Payload pipeline");
 
+  const sessionPayloadSettings = await repository.upsertSessionPayloadWorkbenchSettings(session.id, {
+    generatorProfileRevisionId: generatorProfile.id,
+    instructionRevisionId: generatorInstruction.id,
+    techniqueRevisionIds: [technique.id],
+    pipelineRevisionId: pipeline.id,
+    operatorInstruction: "Keep this generator draft for the session.",
+    variables: { objective: "Exercise instruction boundaries", target_name: "Acme support bot" },
+    candidateCount: 3,
+    diversity: "high",
+    contextMode: "full",
+    includeProjectBrief: true,
+    includeSessionBrief: true,
+    includeTargetConfig: true,
+    budgetChars: 24_000
+  });
+  expect(sessionPayloadSettings).toMatchObject({ sessionId: session.id, candidateCount: 3, diversity: "high" });
+  expect(await repository.getSessionPayloadWorkbenchSettings(session.id)).toEqual(sessionPayloadSettings);
+  expect(await repository.getSessionPayloadWorkbenchSettings(otherSession.id)).toBeNull();
+  await expect(repository.upsertSessionPayloadWorkbenchSettings("missing-session", {
+    generatorProfileRevisionId: null,
+    instructionRevisionId: null,
+    techniqueRevisionIds: [],
+    pipelineRevisionId: null,
+    operatorInstruction: "",
+    variables: {},
+    candidateCount: 1,
+    diversity: "balanced",
+    contextMode: "none",
+    includeProjectBrief: false,
+    includeSessionBrief: false,
+    includeTargetConfig: false,
+    budgetChars: 2_000
+  })).rejects.toThrow(/session does not exist/i);
+  await expect(repository.upsertSessionPayloadWorkbenchSettings(session.id, {
+    ...sessionPayloadSettings,
+    generatorProfileRevisionId: technique.id
+  })).rejects.toThrow(/payload-generator-profile/);
+  const sessionOnlyTechnique = await savePayloadAsset("payload-technique", "Session-only technique");
+  const settingsWithSessionOnlyTechnique = await repository.upsertSessionPayloadWorkbenchSettings(session.id, {
+    ...sessionPayloadSettings,
+    techniqueRevisionIds: [technique.id, sessionOnlyTechnique.id]
+  });
+  expect((await repository.deleteAssetRevision(sessionOnlyTechnique.id)).references).toContainEqual(expect.objectContaining({
+    kind: "payload-settings",
+    id: session.id
+  }));
+  await repository.upsertSessionPayloadWorkbenchSettings(session.id, {
+    ...settingsWithSessionOnlyTechnique,
+    techniqueRevisionIds: [technique.id]
+  });
+  expect(await repository.deleteAssetRevision(sessionOnlyTechnique.id)).toEqual({ deleted: true, references: [] });
+
   const payloadSettings = await repository.upsertPayloadWorkbenchSettings({
     defaultGeneratorProfileRevisionId: generatorProfile.id,
     defaultInstructionRevisionId: generatorInstruction.id,
@@ -408,6 +460,7 @@ export async function repositoryContract(repository: LatheRepository): Promise<v
 
   expect(await repository.deleteSession(session.id)).toBe(true);
   expect(await repository.getSession(session.id)).toBeNull();
+  expect(await repository.getSessionPayloadWorkbenchSettings(session.id)).toBeNull();
   expect(await repository.listNodes(session.id)).toEqual([]);
   expect(await repository.getRun(run.id)).toBeNull();
   expect(await repository.getPayloadGeneration(generation.id, true)).toBeNull();

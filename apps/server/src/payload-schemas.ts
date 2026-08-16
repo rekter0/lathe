@@ -1,5 +1,6 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
+import { sessionPayloadWorkbenchSettingsInputSchema as domainSessionPayloadWorkbenchSettingsInputSchema } from "@lathe/domain";
 
 export const payloadContextModeSchema = z.enum(["none", "minimal", "full"]);
 export const payloadDiversitySchema = z.enum(["low", "balanced", "high"]);
@@ -76,6 +77,8 @@ export const payloadWorkbenchSettingsInputSchema = z.object({
   includeTargetConfig: z.boolean(),
   budgetChars: z.number().int().min(2_000).max(200_000)
 });
+
+export const sessionPayloadWorkbenchSettingsInputSchema = domainSessionPayloadWorkbenchSettingsInputSchema;
 
 export const payloadContextPreviewInputSchema = z.object({
   branchId: z.string().min(1),

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -175,6 +175,7 @@ describe("PayloadWorkbench", () => {
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://lathe.local");
       if (url.pathname === "/api/payload-workbench/settings") return jsonResponse({ settings: {} });
+      if (url.pathname === "/api/sessions/session-1/payload-workbench/settings") return jsonResponse({ settings: { generatorProfileRevisionId: null, instructionRevisionId: null, techniqueRevisionIds: [], pipelineRevisionId: null, operatorInstruction: "Saved session preference", variables: {}, candidateCount: 2, diversity: "high", contextMode: "full", includeProjectBrief: false, includeSessionBrief: true, includeTargetConfig: true, budgetChars: 24_000 } });
       if (url.pathname === "/api/assets") return jsonResponse({ assets: [] });
       if (url.pathname === "/api/payload-generations") return jsonResponse({ generations: [olderDetail, activeDetail], standaloneRevisions: [], standaloneOutcomes: [], nextCursor: null });
       if (url.pathname === "/api/payload-generations/generation-active-new/cancel") { cancelled.push(url.pathname); return jsonResponse({ cancelled: true }); }
@@ -190,6 +191,7 @@ describe("PayloadWorkbench", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open payload workbench" }));
     expect(await screen.findByText("live payload")).not.toBeNull();
+    expect((screen.getByRole("textbox", { name: "Operator instruction" }) as HTMLTextAreaElement).value).toBe("Saved session preference");
     expect(screen.getByRole("button", { name: `Download generator trace ${"c".repeat(64)}` })).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Close payload workbench" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Payload workbench" })).toBeNull());
@@ -232,5 +234,147 @@ describe("PayloadWorkbench", () => {
     fireEvent.click(screen.getByRole("button", { name: "Use as next prompt" }));
     await waitFor(() => expect(seeded).toEqual(["/api/payload-revisions"]));
     expect(onUse).toHaveBeenCalledWith({ text: "second payload", sourcePayloadRevisionId: "revision-reseeded" });
+  });
+
+  it("restores the last complete workbench configuration for the session after reopening", async () => {
+    const asset = (id: string, assetId: string, kind: string, name: string, value: unknown) => ({
+      id, assetId, kind, revision: 1, name, description: "", tags: [], provenance: {}, value,
+      contentHash: id.padEnd(64, "a").slice(0, 64), trusted: true, archivedAt: null, createdAt: "2026-08-15T00:00:00.000Z"
+    });
+    const profiles = [
+      asset("profile-r1", "profile-1", "payload-generator-profile", "Generator one", { backend: { kind: "http-provider", providerProfileRevisionId: "provider-r1", modelId: "model-a" } }),
+      asset("profile-r2", "profile-2", "payload-generator-profile", "Generator two", { backend: { kind: "http-provider", providerProfileRevisionId: "provider-r1", modelId: "model-b" } })
+    ];
+    const instruction = asset("instruction-r1", "instruction-1", "payload-generator-instruction", "Concise payload", { template: "Keep it concise" });
+    const technique = asset("technique-r1", "technique-1", "payload-technique", "Authority framing", { instructions: "Use authority framing", conflictsWith: [], before: [], after: [] });
+    const pipeline = asset("pipeline-r1", "pipeline-1", "payload-pipeline", "Encode once", { steps: [{ transformId: "base64-encode", version: 1, enabled: true }] });
+    let persisted: Record<string, unknown> | null = null;
+    const writes: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://lathe.local");
+      if (url.pathname === "/api/payload-workbench/settings") return jsonResponse({ settings: { defaultGeneratorProfileRevisionId: "profile-r1", defaultInstructionRevisionId: null, candidateCount: 1, diversity: "balanced", contextMode: "minimal", includeProjectBrief: true, includeSessionBrief: true, includeTargetConfig: false, budgetChars: 32_000 } });
+      if (url.pathname === "/api/sessions/session-1/payload-workbench/settings") {
+        if (init?.method === "PUT") {
+          persisted = JSON.parse(String(init.body)) as Record<string, unknown>;
+          writes.push(persisted);
+        }
+        return jsonResponse({ settings: persisted });
+      }
+      if (url.pathname === "/api/assets") {
+        const byKind: Record<string, unknown[]> = {
+          "payload-generator-profile": profiles,
+          "payload-generator-instruction": [instruction],
+          "payload-technique": [technique],
+          "payload-pipeline": [pipeline]
+        };
+        return jsonResponse({ assets: byKind[url.searchParams.get("kind") ?? ""] ?? [] });
+      }
+      if (url.pathname === "/api/payload-generations") return jsonResponse({ generations: [], standaloneRevisions: [], standaloneOutcomes: [], nextCursor: null });
+      return jsonResponse({});
+    }));
+    const context = { projectId: "project-1", sessionId: "session-1", sessionName: "Session", branchId: "branch-1", branchName: "main", contextNodeId: null, path: [] };
+    renderWorkbench(<PayloadWorkbench value="source" context={context} onUse={() => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open payload workbench" }));
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /Generate/ }), { button: 0, ctrlKey: false });
+    await waitFor(() => expect((screen.getByRole("combobox", { name: "Generator profile" }) as HTMLSelectElement).value).toBe("profile-r1"));
+    fireEvent.change(screen.getByRole("combobox", { name: "Generator profile" }), { target: { value: "profile-r2" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Reusable instruction" }), { target: { value: "instruction-r1" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Operator instruction" }), { target: { value: "Keep varying this session objective" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Add technique" }), { target: { value: "technique-r1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Variable 1 name" }), { target: { value: "target_name" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Variable target_name value" }), { target: { value: "Acme model" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Candidates" }), { target: { value: "3" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Diversity" }), { target: { value: "high" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Conversation" }), { target: { value: "full" } });
+    fireEvent.click(screen.getByLabelText("Project brief"));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Exact context budget" }), { target: { value: "48000" } });
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /Transform/ }), { button: 0, ctrlKey: false });
+    fireEvent.change(screen.getByRole("combobox", { name: "Transform pipeline" }), { target: { value: "pipeline-r1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close payload workbench" }));
+
+    await waitFor(() => expect(writes.at(-1)).toMatchObject({
+      generatorProfileRevisionId: "profile-r2", instructionRevisionId: "instruction-r1", techniqueRevisionIds: ["technique-r1"], pipelineRevisionId: "pipeline-r1",
+      variables: { target_name: "Acme model" }, operatorInstruction: "Keep varying this session objective", candidateCount: 3, diversity: "high",
+      contextMode: "full", includeProjectBrief: false, includeSessionBrief: true, includeTargetConfig: true, budgetChars: 48_000
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Open payload workbench" }));
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /Generate/ }), { button: 0, ctrlKey: false });
+    await waitFor(() => expect((screen.getByRole("combobox", { name: "Generator profile" }) as HTMLSelectElement).value).toBe("profile-r2"));
+    expect((screen.getByRole("combobox", { name: "Reusable instruction" }) as HTMLSelectElement).value).toBe("instruction-r1");
+    expect((screen.getByRole("textbox", { name: "Operator instruction" }) as HTMLTextAreaElement).value).toBe("Keep varying this session objective");
+    expect((screen.getByRole("textbox", { name: "Variable target_name value" }) as HTMLInputElement).value).toBe("Acme model");
+    expect((screen.getByRole("combobox", { name: "Candidates" }) as HTMLSelectElement).value).toBe("3");
+    expect((screen.getByRole("combobox", { name: "Conversation" }) as HTMLSelectElement).value).toBe("full");
+    expect((screen.getByRole("spinbutton", { name: "Exact context budget" }) as HTMLInputElement).value).toBe("48000");
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /Transform/ }), { button: 0, ctrlKey: false });
+    expect((screen.getByRole("combobox", { name: "Transform pipeline" }) as HTMLSelectElement).value).toBe("pipeline-r1");
+  });
+
+  it("disables controls and never writes when closed before slow session hydration completes", async () => {
+    let resolveSessionSettings!: (response: Response) => void;
+    const delayedSessionSettings = new Promise<Response>((resolve) => { resolveSessionSettings = resolve; });
+    const writes: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://lathe.local");
+      if (url.pathname === "/api/payload-workbench/settings") return jsonResponse({ settings: {} });
+      if (url.pathname === "/api/sessions/session-slow/payload-workbench/settings") {
+        if (init?.method === "PUT") { writes.push(JSON.parse(String(init.body))); return jsonResponse({ settings: writes.at(-1) }); }
+        return delayedSessionSettings;
+      }
+      if (url.pathname === "/api/assets") return jsonResponse({ assets: [] });
+      if (url.pathname === "/api/payload-generations") return jsonResponse({ generations: [], standaloneRevisions: [], standaloneOutcomes: [], nextCursor: null });
+      return jsonResponse({});
+    }));
+    renderWorkbench(<PayloadWorkbench value="source" context={{ projectId: "project-1", sessionId: "session-slow", sessionName: "Slow", branchId: "branch-1", branchName: "main", contextNodeId: null, path: [] }} onUse={() => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open payload workbench" }));
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /Generate/ }), { button: 0, ctrlKey: false });
+    expect(await screen.findByText(/Loading this session's workbench settings/)).not.toBeNull();
+    expect((screen.getByRole("combobox", { name: "Generator profile" }).closest("fieldset") as HTMLFieldSetElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Close payload workbench" }));
+    await act(async () => {
+      resolveSessionSettings(jsonResponse({ settings: null }));
+      await Promise.resolve();
+    });
+    expect(writes).toEqual([]);
+  });
+
+  it("keeps the newest local choices when reopened before the close flush finishes", async () => {
+    let resolveSave!: (response: Response) => void;
+    const delayedSave = new Promise<Response>((resolve) => { resolveSave = resolve; });
+    const writes: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://lathe.local");
+      if (url.pathname === "/api/payload-workbench/settings") return jsonResponse({ settings: {} });
+      if (url.pathname === "/api/sessions/session-race/payload-workbench/settings") {
+        if (init?.method === "PUT") {
+          writes.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return delayedSave;
+        }
+        return jsonResponse({ settings: null });
+      }
+      if (url.pathname === "/api/assets") return jsonResponse({ assets: [] });
+      if (url.pathname === "/api/payload-generations") return jsonResponse({ generations: [], standaloneRevisions: [], standaloneOutcomes: [], nextCursor: null });
+      return jsonResponse({});
+    }));
+    renderWorkbench(<PayloadWorkbench value="source" context={{ projectId: "project-1", sessionId: "session-race", sessionName: "Race", branchId: "branch-1", branchName: "main", contextNodeId: null, path: [] }} onUse={() => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open payload workbench" }));
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /Generate/ }), { button: 0, ctrlKey: false });
+    await waitFor(() => expect(screen.queryByText(/Loading this session's workbench settings/)).toBeNull());
+    fireEvent.change(screen.getByRole("textbox", { name: "Operator instruction" }), { target: { value: "Newest unsaved objective" } });
+    fireEvent.click(screen.getByRole("button", { name: "Close payload workbench" }));
+    await waitFor(() => expect(writes).toHaveLength(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Open payload workbench" }));
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /Generate/ }), { button: 0, ctrlKey: false });
+    await waitFor(() => expect((screen.getByRole("textbox", { name: "Operator instruction" }) as HTMLTextAreaElement).value).toBe("Newest unsaved objective"));
+    await act(async () => {
+      resolveSave(jsonResponse({ settings: writes[0] }));
+      await delayedSave;
+    });
   });
 });

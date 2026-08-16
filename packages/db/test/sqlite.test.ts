@@ -78,6 +78,7 @@ describe("SQLite repository", () => {
       });
       expect(await persistence.repository.getSession("legacy-session")).toMatchObject({ description: "" });
       expect(await persistence.repository.getPayloadWorkbenchSettings()).toBeNull();
+      expect(await persistence.repository.getSessionPayloadWorkbenchSettings("legacy-session")).toBeNull();
       expect(await persistence.repository.upsertPayloadWorkbenchSettings({
         defaultGeneratorProfileRevisionId: null,
         defaultInstructionRevisionId: null,

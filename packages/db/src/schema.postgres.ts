@@ -82,6 +82,17 @@ export const payloadWorkbenchSettings = pgTable("payload_workbench_settings", {
   includeTargetConfig: boolean("include_target_config").notNull(), budgetChars: integer("budget_chars").notNull(),
   createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull()
 });
+export const sessionPayloadWorkbenchSettings = pgTable("session_payload_workbench_settings", {
+  sessionId: text("session_id").primaryKey().references(() => sessions.id, { onDelete: "cascade" }),
+  generatorProfileRevisionId: text("generator_profile_revision_id"), instructionRevisionId: text("instruction_revision_id"),
+  techniqueRevisionIds: jsonb("technique_revision_ids").$type<string[]>().notNull(), pipelineRevisionId: text("pipeline_revision_id"),
+  operatorInstruction: text("operator_instruction").notNull(), variables: jsonb("variables").$type<Record<string, string>>().notNull(),
+  candidateCount: integer("candidate_count").notNull(), diversity: text("diversity").$type<PayloadDiversity>().notNull(),
+  contextMode: text("context_mode").$type<PayloadGenerationOptions["contextMode"]>().notNull(),
+  includeProjectBrief: boolean("include_project_brief").notNull(), includeSessionBrief: boolean("include_session_brief").notNull(),
+  includeTargetConfig: boolean("include_target_config").notNull(), budgetChars: integer("budget_chars").notNull(),
+  createdAt: text("created_at").notNull(), updatedAt: text("updated_at").notNull()
+});
 export const payloadGenerations = pgTable("payload_generations", {
   id: text("id").primaryKey(), projectId: text("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
   sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }), branchId: text("branch_id").notNull().references(() => branches.id, { onDelete: "cascade" }),
@@ -109,6 +120,6 @@ export const payloadRevisions = pgTable("payload_revisions", {
 
 export const postgresSchema = {
   projects, sessions, messageNodes, branches, configSnapshots, checkpoints, modelRuns, providerProfiles, secrets,
-  assetRevisions, attachments, findings, automationJobs, payloadWorkbenchSettings, payloadGenerations,
+  assetRevisions, attachments, findings, automationJobs, payloadWorkbenchSettings, sessionPayloadWorkbenchSettings, payloadGenerations,
   payloadGenerationAttempts, payloadRevisions
 };
