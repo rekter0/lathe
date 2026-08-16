@@ -11,6 +11,7 @@ import { Activity, Archive, ArrowLeft, Check, ChevronDown, CircleStop, Code2, Do
 import { pathToRoot, type JsonObject, type JsonValue, type MessagePart, type ResolvedConfig } from "@lathe/domain";
 import { api, consumeEvents, downloadApiFile, jsonBody } from "../api.js";
 import { ContextMenu, type ContextMenuPoint } from "../components/context-menu.js";
+import { ComposerPanel, ComposerTextarea, type ComposerHistoryEntry, type ComposerValueOrigin } from "../components/conversation-composer.js";
 import { Button, Field, Input, Select, Textarea } from "../components/forms.js";
 import { isComposerSubmitKey } from "../components/composer-keys.js";
 import { McpApprovalResolver } from "../components/mcp-approval.js";
@@ -270,6 +271,15 @@ function Transcript({ nodes, runs, data, branchId, sessionId, liveRunId = null, 
     previousRunId.current = liveRunId;
     if (followOutput.current && scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [liveRunId, nodes.length, showLiveMessage, streamed.reasoning.length, streamed.text.length]);
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (followOutput.current) element.scrollTop = element.scrollHeight;
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   return <div className="transcript-scroll" ref={scrollRef} onScroll={(event) => {
     if (liveRunId) return;
     const element = event.currentTarget;
@@ -524,6 +534,18 @@ function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchDa
   const [message, setMessage] = useState("");
   const [sourcePayloadRevisionId, setSourcePayloadRevisionId] = useState<string | null>(null);
   const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
+  const [historyReset, setHistoryReset] = useState(0);
+  const submittedMessages = useMemo<ComposerHistoryEntry[]>(() => pathToRoot(data.nodes, branch.headNodeId)
+    .filter((node) => node.role === "user")
+    .map((node) => ({
+      text: node.parts.filter((part) => part.type === "text").map((part) => part.text).join("\n"),
+      sourcePayloadRevisionId: node.sourcePayloadRevisionId
+    }))
+    .filter((entry) => entry.text.length > 0), [branch.headNodeId, data.nodes]);
+  const setComposerValue = (value: string, _origin: ComposerValueOrigin, nextSourcePayloadRevisionId: string | null) => {
+    setMessage(value);
+    setSourcePayloadRevisionId(nextSourcePayloadRevisionId);
+  };
   const send = useMutation({
     mutationFn: async () => {
       let contextNodeId = branch.headNodeId;
@@ -537,22 +559,22 @@ function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchDa
       }
       return api<{ run: { id: string } }>("/api/runs", { method: "POST", ...jsonBody({ sessionId: data.session.id, branchId: branch.id, contextNodeId, ...(attachmentIds.length === 0 ? { userMessage: message, sourcePayloadRevisionId } : {}) }) });
     },
-    onSuccess: ({ run }) => { setMessage(""); setSourcePayloadRevisionId(null); setAttachmentIds([]); onRunStarted(run.id); onChanged(); }
+    onSuccess: ({ run }) => { setMessage(""); setSourcePayloadRevisionId(null); setAttachmentIds([]); setHistoryReset((value) => value + 1); onRunStarted(run.id); onChanged(); }
   });
   const upload = useMutation({ mutationFn: async (file: File) => {
     const form = new FormData(); form.set("file", file);
     return api<{ attachment: Attachment }>(`/api/projects/${data.session.projectId}/attachments`, { method: "POST", body: form });
   }, onSuccess: ({ attachment }) => { setAttachmentIds((ids) => [...ids, attachment.id]); onChanged(); } });
   const canSend = message.trim().length > 0 && !send.isPending && Boolean(data.session.providerProfileId);
-  return <div className="composer">
+  return <ComposerPanel>
     {data.attachments.length > 0 && <div className="attachment-picker">{data.attachments.map((attachment) => <label key={attachment.id}><input type="checkbox" checked={attachmentIds.includes(attachment.id)} onChange={(event) => setAttachmentIds((ids) => event.target.checked ? [...ids, attachment.id] : ids.filter((id) => id !== attachment.id))} />{attachment.fileName}</label>)}</div>}
     <form onSubmit={(event) => { event.preventDefault(); if (canSend) send.mutate(); }}>
       <label className="attach-button"><Paperclip size={17} /><input type="file" onChange={(event) => { const file = event.target.files?.[0]; if (file) upload.mutate(file); }} /></label>
-      <Textarea value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => {
+      <ComposerTextarea id="operator-composer-input" aria-label="Next operator payload" value={message} sourcePayloadRevisionId={sourcePayloadRevisionId} history={submittedMessages} navigationKey={`${data.session.id}:${branch.id}:${branch.headNodeId ?? "root"}:${historyReset}`} onValueChange={setComposerValue} onKeyDown={(event) => {
         if (!isComposerSubmitKey({ key: event.key, shiftKey: event.shiftKey, isComposing: event.nativeEvent.isComposing })) return;
         event.preventDefault();
         if (canSend) event.currentTarget.form?.requestSubmit();
-      }} placeholder="Enter the next operator payload…" rows={2} required aria-keyshortcuts="Enter Shift+Enter" />
+      }} placeholder="Enter the next operator payload…" rows={2} required aria-keyshortcuts="Enter Shift+Enter ArrowUp ArrowDown" />
       <div className="composer-actions">
         <PayloadWorkbench value={message} sourcePayloadRevisionId={sourcePayloadRevisionId} context={{
           projectId: data.session.projectId,
@@ -563,14 +585,14 @@ function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchDa
           branchName: branch.name,
           contextNodeId: branch.headNodeId,
           path: pathToRoot(data.nodes, branch.headNodeId)
-        }} onUse={(selection) => { setMessage(selection.text); setSourcePayloadRevisionId(selection.sourcePayloadRevisionId); }} />
+        }} onUse={(selection) => { setMessage(selection.text); setSourcePayloadRevisionId(selection.sourcePayloadRevisionId); setHistoryReset((value) => value + 1); }} />
         <Button disabled={!canSend}>{send.isPending ? <span className="spinner small" /> : <Play size={16} />} Run</Button>
       </div>
     </form>
-    <small className="composer-shortcut">Enter to run · Shift+Enter for a new line</small>
+    <small className="composer-shortcut">Enter to run · Shift+Enter for a new line · ↑ at start for history</small>
     {!data.session.providerProfileId && <small className="composer-hint">Select a provider and model in the inspector before running.</small>}
     {send.error && <div className="form-error">{send.error.message}</div>}
-  </div>;
+  </ComposerPanel>;
 }
 
 export interface RunEventEnvelope {
