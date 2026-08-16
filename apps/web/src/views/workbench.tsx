@@ -10,6 +10,7 @@ import rehypeSanitize from "rehype-sanitize";
 import { Activity, Archive, ArrowLeft, Check, ChevronDown, CircleStop, Code2, Download, Eye, FilePlus2, GitBranch, GitCompare, LocateFixed, Paperclip, Play, RotateCcw, Save, ShieldAlert, SlidersHorizontal, Split, Wrench } from "lucide-react";
 import { pathToRoot, type JsonObject, type JsonValue, type MessagePart, type ResolvedConfig } from "@lathe/domain";
 import { api, consumeEvents, downloadApiFile, jsonBody } from "../api.js";
+import { BranchExportAction } from "../components/branch-export-action.js";
 import { ContextMenu, type ContextMenuPoint } from "../components/context-menu.js";
 import { ComposerPanel, ComposerTextarea, type ComposerHistoryEntry, type ComposerValueOrigin } from "../components/conversation-composer.js";
 import { Button, Field, Input, Select, Textarea } from "../components/forms.js";
@@ -527,7 +528,7 @@ function BranchActions({ data, branch, selectedNode, onChanged }: { data: Workbe
     const name = await dialogs.prompt({ title: "Create checkpoint", description: "Save this node and the session's current immutable configuration for later restoration.", label: "Checkpoint name", defaultValue: "checkpoint", confirmLabel: "Save checkpoint" });
     if (name?.trim()) checkpoint.mutate(name.trim());
   };
-  return <><Button variant="ghost" onClick={() => void requestFork()} title="Fork selected node" aria-label="Fork selected node" disabled={fork.isPending}><GitBranch size={15} /></Button><Button variant="ghost" onClick={() => rewind.mutate()} title="Move branch head to selected node" aria-label="Move branch head to selected node" disabled={rewind.isPending}><RotateCcw size={15} /></Button><Button variant="ghost" onClick={() => void requestCheckpoint()} title="Checkpoint selected node" aria-label="Checkpoint selected node" disabled={checkpoint.isPending}><Archive size={15} /></Button></>;
+  return <><Button variant="ghost" onClick={() => void requestFork()} title="Fork selected node" aria-label="Fork selected node" disabled={fork.isPending}><GitBranch size={15} /></Button><Button variant="ghost" onClick={() => rewind.mutate()} title="Move branch head to selected node" aria-label="Move branch head to selected node" disabled={rewind.isPending}><RotateCcw size={15} /></Button><Button variant="ghost" onClick={() => void requestCheckpoint()} title="Checkpoint selected node" aria-label="Checkpoint selected node" disabled={checkpoint.isPending}><Archive size={15} /></Button><BranchExportAction key={branch.id} branch={branch} /></>;
 }
 
 function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchData; branch: BranchRef; onRunStarted(id: string): void; onChanged(): void }) {

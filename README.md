@@ -84,7 +84,7 @@ SQLite and PostgreSQL migrations run automatically at server startup.
 2. Create or import prompt/tool revisions, or start with one of the three built-in harnesses.
 3. Create a project, then a session. The harness becomes an editable session draft; the original revision remains unchanged.
 4. Select a provider/model and preview the compiled prompt and tools in the inspector.
-5. Run a payload. Select any earlier node to fork, rewind, or checkpoint it; choose another branch in the comparison selector to inspect the divergence.
+5. Run a payload. Select any earlier node to fork, rewind, or checkpoint it; choose another branch in the comparison selector to inspect the divergence. The branch-toolbar download action exports the active branch as a ready-to-send JSON request body for the currently selected provider protocol and current session configuration.
 6. Review normalized output and the redacted raw trace. Resolve tool calls manually, with a mock, through an approved real target, or through an approved MCP server.
 7. Save a reusable harness or record a finding and export its reproducible bundle.
 
@@ -131,6 +131,8 @@ Every real or MCP tool call requires operator approval by default. A session can
 ## Reproducible artifacts
 
 Harness and finding exports are versioned ZIP bundles with a manifest, Markdown summary, role-separated content, and SHA-256 checksums. Import validation rejects unsafe paths, hash mismatches, malformed schemas, unsupported ZIP features, and configured size/expansion limits. Credentials are redacted or replaced by symbolic references; imported scripts are disabled and untrusted.
+
+Branch API exports are intentionally plain JSON rather than Lathe artifact bundles. They contain the active branch head path, compiled system prompt, enabled tools, model options, tool calls/results, and supported attachments in OpenAI Responses, OpenAI Chat Completions, or Anthropic Messages wire format. They use the session's current configuration, set `stream` to `false`, exclude sibling branches and Lathe evidence metadata, and never include provider URLs or headers. Stored credential values are scrubbed; attachments containing known credential material are rejected instead of exported.
 
 Do not treat export redaction as a substitute for review. Inspect a bundle before sharing it: transcripts, prompts, tool output, attachments, and model responses can contain sensitive information that is not a stored credential.
 

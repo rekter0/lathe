@@ -32,7 +32,7 @@ import type { ContentStore, LatheRepository } from "@lathe/db";
 import {
   UnsafeAssetCredentialError,
   assertSafeAssetCredentials,
-  assetCredentialValues,
+  collectExportSecrets,
   sanitizeAssetRevision
 } from "./security.js";
 
@@ -355,48 +355,6 @@ async function findingPayloadLineage(
   };
 }
 
-async function allSecrets(repository: LatheRepository): Promise<string[]> {
-  // Historical runs and artifacts can still reference superseded provider
-  // revisions, so export redaction must include archived credentials too.
-  const providers = await repository.listProviderProfiles(true);
-  const values = providers.flatMap((profile) => [profile.credential, ...Object.values(profile.headers)]);
-  const sensitive = /authorization|api[-_]?key|token|secret|password|credential|cookie/i;
-  const symbolicReference = /(?:id|ref|reference|name)$/i;
-  const collect = (value: JsonValue, key = "") => {
-    if (typeof value === "string" && sensitive.test(key) && !symbolicReference.test(key)) values.push(value);
-    else if (Array.isArray(value)) value.forEach((item) => collect(item, key));
-    else if (value && typeof value === "object") for (const [childKey, item] of Object.entries(value)) collect(item, childKey);
-  };
-  for (const profile of providers) {
-    collect(profile.extraBody);
-    for (const urlValue of [profile.baseUrl, profile.endpointOverride]) {
-      if (!urlValue) continue;
-      try {
-        const url = new URL(urlValue);
-        for (const value of [url.username, url.password]) {
-          if (!value) continue;
-          try { values.push(decodeURIComponent(value)); } catch { values.push(value); }
-        }
-        for (const [name, value] of url.searchParams) if (sensitive.test(name)) values.push(value);
-      } catch {
-        // Invalid legacy URLs are rejected on use; other known values are still scrubbed.
-      }
-    }
-  }
-  // Findings intentionally retain exact immutable revisions after they are
-  // superseded. Include archived executable/MCP assets so credentials from a
-  // historical revision are still scrubbed from every exported evidence file.
-  for (const asset of await repository.listAssetRevisions(undefined, true)) {
-    collect(asset.value);
-    values.push(...assetCredentialValues(asset));
-  }
-  for (const secret of await repository.listSecrets()) {
-    const value = await repository.resolveSecret(secret.id);
-    if (value) values.push(value);
-  }
-  return [...new Set(values.filter((value) => value.length >= 4))];
-}
-
 export function registerArtifactRoutes(app: Hono, repository: LatheRepository, contentStore: ContentStore): void {
   app.get("/api/harnesses/:id/export", async (context) => {
     const assets = await repository.listAssetRevisions();
@@ -427,7 +385,7 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
       metadata: { name: harness.name, revision: harness.revision, provenance: harness.provenance },
       summaryMarkdown: `# ${harness.name}\n\n${harness.description}\n\nExported from Lathe at ${nowIso()}.\n`,
       files,
-      secretValues: await allSecrets(repository)
+      secretValues: await collectExportSecrets(repository)
     });
     return bytesResponse(archive, `${harness.name.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lathe-harness`);
   });
@@ -503,7 +461,7 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
       metadata: finding as unknown as JsonValue,
       summaryMarkdown: `# ${finding.title}\n\n**Severity:** ${finding.severity}\n\n${finding.summary}\n\n## Expected\n\n${finding.expected}\n\n## Observed\n\n${finding.observed}\n`,
       files,
-      secretValues: await allSecrets(repository)
+      secretValues: await collectExportSecrets(repository)
     });
     return bytesResponse(archive, `${finding.title.replaceAll(/[^a-z0-9]+/gi, "-").toLowerCase()}.lathe-finding`);
   });

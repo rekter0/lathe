@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import type { MiddlewareHandler } from "hono";
 import { redactJson, type AssetKind, type AssetRevision, type JsonObject, type JsonValue } from "@lathe/domain";
+import type { LatheRepository } from "@lathe/db";
 
 export const REDACTED_ASSET_VALUE = "<redacted>";
 
@@ -130,6 +131,46 @@ export function assetCredentialValues(asset: AssetRevision): string[] {
   return values;
 }
 
+/** Collect every credential value known to Lathe before emitting export data. */
+export async function collectExportSecrets(repository: LatheRepository): Promise<string[]> {
+  // Historical branches can reference superseded revisions, so include archived
+  // provider and executable/MCP profiles rather than only the active heads.
+  const providers = await repository.listProviderProfiles(true);
+  const values = providers.flatMap((profile) => [profile.credential, ...Object.values(profile.headers)]);
+  const sensitive = /authorization|api[-_]?key|token|secret|password|credential|cookie/i;
+  const symbolicReference = /(?:id|ref|reference|name)$/i;
+  const collect = (value: JsonValue, key = "") => {
+    if (typeof value === "string" && sensitive.test(key) && !symbolicReference.test(key)) values.push(value);
+    else if (Array.isArray(value)) value.forEach((item) => collect(item, key));
+    else if (value && typeof value === "object") for (const [childKey, item] of Object.entries(value)) collect(item, childKey);
+  };
+  for (const profile of providers) {
+    collect(profile.extraBody);
+    for (const urlValue of [profile.baseUrl, profile.endpointOverride]) {
+      if (!urlValue) continue;
+      try {
+        const url = new URL(urlValue);
+        for (const value of [url.username, url.password]) {
+          if (!value) continue;
+          try { values.push(decodeURIComponent(value)); } catch { values.push(value); }
+        }
+        for (const [name, value] of url.searchParams) if (sensitive.test(name)) values.push(value);
+      } catch {
+        // Invalid legacy URLs are rejected on use; other known values are still scrubbed.
+      }
+    }
+  }
+  for (const asset of await repository.listAssetRevisions(undefined, true)) {
+    collect(asset.value);
+    values.push(...assetCredentialValues(asset));
+  }
+  for (const secret of await repository.listSecrets()) {
+    const value = await repository.resolveSecret(secret.id);
+    if (value) values.push(value);
+  }
+  return [...new Set(values.filter((value) => value.length >= 4))];
+}
+
 export class UnsafeAssetCredentialError extends Error {
   override readonly name = "UnsafeAssetCredentialError";
 }
@@ -244,7 +285,7 @@ export function localSecurity(token: string): MiddlewareHandler {
   };
 }
 
-function redactKnownValues(value: JsonValue, secrets: string[]): JsonValue {
+export function redactKnownValues(value: JsonValue, secrets: readonly string[]): JsonValue {
   if (typeof value === "string") return secrets.reduce((result, secret) => secret.length >= 4 ? result.split(secret).join("<redacted>") : result, value);
   if (Array.isArray(value)) return value.map((item) => redactKnownValues(item, secrets));
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactKnownValues(item, secrets)]));

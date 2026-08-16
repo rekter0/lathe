@@ -14,6 +14,7 @@ import {
   createSessionSchema,
   moveBranchSchema,
   nowIso,
+  pathToRoot,
   resolvedConfigSchema,
   sha256Json,
   updateProjectSchema,
@@ -21,16 +22,25 @@ import {
   type AssetKind,
   type JsonObject,
   type JsonValue,
+  type MessageNode,
   type MessagePart,
   type ResolvedConfig
 } from "@lathe/domain";
 import type { ContentStore, LatheRepository, ResourceDeletionResult } from "@lathe/db";
 import { previewBatchVariation, type BatchVaryPlan } from "@lathe/automation";
-import { discoverProviderModels, redactText } from "@lathe/providers";
+import {
+  ProviderCompileError,
+  compileProviderRequest,
+  discoverProviderModels,
+  redactJson as redactProviderJson,
+  redactText
+} from "@lathe/providers";
 import {
   UnsafeAssetCredentialError,
   assertSafeAssetCredentials,
+  collectExportSecrets,
   localSecurity,
+  redactKnownValues,
   restoreAssetRevisionRedactions,
   restoreProviderRevisionSecrets,
   sanitizeAssetRevision,
@@ -49,6 +59,11 @@ import {
   payloadPipelineValueSchema,
   payloadTechniqueValueSchema
 } from "./payload-schemas.js";
+import {
+  buildCanonicalGenerationRequest,
+  resolvedProviderConfig,
+  transportProviderProfile
+} from "./provider-request.js";
 
 export interface AppDependencies {
   repository: LatheRepository;
@@ -108,6 +123,51 @@ function resourceInUseMessage(label: string, result: ResourceDeletionResult): st
     .join(", ");
   const remainder = result.references.length - 3;
   return `${label} is still in use by ${examples}${remainder > 0 ? ` and ${remainder} more reference${remainder === 1 ? "" : "s"}` : ""}. Remove those references before deleting it.`;
+}
+
+const MAX_BRANCH_EXPORT_ATTACHMENT_BYTES = 128 * 1024 * 1024;
+
+function branchExportContentDisposition(branchName: string, protocol: string): string {
+  const displayName = `${branchName.trim() || "branch"}-${protocol}.json`;
+  const asciiBase = branchName
+    .normalize("NFKD")
+    .replaceAll(/[^a-z0-9]+/gi, "-")
+    .replaceAll(/^-+|-+$/g, "")
+    .toLowerCase() || "branch";
+  const asciiName = `${asciiBase}-${protocol}.json`;
+  const encodedName = encodeURIComponent(displayName).replaceAll(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${asciiName}"; filename*=UTF-8''${encodedName}`;
+}
+
+async function validateBranchExportAttachments(
+  repository: LatheRepository,
+  contentStore: ContentStore,
+  projectId: string,
+  nodes: readonly MessageNode[],
+  secrets: readonly string[]
+): Promise<void> {
+  const ids = new Set(nodes.flatMap((node) => node.parts.flatMap((part) => part.type === "attachment" ? [part.attachmentId] : [])));
+  let totalBytes = 0;
+  for (const id of ids) {
+    const attachment = await repository.getAttachment(id);
+    if (!attachment || attachment.projectId !== projectId) {
+      throw new HTTPException(409, { message: `Branch references unavailable attachment ${id}` });
+    }
+    let bytes: Buffer;
+    try {
+      bytes = await contentStore.get(attachment.sha256);
+    } catch {
+      throw new HTTPException(409, { message: `Branch attachment ${attachment.fileName} is missing from the content store` });
+    }
+    totalBytes += bytes.byteLength;
+    if (totalBytes > MAX_BRANCH_EXPORT_ATTACHMENT_BYTES) {
+      throw new HTTPException(413, { message: "Branch attachments exceed the 128 MiB API JSON export limit" });
+    }
+    const exposedSecret = secrets.find((secret) => bytes.includes(Buffer.from(secret, "utf8")));
+    if (exposedSecret) {
+      throw new HTTPException(409, { message: `Branch attachment ${attachment.fileName} contains stored credential material and cannot be exported` });
+    }
+  }
 }
 
 export function createApp(dependencies: AppDependencies): Hono {
@@ -330,6 +390,55 @@ export function createApp(dependencies: AppDependencies): Hono {
   });
 
   app.get("/api/sessions/:id/branches", async (context) => context.json({ branches: await repository.listBranches(context.req.param("id")) }));
+  app.get("/api/sessions/:sessionId/branches/:branchId/export", async (context) => {
+    const session = await repository.getSession(context.req.param("sessionId"));
+    if (!session) throw new HTTPException(404, { message: "Session not found" });
+    const branch = (await repository.listBranches(session.id)).find((item) => item.id === context.req.param("branchId"));
+    if (!branch) throw new HTTPException(404, { message: "Branch not found in this session" });
+    if (!session.providerProfileId || !session.modelId) {
+      throw new HTTPException(409, { message: "Select a provider and model before exporting an API request" });
+    }
+    const profile = await repository.getProviderProfile(session.providerProfileId);
+    if (!profile) throw new HTTPException(409, { message: "The selected provider revision is unavailable" });
+
+    const nodes = await repository.listNodes(session.id);
+    let path: MessageNode[];
+    try {
+      path = pathToRoot(nodes, branch.headNodeId);
+    } catch {
+      throw new HTTPException(409, { message: "The branch graph is incomplete and cannot be exported" });
+    }
+    const secrets = await collectExportSecrets(repository);
+    await validateBranchExportAttachments(repository, contentStore, session.projectId, path, secrets);
+    const config = resolvedProviderConfig(profile, session.modelId, session.draftConfig);
+
+    try {
+      const request = await buildCanonicalGenerationRequest(repository, contentStore, path, config, profile, false);
+      const safeProfile = {
+        ...transportProviderProfile(profile),
+        extraBody: redactProviderJson(profile.extraBody, secrets) as JsonObject
+      };
+      const safeRequest = {
+        ...request,
+        extraBody: redactProviderJson(request.extraBody ?? {}, secrets) as JsonObject
+      };
+      const compiled = compileProviderRequest(safeProfile, safeRequest);
+      const body = redactKnownValues(compiled.body, secrets);
+      return new Response(`${JSON.stringify(body, null, 2)}\n`, {
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Content-Disposition": branchExportContentDisposition(branch.name, profile.protocol),
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff"
+        }
+      });
+    } catch (error) {
+      if (error instanceof ProviderCompileError) {
+        throw new HTTPException(422, { message: `Branch cannot be represented in ${profile.protocol}: ${error.message}` });
+      }
+      throw error;
+    }
+  });
   app.post("/api/branches", async (context) => {
     const input = await parseBody(context.req.raw, createBranchSchema);
     const branch = await repository.createBranch(input.sessionId, input.name, input.headNodeId ?? null);

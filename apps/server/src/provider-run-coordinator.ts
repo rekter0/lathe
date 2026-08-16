@@ -1,5 +1,4 @@
 import {
-  compileSystemPrompt,
   emptyResolvedConfig,
   pathToRoot,
   type JsonObject,
@@ -40,19 +39,21 @@ import {
 import {
   compileProviderRequest,
   executeProviderRequest,
-  redactHeaders,
-  redactJson as redactProviderJson,
   redactUrl,
   type CanonicalContentPart,
   type CanonicalGenerationRequest,
   type CanonicalMessage,
-  type CanonicalToolCall,
   type NormalizedProviderEvent,
   type ProviderFailure,
   type ProviderUsage
 } from "@lathe/providers";
 import type { EventHub } from "./events.js";
 import { ProviderOutcomeTracker } from "./provider-outcome.js";
+import {
+  buildCanonicalGenerationRequest,
+  resolvedProviderConfig,
+  transportProviderProfile
+} from "./provider-request.js";
 import type { RunCoordinator, StartedRun, StartRunInput } from "./run-coordinator.js";
 
 interface ToolAccumulator {
@@ -278,51 +279,6 @@ function mcpServerForApproval(prepared: PreparedToolCall): JsonObject {
   };
 }
 
-function safeProviderSnapshot(profile: ProviderProfile, modelId: string, config: ResolvedConfig): ResolvedConfig {
-  const knownSecrets = [profile.credential, ...Object.values(profile.headers)].filter(Boolean);
-  const headers = redactHeaders(profile.headers, knownSecrets);
-  const model = profile.models.find((entry) => entry.id === modelId);
-  return {
-    ...structuredClone(config),
-    toolApprovalMode: config.toolApprovalMode ?? "manual",
-    provider: {
-      profileId: profile.id,
-      profileRevision: profile.revision,
-      protocol: profile.protocol,
-      label: profile.label,
-      baseUrl: redactUrl(profile.baseUrl, knownSecrets),
-      endpointOverride: profile.endpointOverride === null
-        ? null
-        : redactUrl(profile.endpointOverride, knownSecrets),
-      modelId,
-      headers,
-      extraBody: redactProviderJson(profile.extraBody, knownSecrets) as JsonObject,
-      capabilities: model?.capabilities ?? {
-        streaming: true,
-        tools: true,
-        images: false,
-        files: false,
-        jsonMode: false,
-        maxContextTokens: null
-      }
-    }
-  };
-}
-
-function providerProfile(profile: ProviderProfile) {
-  return {
-    id: profile.id,
-    label: profile.label,
-    protocol: profile.protocol,
-    baseUrl: profile.baseUrl,
-    credential: profile.credential,
-    headers: profile.headers,
-    extraBody: profile.extraBody,
-    endpointOverride: profile.endpointOverride,
-    models: profile.models
-  } as const;
-}
-
 export class ProviderRunCoordinator implements RunCoordinator {
   private readonly controllers = new Map<string, AbortController>();
   private readonly pendingTools = new Map<string, PendingToolRun>();
@@ -382,7 +338,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
     if (!session.providerProfileId || !session.modelId) throw new Error("Select a provider and model before starting a run");
     const profile = await this.repository.getProviderProfile(session.providerProfileId);
     if (!profile) throw new Error("Provider profile not found");
-    const config = safeProviderSnapshot(profile, session.modelId, input.configOverride ?? session.draftConfig);
+    const config = resolvedProviderConfig(profile, session.modelId, input.configOverride ?? session.draftConfig);
     const snapshot = await this.repository.createConfigSnapshot(session.id, config);
     const run = await this.repository.createRun({
       sessionId: session.id,
@@ -658,7 +614,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
         order: 0
       }];
     }
-    const config = safeProviderSnapshot(profile, session.modelId, draft);
+    const config = resolvedProviderConfig(profile, session.modelId, draft);
     const snapshot = await this.repository.createConfigSnapshot(session.id, config);
     const nested = await this.repository.createRun({
       sessionId: parent.sessionId,
@@ -702,10 +658,10 @@ export class ProviderRunCoordinator implements RunCoordinator {
     try {
       await this.repository.updateRun(nested.id, { status: "streaming", startedAt: startedAt.toISOString() });
       this.events.publish(`run:${nested.id}`, "run.started", { parentRunId, approvalId: request.id });
-      const compiled = compileProviderRequest(providerProfile(profile), generation);
+      const compiled = compileProviderRequest(transportProviderProfile(profile), generation);
       compileWarnings.push(...compiled.warnings.map((warning) => ({ code: warning.code, message: warning.message })));
       if (compileWarnings.length > 0) this.events.publish(`run:${nested.id}`, "provider.compile-warnings", compileWarnings);
-      for await (const item of executeProviderRequest(providerProfile(profile), generation, { signal: controller.signal, fetch: this.fetchImpl })) {
+      for await (const item of executeProviderRequest(transportProviderProfile(profile), generation, { signal: controller.signal, fetch: this.fetchImpl })) {
         await trace.append({
           direction: item.trace.kind === "request" ? "request" : item.trace.kind === "error" ? "internal" : "response",
           kind: item.trace.kind === "sse" ? "sse" : item.trace.kind === "error" ? "error" : "body",
@@ -849,50 +805,6 @@ export class ProviderRunCoordinator implements RunCoordinator {
     }
   }
 
-  private async canonicalContent(node: MessageNode, config: ResolvedConfig): Promise<string | CanonicalContentPart[]> {
-    const parts: CanonicalContentPart[] = [];
-    for (const part of node.parts) {
-      if (part.type === "text") parts.push({ type: "text", text: part.text });
-      if (part.type === "attachment") {
-        const attachment = await this.repository.getAttachment(part.attachmentId);
-        if (!attachment) continue;
-        const bytes = await this.contentStore.get(attachment.sha256);
-        const data = bytes.toString("base64");
-        if (attachment.mediaType.startsWith("image/") && config.provider?.capabilities.images) {
-          parts.push({ type: "image", mediaType: attachment.mediaType, data });
-        } else if (config.provider?.capabilities.files) {
-          parts.push({ type: "file", name: attachment.fileName, mediaType: attachment.mediaType, data });
-        } else {
-          parts.push({ type: "text", text: `[Stored attachment not supported by this model: ${attachment.fileName} (${attachment.mediaType}, sha256:${attachment.sha256})]` });
-        }
-      }
-    }
-    return parts.length === 1 && parts[0]?.type === "text" ? parts[0].text : parts;
-  }
-
-  private async canonicalMessages(nodes: MessageNode[], config: ResolvedConfig): Promise<CanonicalMessage[]> {
-    const messages: CanonicalMessage[] = [];
-    for (const node of nodes) {
-      if (node.role === "tool") {
-        for (const part of node.parts) {
-          if (part.type !== "tool-result") continue;
-          messages.push({ role: "tool", content: JSON.stringify(part.result), toolCallId: part.callId, isError: part.isError });
-        }
-        continue;
-      }
-      const toolCalls: CanonicalToolCall[] = node.parts.filter((part): part is ToolCallPart => part.type === "tool-call").map((part) => ({
-        id: part.callId, name: part.name, arguments: part.arguments
-      }));
-      messages.push({
-        id: node.id,
-        role: node.role,
-        content: await this.canonicalContent(node, config),
-        ...(toolCalls.length > 0 ? { toolCalls } : {})
-      });
-    }
-    return messages;
-  }
-
   private async perform(runId: string, profile: ProviderProfile, config: ResolvedConfig, contextNodeId: string | null): Promise<void> {
     const controller = new AbortController();
     this.controllers.set(runId, controller);
@@ -917,23 +829,14 @@ export class ProviderRunCoordinator implements RunCoordinator {
       this.events.publish(`run:${runId}`, "run.started", { runId });
       const allNodes = await this.repository.listNodes(run.sessionId);
       const history = pathToRoot(allNodes, contextNodeId);
-      const request: CanonicalGenerationRequest = {
-        model: config.provider?.modelId ?? "",
-        messages: await this.canonicalMessages(history, config),
-        systemPrompt: compileSystemPrompt(config.promptBlocks),
-        tools: config.tools.filter((tool) => tool.enabled).map((tool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })),
-        stream: true,
-        ...(config.temperature === null ? {} : { temperature: config.temperature }),
-        ...(config.maxOutputTokens === null ? {} : { maxOutputTokens: config.maxOutputTokens }),
-        extraBody: config.protocolOverrides[profile.protocol] ?? {}
-      };
-      compileWarnings = compileProviderRequest(providerProfile(profile), request).warnings.map((warning) => ({
+      const request = await buildCanonicalGenerationRequest(this.repository, this.contentStore, history, config, profile, true);
+      compileWarnings = compileProviderRequest(transportProviderProfile(profile), request).warnings.map((warning) => ({
         code: warning.code,
         message: warning.message
       }));
       if (compileWarnings.length > 0) this.events.publish(`run:${runId}`, "provider.compile-warnings", compileWarnings);
 
-      for await (const item of executeProviderRequest(providerProfile(profile), request, { signal: controller.signal, fetch: this.fetchImpl })) {
+      for await (const item of executeProviderRequest(transportProviderProfile(profile), request, { signal: controller.signal, fetch: this.fetchImpl })) {
         await trace.append({
           direction: item.trace.kind === "request" ? "request" : item.trace.kind === "error" ? "internal" : "response",
           kind: item.trace.kind === "sse" ? "sse" : item.trace.kind === "error" ? "error" : "body",
