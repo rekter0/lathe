@@ -200,6 +200,7 @@ code, pre { font-family: var(--mono); letter-spacing: normal; text-transform: no
 .message header .message-resend { display: inline-flex; align-items: center; gap: 3px; padding-left: 7px; border-left: 1px solid var(--line); }
 .message header .message-view-toggle { display: inline-flex; align-items: center; gap: 3px; padding-left: 7px; border-left: 1px solid var(--line); }
 .message header .message-view-toggle[aria-pressed="true"] { color: var(--green); }
+.message header .message-run-select { width: auto; max-width: 112px; padding: 0 15px 0 0; color: #6f7d76; background: transparent; border: 0; outline: 0; cursor: pointer; font: .5rem var(--mono); letter-spacing: 0; }.message header .message-run-select:hover, .message header .message-run-select:focus-visible { color: var(--green); }
 .message-reasoning { margin: 0 0 12px; background: #0b1210; border: 1px solid #304139; border-radius: 4px; }
 .message-reasoning summary { display: flex; align-items: center; gap: 6px; padding: 7px 9px; color: #91a49a; cursor: pointer; font: .5rem var(--mono); letter-spacing: .08em; text-transform: uppercase; list-style: none; }
 .message-reasoning summary::-webkit-details-marker { display: none; }

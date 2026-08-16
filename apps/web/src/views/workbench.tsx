@@ -303,13 +303,37 @@ function Transcript({ nodes, runs, data, branchId, sessionId, liveRunId = null, 
     {nodes.length === 0 && <div className="transcript-empty"><Split size={28} /><h2>The branch starts here</h2><p>Send a payload below. Every response becomes a forkable node.</p></div>}
     {nodes.map((node) => {
       const run = node.sourceRunId ? runs.find((item) => item.id === node.sourceRunId) : undefined;
-      return <TranscriptMessage key={node.id} node={node} {...(run ? { run } : {})} {...(data ? { data } : {})} {...(onBranchCreated ? { onBranchCreated } : {})} {...(onRunStarted ? { onRunStarted } : {})} onSelectRun={onSelectRun} />;
+      const inspectRuns = inspectableRunsForNode(node, runs);
+      return <TranscriptMessage key={node.id} node={node} inspectRuns={inspectRuns} {...(run ? { run } : {})} {...(data ? { data } : {})} {...(onBranchCreated ? { onBranchCreated } : {})} {...(onRunStarted ? { onRunStarted } : {})} onSelectRun={onSelectRun} />;
     })}
     {showLiveMessage && liveRunId && <StreamingTranscriptMessage key={liveRunId} runId={liveRunId} output={streamed} onSelectRun={onSelectRun} />}
   </div>;
 }
 
-export function TranscriptMessage({ node, run, data, onBranchCreated, onRunStarted, onSelectRun }: { node: MessageNode; run?: ModelRun; data?: WorkbenchData; onBranchCreated?(id: string): void; onRunStarted?(id: string): void; onSelectRun(id: string): void }) {
+export function inspectableRunsForNode(node: MessageNode, runs: ModelRun[]): ModelRun[] {
+  if (node.role === "user") {
+    return runs
+      .filter((run) => run.contextNodeId === node.id && recordValue(run.normalizedOutput)?.kind !== "mcp-sampling")
+      .toSorted((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
+  }
+  if (!node.sourceRunId) return [];
+  const run = runs.find((candidate) => candidate.id === node.sourceRunId);
+  return run ? [run] : [];
+}
+
+function MessageRunAction({ operator, runs, branches = [], onSelectRun }: { operator: boolean; runs: ModelRun[]; branches?: BranchRef[]; onSelectRun(id: string): void }) {
+  if (runs.length === 0) return null;
+  if (runs.length === 1) {
+    const run = runs[0]!;
+    return <button type="button" aria-label={operator ? "Inspect request run" : "Inspect run"} onClick={() => onSelectRun(run.id)}>{operator ? "inspect request" : "inspect run"}</button>;
+  }
+  return <select className="message-run-select" aria-label="Inspect a run for this operator message" value="" onChange={(event) => { if (event.target.value) onSelectRun(event.target.value); }}>
+    <option value="">inspect {runs.length} runs…</option>
+    {runs.map((run, index) => <option value={run.id} key={run.id}>{index === 0 ? "latest · " : ""}{branches.find((branch) => branch.id === run.branchId)?.name ?? "branch"} · {run.status} · {run.id.slice(0, 8)} · {new Date(run.createdAt).toLocaleTimeString()}</option>)}
+  </select>;
+}
+
+export function TranscriptMessage({ node, run, inspectRuns = run ? [run] : [], data, onBranchCreated, onRunStarted, onSelectRun }: { node: MessageNode; run?: ModelRun; inspectRuns?: ModelRun[]; data?: WorkbenchData; onBranchCreated?(id: string): void; onRunStarted?(id: string): void; onSelectRun(id: string): void }) {
   const [raw, setRaw] = useState(false);
   const reasoning = reasoningFromRun(run);
   const providerOutcome = providerOutcomeFromRun(run);
@@ -317,7 +341,7 @@ export function TranscriptMessage({ node, run, data, onBranchCreated, onRunStart
     <header>
       <span>{node.role === "assistant" ? "MODEL" : node.role === "tool" ? "TOOL RESULT" : "OPERATOR"}</span>
       <time>{new Date(node.createdAt).toLocaleTimeString()}</time>
-      {run && <button onClick={() => onSelectRun(run.id)}>inspect run</button>}
+      <MessageRunAction operator={node.role === "user"} runs={inspectRuns} {...(data ? { branches: data.branches } : {})} onSelectRun={onSelectRun} />
       <MessageViewToggle raw={raw} onToggle={() => setRaw((current) => !current)} />
       {node.role === "user" && data && <ResendAction node={node} data={data} {...(onBranchCreated ? { onBranchCreated } : {})} {...(onRunStarted ? { onRunStarted } : {})} />}
     </header>

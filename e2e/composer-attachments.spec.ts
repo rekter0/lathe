@@ -25,6 +25,11 @@ interface MessageNode {
 
 interface WorkbenchResponse {
   nodes: MessageNode[];
+  runs: Array<{
+    id: string;
+    contextNodeId: string | null;
+    status: string;
+  }>;
   attachments: Array<{
     id: string;
     fileName: string;
@@ -128,13 +133,15 @@ test("pastes a screenshot and submits it as an attachment-only operator turn", a
   await expect(composer).toHaveValue("");
 
   let persistedNode: MessageNode | undefined;
+  let requestRun: WorkbenchResponse["runs"][number] | undefined;
   let persistedAttachment: WorkbenchResponse["attachments"][number] | undefined;
   await expect.poll(async () => {
     const workbench = await getWorkbench(request, sessionId);
     persistedNode = workbench.nodes.find((node) => node.role === "user" && node.parts.some((part) => part.type === "attachment" && part.name === pastedFileName));
+    requestRun = workbench.runs.find((run) => run.contextNodeId === persistedNode?.id);
     const attachmentId = persistedNode?.parts.find((part) => part.type === "attachment")?.attachmentId;
     persistedAttachment = workbench.attachments.find((attachment) => attachment.id === attachmentId);
-    return Boolean(persistedNode && persistedAttachment);
+    return Boolean(persistedNode && persistedAttachment && requestRun);
   }).toBe(true);
 
   expect(persistedNode!.parts).toEqual([
@@ -154,4 +161,9 @@ test("pastes a screenshot and submits it as an attachment-only operator turn", a
   const storedContent = await request.get(`/api/attachments/${persistedAttachment!.id}/content`, { headers: apiHeaders });
   expect(storedContent.status(), await storedContent.text()).toBe(200);
   expect(Buffer.from(await storedContent.body())).toEqual(Buffer.from(screenshotBytes));
+
+  const operatorMessage = page.locator(`[data-message-node-id="${persistedNode!.id}"]`);
+  await operatorMessage.getByRole("button", { name: "Inspect request run" }).click();
+  await expect(page.getByRole("tab", { name: "Run" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".run-status code")).toContainText(requestRun!.id.slice(0, 12));
 });

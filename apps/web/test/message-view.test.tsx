@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
-import { streamOutputFromEvents, TranscriptMessage, type RunEventEnvelope } from "../src/views/workbench.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { inspectableRunsForNode, streamOutputFromEvents, TranscriptMessage, type RunEventEnvelope } from "../src/views/workbench.js";
 import type { JsonObject } from "@lathe/domain";
 import type { MessageNode, ModelRun } from "../src/types.js";
 
@@ -17,6 +17,20 @@ function assistantNode(id: string, text: string, runId: string): MessageNode {
     parts: [{ type: "text", text }],
     sourceRunId: runId,
     configSnapshotId: "config-1",
+    sourcePayloadRevisionId: null,
+    createdAt
+  };
+}
+
+function operatorNode(id: string, text = "inspect this request"): MessageNode {
+  return {
+    id,
+    sessionId: "session-1",
+    parentId: null,
+    role: "user",
+    parts: [{ type: "text", text }],
+    sourceRunId: null,
+    configSnapshotId: null,
     sourcePayloadRevisionId: null,
     createdAt
   };
@@ -81,6 +95,43 @@ describe("transcript message views", () => {
     expect(within(messages[0]!).getByRole("button", { name: "Show rendered message" })).not.toBeNull();
     expect(within(messages[1]!).getByRole("button", { name: "Show raw message text" })).not.toBeNull();
     expect(within(messages[1]!).getByText("second").tagName).toBe("STRONG");
+  });
+
+  it("opens the request run from an operator message without rendering response evidence in that message", () => {
+    const onSelectRun = vi.fn();
+    const run = { ...modelRun("run-request", "private response reasoning"), contextNodeId: "operator-1" };
+    render(<TranscriptMessage node={operatorNode("operator-1")} inspectRuns={[run]} onSelectRun={onSelectRun} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Inspect request run" }));
+
+    expect(onSelectRun).toHaveBeenCalledWith("run-request");
+    expect(screen.queryByText("private response reasoning")).toBeNull();
+  });
+
+  it("keeps every direct attempt inspectable when an operator message has multiple runs", () => {
+    const onSelectRun = vi.fn();
+    const older = { ...modelRun("run-older", ""), contextNodeId: "operator-1", createdAt: "2026-08-15T12:00:00.000Z" };
+    const newer = { ...modelRun("run-newer", ""), contextNodeId: "operator-1", status: "failed" as const, createdAt: "2026-08-15T12:01:00.000Z" };
+    render(<TranscriptMessage node={operatorNode("operator-1")} inspectRuns={[newer, older]} onSelectRun={onSelectRun} />);
+
+    const picker = screen.getByRole("combobox", { name: "Inspect a run for this operator message" });
+    expect(within(picker).getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "inspect 2 runs…",
+      expect.stringContaining("latest · branch · failed · run-newe"),
+      expect.stringContaining("branch · completed · run-olde")
+    ]);
+    fireEvent.change(picker, { target: { value: "run-older" } });
+    expect(onSelectRun).toHaveBeenCalledWith("run-older");
+  });
+
+  it("maps operator nodes through run context while excluding nested MCP sampling runs", () => {
+    const operator = operatorNode("operator-1");
+    const older = { ...modelRun("run-a", ""), contextNodeId: operator.id, createdAt: "2026-08-15T12:00:00.000Z" };
+    const newer = { ...modelRun("run-b", ""), contextNodeId: operator.id, createdAt: "2026-08-15T12:01:00.000Z" };
+    const nested = { ...modelRun("run-sampling", ""), contextNodeId: operator.id, createdAt: "2026-08-15T12:02:00.000Z", normalizedOutput: { kind: "mcp-sampling" } };
+
+    expect(inspectableRunsForNode(operator, [older, nested, newer]).map((run) => run.id)).toEqual(["run-b", "run-a"]);
+    expect(inspectableRunsForNode(assistantNode("assistant-1", "answer", "run-a"), [newer, older]).map((run) => run.id)).toEqual(["run-a"]);
   });
 
   it("displays structured provider blockage beside preserved partial output", () => {
