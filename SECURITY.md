@@ -48,6 +48,17 @@ Approval is required by default and displays the original arguments, edited argu
 
 A session may explicitly select **Bypass approval** for real and MCP tool calls. In that mode, commands start without a per-call operator decision, although the snapshotted policy, resolved launcher, arguments, output, and bypass decision remain evidence. Asset trust checks, handler isolation, execution limits, and separate MCP sampling/elicitation approvals still apply. Combining bypass approval with automatic tool continuation allows a bounded command sequence to run without stopping between calls; use a narrowly privileged target and a small turn limit. Never enable bypass for a command/target combination you would not run directly in a terminal.
 
+A provider can emit a structured tool call before ending its stream with a
+policy block or refusal. Lathe keeps the blocked classification and evidence,
+but a structurally valid captured call still follows the configured approval
+policy. Lathe does not reconstruct incomplete JSON or repair partial command
+text: it presents or executes only the exact captured arguments. Under manual
+approval, review that command as usual. Under bypass approval, a
+provider-truncated but syntactically valid command may execute immediately and
+fail or have effects before the block is shown; constrain bypass targets
+accordingly. Natural execution errors remain evidence and may be returned to
+the model when automatic continuation is enabled.
+
 Private SSH keys are referenced by path and are not copied into Lathe. Strict host-key checking and batch mode are required; maintain a trustworthy `known_hosts` file and SSH configuration.
 
 ## MCP

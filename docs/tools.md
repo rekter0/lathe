@@ -110,6 +110,22 @@ Unresolved approval still pauses the chain. Cancellation, the configured
 continuation limit, a failure before Lathe can form a tool-result node, or a
 failure to start the next model run still stops it.
 
+A provider may stream a structured tool call and then end the same response
+with a policy block or refusal. Lathe preserves that provider outcome as
+content-policy evidence, so the assistant turn remains visibly blocked, while
+still sending each structurally valid captured call through the session's
+normal manual-approval or bypass flow. These are independent facts: executing
+the call does not erase or reclassify the provider block.
+
+Lathe executes only the exact tool name and arguments it captured. It never
+completes truncated shell source, repairs incomplete JSON, or infers missing
+fields. Manual approval displays the captured arguments and resolved command;
+inspect them carefully because a syntactically valid string can still contain
+a command cut off mid-token. With Bypass approval, that exact partial command
+can run without pausing. If it fails naturally, Lathe records the tool error
+and, when Automatic tool continuation is enabled, returns that error to the
+model in the next request.
+
 ## Target environment
 
 Optional target-level environment values are merged into every command executed on that target:

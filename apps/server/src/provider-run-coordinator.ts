@@ -537,7 +537,15 @@ export class ProviderRunCoordinator implements RunCoordinator {
     });
     await this.repository.updateRun(runId, {
       status: "completed",
-      classification: parts.some((part) => part.isError) ? "tool-failure" : null,
+      // A provider policy decision and the result of a tool invocation are
+      // independent evidence. Keep the policy classification on the
+      // originating assistant turn even when its captured tool call later
+      // succeeds or fails; the tool-result parts retain the execution result.
+      classification: currentRun.classification === "content-policy"
+        ? "content-policy"
+        : parts.some((part) => part.isError)
+          ? "tool-failure"
+          : null,
       finishedAt: new Date().toISOString()
     });
     this.pendingTools.delete(runId);
@@ -955,6 +963,9 @@ export class ProviderRunCoordinator implements RunCoordinator {
       const providerOutcomeJson = providerOutcome.toJson();
       const outcomeClassification = providerOutcome.classification();
       const usageValue = usage ? JSON.parse(JSON.stringify(usage)) as JsonObject : null;
+      const policyBlockedToolCalls = toolParts.length > 0 && (
+        outcomeClassification === "content-policy" || providerFailure?.classification === "content-policy"
+      );
       const inertToolCallEvidence: JsonValue[] = toolParts.map((call) => ({
         callId: call.callId,
         name: call.name,
@@ -962,7 +973,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
         executable: false,
         reason: providerFailure ? "provider-error" : "provider-policy-block",
       }));
-      if (providerFailure) {
+      if (providerFailure && !policyBlockedToolCalls) {
         let resultNode: MessageNode | null = null;
         if (text || reasoning || toolParts.length > 0 || providerFailure.classification === "content-policy") {
           resultNode = await this.repository.appendNode({
@@ -1001,7 +1012,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
       }
       const parts: MessagePart[] = [];
       if (text) parts.push({ type: "text", text });
-      if (outcomeClassification === null) parts.push(...toolParts);
+      if (outcomeClassification === null || policyBlockedToolCalls) parts.push(...toolParts);
       if (parts.length === 0) parts.push({ type: "text", text: "" });
       const node = await this.repository.appendNode({
         sessionId: run.sessionId,
@@ -1014,24 +1025,26 @@ export class ProviderRunCoordinator implements RunCoordinator {
       });
       const prepared = new Map<string, PreparedToolCall>();
       const toolCallEvidence: JsonValue[] = [];
-      for (const call of outcomeClassification === null ? toolParts : []) {
+      for (const call of outcomeClassification === null || policyBlockedToolCalls ? toolParts : []) {
         const item = await this.prepareToolCall(config, call);
         prepared.set(call.callId, item);
         toolCallEvidence.push(this.preparedEvidence(item, run.sessionId, config.toolApprovalMode ?? "manual"));
       }
-      if (outcomeClassification !== null) toolCallEvidence.push(...inertToolCallEvidence);
+      if (outcomeClassification !== null && !policyBlockedToolCalls) toolCallEvidence.push(...inertToolCallEvidence);
       const normalized: JsonObject = {
         text,
         reasoning,
         toolCalls: toolCallEvidence,
         providerOutcome: providerOutcomeJson,
         compileWarnings,
+        ...(providerFailure === undefined ? {} : { error: providerFailure as unknown as JsonValue }),
       };
-      const awaitingTools = outcomeClassification === null && toolParts.length > 0;
+      const awaitingTools = toolParts.length > 0 && (providerFailure === undefined || policyBlockedToolCalls);
+      const classification = providerFailure?.classification ?? outcomeClassification;
       await this.repository.updateRun(runId, {
         resultNodeId: node.id,
         status: awaitingTools ? "awaiting-tool" : "completed",
-        classification: outcomeClassification,
+        classification,
         normalizedOutput: normalized,
         usage: usageValue,
         traceHash: stored.sha256,
@@ -1062,7 +1075,7 @@ export class ProviderRunCoordinator implements RunCoordinator {
         this.events.publish(`run:${runId}`, "run.completed", {
           resultNodeId: node.id,
           traceHash: stored.sha256,
-          ...(outcomeClassification === null ? {} : { classification: outcomeClassification }),
+          ...(classification === null ? {} : { classification }),
           providerOutcome: providerOutcomeJson,
         });
       }
@@ -1095,7 +1108,10 @@ export class ProviderRunCoordinator implements RunCoordinator {
     if (event.type === "content.delta") addText(event.text);
     if (event.type === "reasoning.delta") addReasoning(event.text);
     if (event.type === "tool_call.start") {
-      calls.set(event.index, { id: event.id ?? "", name: event.name ?? "", argumentsText: "" });
+      const call = calls.get(event.index) ?? { id: "", name: "", argumentsText: "" };
+      if (event.id) call.id = event.id;
+      if (event.name) call.name = event.name;
+      calls.set(event.index, call);
     }
     if (event.type === "tool_call.delta") {
       const call = calls.get(event.index) ?? { id: "", name: "", argumentsText: "" };
