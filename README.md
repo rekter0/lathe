@@ -1,34 +1,30 @@
 # Lathe
 
-Lathe is a local, operator-driven web workbench for manual AI red teaming. Its primary data model is a conversation tree: every message is an immutable node, while branches and checkpoints are movable references. That makes it possible to fork, rewind, compare, and reproduce an attack path without losing the evidence that led there.
+Lathe is a local, operator-driven workbench for manual AI red teaming. It keeps each conversation as an immutable tree so you can fork, rewind, compare, and reproduce an attack path without losing the evidence behind it.
 
-Lathe is deliberately not an autonomous agent or a scanner. The operator chooses the prompts, models, tools, branches, and approvals; Lathe handles the transcript and evidence bookkeeping.
+Lathe is not an autonomous scanner or agent. The operator chooses the prompts, models, tools, branches, and approvals; Lathe manages execution, history, and evidence.
 
-> **Early v1 software.** Run Lathe only on a trusted macOS or Linux machine. Provider and static MCP credentials are stored in plaintext in the local database. Approved host, container, and SSH commands run with the authority of the selected target. Read [SECURITY.md](./SECURITY.md) before using real credentials or tools.
+> **Early v1 software.** Run Lathe only on a trusted macOS or Linux machine. Provider and static MCP credentials are stored plaintext in the local database, and approved commands run with the authority of their selected target. Read [SECURITY.md](./SECURITY.md) before using real credentials or tools.
 
-## What is included
+## Highlights
 
-- Immutable conversation nodes, named branches, rewind/fork semantics, checkpoints, and aligned branch comparison.
-- Copy-on-write session configuration with ordered prompt blocks, tool bindings, provider options, and immutable generation snapshots.
-- Provider profiles for OpenAI Responses (`/v1/responses`), OpenAI Chat Completions (`/v1/chat/completions`), and Anthropic Messages (`/v1/messages`). Compatible gateways can use the matching protocol and a custom base URL.
-- Lathe-maintained Blank, Claude Code-inspired, and Codex-inspired harnesses. The inspired harnesses are approximations, not extracted vendor prompts.
-- Manual and deterministic mock tools, QuickJS-authored command builders/formatters, and host, existing Docker/Podman container, or system OpenSSH targets.
-- MCP client support through the official TypeScript SDK over stdio and Streamable HTTP, with negotiated capability snapshots and explicit approval gates.
-- Raw provider/MCP traces with configurable heuristic evidence redaction, content-addressed attachments, persisted automation jobs, and checksum-verified `.lathe-harness` and `.lathe-finding` bundles.
-- A Payload Workbench for deterministic transforms and pipelines, context-aware helper-model generation, independent candidate comparison/refinement, and immutable payload history.
-- SQLite by default or PostgreSQL selected at startup, both behind the same repository contract.
+- Immutable conversation nodes with named branches, checkpoints, rewind/fork, graph navigation, and side-by-side comparison.
+- OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages adapters, including compatible gateways such as OpenRouter.
+- Revisioned prompts, harnesses, tool definitions, execution targets, MCP profiles, and provider configurations.
+- Manual, mock, host, existing container, SSH, and MCP tool execution with approval or explicit session bypass.
+- Streamed text/reasoning, provider refusal and fallback classification, tool evidence, raw traces, annotations, and findings.
+- Project-scoped attachments, provider-native branch JSON exports, and checksum-verified `.lathe-harness` and `.lathe-finding` bundles.
+- A Payload Workbench for deterministic transforms, context-aware helper generation, candidate refinement/comparison, and immutable payload lineage.
+- Persistent replay, fan-out, and batch jobs with bounded concurrency and partial-result retention.
+- SQLite by default, with PostgreSQL available for relational storage.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for package boundaries and persistence rules, [docs/settings-provider.md](./docs/settings-provider.md) for provider endpoints and reasoning controls, [docs/tools.md](./docs/tools.md) for tool and execution-target examples, and [docs/payload-workbench.md](./docs/payload-workbench.md) for generator setup and the Transform/Generate/History workflow.
-
-## Quick start
-
-Prerequisites:
+## Requirements
 
 - Node.js 24.x
-- pnpm 11.4.0 (the project pins both the version and its SHA-512 digest)
+- pnpm 11.4.0 (pinned with its integrity digest)
 - macOS or Linux
 
-With Corepack available:
+## Run locally
 
 ```sh
 corepack enable
@@ -36,9 +32,9 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-If your Node installation does not include Corepack, install pnpm 11.4.0 using pnpm's documented standalone method, then run the final two commands.
+If Node does not provide Corepack, install the pinned pnpm release using pnpm's documented standalone method, then run the final two commands.
 
-The server prints a tokenized loopback URL. Open that exact URL; the web app moves the launch token into tab-scoped session storage and removes it from the address bar. Development runs Vite on `127.0.0.1:5173` and proxies `/api` to the server on `127.0.0.1:4317`.
+The server prints a tokenized loopback URL. Open that exact URL; the UI moves the token into tab-scoped session storage and removes it from the address bar. Development uses Vite on `127.0.0.1:5173` and the API on `127.0.0.1:4317`.
 
 For a built, single-process run:
 
@@ -46,142 +42,81 @@ For a built, single-process run:
 pnpm start
 ```
 
-`pnpm start` builds all packages and applications, then serves the API and built UI from the Hono server.
+## Data and configuration
 
-## Configuration
-
-Copy [`.env.example`](./.env.example) as a reference. Lathe reads environment variables from the launching process; it does not load `.env` files automatically.
+Lathe reads configuration from the launching process and does not load `.env` files automatically. See [`.env.example`](./.env.example).
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LATHE_HOST` | `127.0.0.1` | Bind host. v1 rejects anything except `127.0.0.1`, `localhost`, or `::1`. |
-| `LATHE_PORT` | `4317` | API port and built-UI port. |
-| `LATHE_API_TOKEN` | random per launch | Bearer token embedded in the printed launch URL. Set a stable value only for controlled automation. |
-| `LATHE_WEB_URL` | `http://127.0.0.1:5173` | Development UI URL used in the printed launch link when no built UI exists. |
-| `LATHE_DATA_DIR` | platform application-data directory | Overrides the directory for SQLite, blobs, traces, and staging data. |
-| `LATHE_DATABASE_URL` | unset | Unset selects SQLite. Set a `postgres://` or `postgresql://` URL for PostgreSQL; file/`sqlite:` values select a SQLite path. |
+| `LATHE_HOST` | `127.0.0.1` | Bind host; v1 accepts loopback hosts only. |
+| `LATHE_PORT` | `4317` | API and built-UI port. |
+| `LATHE_API_TOKEN` | Random per launch | API bearer token. Set a stable value only for controlled automation. |
+| `LATHE_WEB_URL` | `http://127.0.0.1:5173` | Development UI URL used in the printed launch link. |
+| `LATHE_DATA_DIR` | Platform data directory | SQLite, attachments, traces, exports, and staging data. |
+| `LATHE_DATABASE_URL` | Unset | Unset or a file/SQLite path selects SQLite; `postgres://` or `postgresql://` selects PostgreSQL. |
 
-Default data directories are:
+Default data directories:
 
 - macOS: `~/Library/Application Support/Lathe`
-- Linux: `${XDG_DATA_HOME:-~/.local/share}/lathe`
+- Linux: `$XDG_DATA_HOME/lathe`, or `~/.local/share/lathe` when `XDG_DATA_HOME` is unset
 
-Lathe creates the data directory with mode `0700` where supported and the SQLite database with mode `0600`. Remote PostgreSQL URLs must set `sslmode=require`, `verify-ca`, or `verify-full`; loopback PostgreSQL may run without TLS. PostgreSQL replaces relational storage only—attachments and trace blobs stay in `LATHE_DATA_DIR`.
+Lathe creates the data directory as `0700` and SQLite as `0600` where supported. PostgreSQL replaces relational storage only; attachments and trace blobs remain under `LATHE_DATA_DIR`. Migrations run automatically at startup.
 
-Example PostgreSQL launch:
+## First session
 
-```sh
-LATHE_DATABASE_URL='postgresql://lathe:lathe@127.0.0.1:5432/lathe' \
-LATHE_DATA_DIR='/absolute/path/to/lathe-data' \
-pnpm start
-```
+1. Open **Settings → Providers** and add a provider with the protocol its endpoint actually implements, its base URL and credential, and at least one model ID.
+2. Create a project and session, then start from a built-in harness or select prompt/tool revisions manually.
+3. Choose the provider/model, configure prompts and tools, preview the compiled configuration, and save the session draft.
+4. Send an operator payload. Inspect its compiled request from the operator turn, streamed response/evidence from the model turn, and any tool approvals in the run inspector.
+5. Fork or rewind from any node, compare branches, create checkpoints, and export a branch in the selected provider's request format.
+6. Record useful outcomes as findings, or open the magic-wand Payload Workbench to transform, generate, refine, and explicitly reuse candidate payloads.
 
-SQLite and PostgreSQL migrations run automatically at server startup.
+## Guides
 
-## First workflow
+| Guide | Covers |
+| --- | --- |
+| [Provider settings](./docs/settings-provider.md) | Protocols, endpoints, credentials, discovery, reasoning controls, and revisions. |
+| [Tools and targets](./docs/tools.md) | Tool definitions, QuickJS implementations, host/container/SSH targets, approvals, and MCP behavior. |
+| [Payload Workbench](./docs/payload-workbench.md) | Transform/Generate/History, context budgets, techniques, HTTP helpers, and Codex App Server profiles. |
+| [Architecture](./ARCHITECTURE.md) | Package boundaries, graph and persistence model, generation flow, and artifacts. |
+| [Security](./SECURITY.md) | Deployment assumptions, secrets, execution trust, helper runtimes, attachments, and exports. |
+| [Agent guide](./AGENTS.md) | Repository invariants, coding conventions, dependency policy, and validation expectations. |
 
-1. Open **Settings** and create a provider profile. Choose the exact protocol the endpoint implements, enter its base URL, credential, and one or more model IDs.
-2. Create or import prompt/tool revisions, or start with one of the three built-in harnesses.
-3. Create a project, then a session. The harness becomes an editable session draft; the original revision remains unchanged.
-4. Select a provider/model and preview the compiled prompt and tools in the inspector.
-5. Run a payload. Select any earlier node to fork, rewind, or checkpoint it; choose another branch in the comparison selector to inspect the divergence. The branch-toolbar download action exports the active branch as a ready-to-send JSON request body for the currently selected provider protocol and current session configuration.
-6. Inspect requests from operator turns and responses from model turns, then review normalized output and captured raw traces. Resolve tool calls manually, with a mock, through an approved real target, or through an approved MCP server.
+## Security essentials
 
-Evidence redaction is enabled by default. The always-available **Interface settings** cog can disable heuristic redaction for new provider, MCP, and Payload Workbench operations when exact safety-test content must be preserved. The choice is installation-wide and persistent. Disabling it does not reveal exact provider or MCP credentials managed by Lathe, but it can retain sensitive-looking content in new nodes, traces, normalized output, and exports. Existing evidence is never rewritten when the setting changes.
-7. Save a reusable harness or record a finding and export its reproducible bundle.
+- Keep the server loopback-only and treat `LATHE_DATA_DIR` and the database as sensitive plaintext data.
+- Use narrow, revocable provider/MCP credentials and constrained execution targets. Approval UX is an audit and intent-control layer, not a sandbox.
+- Heuristic evidence redaction is enabled by default and can be disabled for new safety-test operations. Exact credentials managed by Lathe remain protected, but unknown sensitive content may still appear in traces and exports.
+- Codex helper profiles execute a trusted local binary as the Lathe OS user and rely on the installed App Server to enforce their read-only permission profile.
+- Review every branch export, harness, finding, trace, and attachment before sharing it.
 
-Provider profile body/header overrides cannot replace Lathe-owned request fields such as the model, messages/input, tools, or streaming flag. Lathe does not retry provider requests automatically, and stream failures after an HTTP 200 remain classified failures with their preceding trace evidence.
-
-## Payload Workbench
-
-The magic-wand button beside the session composer opens three explicit, non-executing workflows:
-
-- **Transform** applies allowlisted encoders, text transforms, framing helpers, variables, or a saved deterministic pipeline. Each persisted step is an immutable payload revision.
-- **Generate** asks a separately configured helper model for one to four candidates. Project/session briefings, active-branch context, target configuration, reusable instructions, and ordered techniques are independently selectable and previewable.
-- **History** restores prior generation and refinement groups without rewriting the conversation tree.
-
-The separate **Payload Workbench settings** wand in the global toolbar is available on every page. It manages generator profiles, reusable instructions, techniques, pipelines, and defaults. HTTP generator profiles reuse existing provider revisions and secret handling. Codex App Server profiles reuse an installed Codex executable and its existing ChatGPT login; Lathe neither stores Codex tokens nor exposes the helper run as a target-model conversation turn.
-
-Generated or partially generated text never runs automatically. **Use as next prompt** only copies the selected revision into the composer, where the operator can inspect or edit it before pressing **Run**. Read the complete setup, context-budget, subscription-backend, and provenance guide in [docs/payload-workbench.md](./docs/payload-workbench.md).
-
-## Tools and MCP
-
-A real JavaScript tool implementation is a synchronous QuickJS program with two entry points:
-
-```js
-function build(input) {
-  return {
-    program: "/usr/bin/printf",
-    args: ["%s", String(input.text)],
-    timeoutMs: 5000
-  };
-}
-
-function formatResult(input) {
-  return {
-    stdout: input.stdout,
-    stderr: input.stderr,
-    exitCode: input.exitCode
-  };
-}
-```
-
-The QuickJS handler has no imports, filesystem, network, process, or environment access. Its output is an execution request; the approved target then executes exactly one program plus argument vector. A shell is never implicit—select `/bin/sh` (or an equivalent shell) as the visible program when shell syntax is intentional.
-
-Every real or MCP tool call requires operator approval by default. A session can explicitly select bypass approval for tool calls; the choice is snapshotted and recorded, while MCP sampling and elicitation remain approval-gated. Session trust is scoped to the exact tool revision hash and target; editing either invalidates it. MCP roots default to none, and imported prompt/resource content remains untrusted until explicitly selected.
-
-## Reproducible artifacts
-
-Harness and finding exports are versioned ZIP bundles with a manifest, Markdown summary, role-separated content, and SHA-256 checksums. Import validation rejects unsafe paths, hash mismatches, malformed schemas, unsupported ZIP features, and configured size/expansion limits. Credentials are redacted or replaced by symbolic references; imported scripts are disabled and untrusted.
-
-Branch API exports are intentionally plain JSON rather than Lathe artifact bundles. They contain the active branch head path, compiled system prompt, enabled tools, model options, tool calls/results, and supported attachments in OpenAI Responses, OpenAI Chat Completions, or Anthropic Messages wire format. They use the session's current configuration, set `stream` to `false`, exclude sibling branches and Lathe evidence metadata, and never include provider URLs or headers. Stored credential values are scrubbed; attachments containing known credential material are rejected instead of exported.
-
-Do not treat export redaction as a substitute for review. Inspect a bundle before sharing it: transcripts, prompts, tool output, attachments, and model responses can contain sensitive information that is not a stored credential. When heuristic evidence redaction is disabled, exports preserve those sensitive-looking fields and strings while still removing exact credentials known to Lathe.
-
-## Development commands
+## Development
 
 | Command | Purpose |
 | --- | --- |
-| `pnpm dev` | Build shared packages, then run the server and Vite UI in watch mode. |
-| `pnpm build` | Build every workspace package and app. |
-| `pnpm check:deps` | Verify exact stable pins, toolchain integrity, and pnpm supply-chain policy. |
-| `pnpm typecheck` | Build shared packages and type-check all workspaces. |
-| `pnpm test` | Build shared packages and run Vitest suites. |
-| `pnpm test:postgres` | Build shared packages and run the PostgreSQL repository contract. |
-| `pnpm test:watch` | Run Vitest in watch mode. |
-| `pnpm test:e2e` | Build/start an isolated app and deterministic provider, then run the full Chromium acceptance flow. |
+| `pnpm dev` | Build packages and run the server and Vite UI in watch mode. |
+| `pnpm start` | Build everything and run the production server locally. |
+| `pnpm typecheck` | Check dependency policy, build packages, and type-check all workspaces. |
+| `pnpm test` | Build packages and run the Vitest suite. |
+| `pnpm test:postgres` | Run the repository contract against `LATHE_TEST_POSTGRES_URL`. |
+| `pnpm test:e2e` | Run the Chromium acceptance suite and deterministic provider fixture. |
+| `pnpm build` | Build all packages and applications. |
+| `pnpm check:deps` | Verify dependency pins and supply-chain policy. |
 
-Set `LATHE_TEST_POSTGRES_URL` to include the PostgreSQL repository contract in local tests:
+Read [AGENTS.md](./AGENTS.md) before contributing. It contains the repository's implementation invariants, migration rules, dependency requirements, and change-specific validation checklist.
 
-```sh
-LATHE_TEST_POSTGRES_URL='postgresql://lathe:lathe@127.0.0.1:5432/lathe_test' \
-pnpm test:postgres
-```
+## v1 boundaries
 
-CI installs from the committed lockfile with `--frozen-lockfile`, verifies Linux and macOS on Node 24, exercises PostgreSQL on Linux, and runs the full Chromium acceptance workflow.
-
-## Dependency policy
-
-Every external workspace dependency resolves through the root catalog, whose entries use exact stable versions, and the workspace pins a stable override for the only upstream prerelease edge. `pnpm check:deps` enforces that shape. Workspace policy delays newly released packages for seven days, rejects missing release timestamps, blocks exotic transitive sources, prevents trust-policy downgrades, and fails on undeclared dependency build scripts. The audited build allowlist is intentionally small: `better-sqlite3`, `esbuild`, and `@tailwindcss/oxide`.
-
-The workspace also records one narrow peer-compatibility exception: `@tailwindcss/vite` 4.1.13 predates Vite 8 in its published peer range, while Lathe's pinned Vite 8 build is verified by CI. Keep that exception package-scoped and remove it when the pinned Tailwind release declares Vite 8 support.
-
-Lockfile changes should be isolated and reviewed. In particular, confirm registry/tarball origins, new lifecycle scripts, native code, and additions to `allowBuilds`. Drizzle ORM is pinned to `0.45.2`, the patched release selected for the SQL identifier escaping advisory.
-
-## v1 scope and boundaries
-
-The current v1 is source-run, single-operator, and loopback-only. It targets macOS and Linux. It has no accounts, collaboration, cloud deployment, desktop packaging, or Windows support.
+Lathe v1 is source-run, single-operator, loopback-only software for macOS and Linux. It does not provide accounts, collaboration, cloud deployment, desktop packaging, or Windows support.
 
 Out of scope:
 
 - autonomous attack planning or scanning;
 - automatic provider retries;
 - legacy OpenAI `/v1/completions`;
-- MCP OAuth, deprecated MCP HTTP+SSE transport, or third-party MCP apps/extensions;
-- scraping live Claude Code or Codex installations for proprietary prompts;
-- treating QuickJS isolation or approval UX as a security boundary around commands the operator authorizes.
-
-The implementation is organized as independently testable layers so later milestones can deepen automation, MCP surface area, artifact workflows, and UI polish without changing the immutable graph model or evidence contracts.
+- MCP OAuth, deprecated HTTP+SSE transport, or third-party MCP apps/extensions;
+- extraction of proprietary prompts from installed coding agents;
+- treating QuickJS or approval dialogs as a sandbox around an authorized command.
 
 ## License
 
