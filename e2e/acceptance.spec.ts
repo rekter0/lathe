@@ -294,6 +294,18 @@ test("runs the complete manual red-team workflow and round-trips a finding", asy
   await expect(page.locator(".tree-branch-name", { hasText: redBranchName })).toBeVisible();
   await expect(page.locator(".tree-branch-name", { hasText: blueBranchName })).toBeVisible();
   const blueGraphNode = page.locator(`.react-flow__node[data-id="${blueHead}"]`);
+  await blueGraphNode.dblclick();
+  await expect(page.getByLabel("Active branch")).toHaveValue(blueBranch.id);
+  const doubleClickedMessage = page.locator(`[data-message-node-id="${blueHead}"]`);
+  await expect.poll(() => doubleClickedMessage.evaluate((element) => {
+    const scroller = element.closest(".transcript-scroll");
+    if (!scroller) return false;
+    const messageBounds = element.getBoundingClientRect();
+    const scrollBounds = scroller.getBoundingClientRect();
+    return messageBounds.top >= scrollBounds.top && messageBounds.bottom <= scrollBounds.bottom;
+  })).toBe(true);
+
+  await page.getByLabel("Active branch").selectOption({ label: redBranchName });
   await blueGraphNode.click({ button: "right" });
   const graphMenu = page.getByRole("menu", { name: "Conversation node actions" });
   await expect(graphMenu).toBeVisible();

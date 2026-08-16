@@ -126,12 +126,15 @@ export function WorkbenchPage() {
     setLiveRunId(runId);
     useUiStore.getState().setSelectedRunId(runId);
   };
-  const jumpToGraphNode = () => {
-    if (!graphContextNode || !graphContextBranch) return;
+  const jumpToGraphNode = (nodeId: string) => {
+    const node = data.nodes.find((candidate) => candidate.id === nodeId);
+    if (!node) return;
+    const targetBranch = branchContainingNode(data.nodes, data.branches, branch.id, node.id);
+    if (!targetBranch) return;
     setCompareBranchIds([]);
-    setBranchId(graphContextBranch.id);
-    setSelectedNodeId(graphContextNode.id);
-    setPendingJumpNodeId(graphContextNode.id);
+    setBranchId(targetBranch.id);
+    setSelectedNodeId(node.id);
+    setPendingJumpNodeId(node.id);
     setGraphContextMenu(null);
   };
   const requestGraphFork = async () => {
@@ -162,7 +165,7 @@ export function WorkbenchPage() {
     <WorkbenchSplit
       left={<>
         <div className="pane-label"><GitBranch size={14} /> CONVERSATION TREE <span>{data.nodes.length}</span></div>
-        <TreeOverview nodes={data.nodes} runs={data.runs} branches={data.branches} activeBranchId={branch.id} selectedNodeId={selectedNode?.id ?? null} onSelect={setSelectedNodeId} onContextMenu={(nodeId, point) => { forkGraphNode.reset(); setSelectedNodeId(nodeId); setGraphContextMenu({ nodeId, ...point }); }} />
+        <TreeOverview nodes={data.nodes} runs={data.runs} branches={data.branches} activeBranchId={branch.id} selectedNodeId={selectedNode?.id ?? null} onSelect={setSelectedNodeId} onJump={jumpToGraphNode} onContextMenu={(nodeId, point) => { forkGraphNode.reset(); setSelectedNodeId(nodeId); setGraphContextMenu({ nodeId, ...point }); }} />
         <div className="branch-legend">{data.branches.map((item) => <button key={item.id} onClick={() => setBranchId(item.id)} className={item.id === branch.id ? "active" : ""}><span />{item.name}</button>)}</div>
       </>}
       center={<>
@@ -173,7 +176,7 @@ export function WorkbenchPage() {
     />
     {graphContextMenu && graphContextNode && <ContextMenu point={graphContextMenu} label="Conversation node actions" onClose={() => setGraphContextMenu(null)}>
       <div className="context-menu-heading"><span>{graphContextNode.role === "assistant" ? "MODEL" : graphContextNode.role === "tool" ? "TOOL RESULT" : "OPERATOR"}</span><code>{graphContextNode.id.slice(0, 8)}</code></div>
-      <button type="button" role="menuitem" onClick={jumpToGraphNode} disabled={!graphContextBranch} title={graphContextBranch ? `Switch to ${graphContextBranch.name} and reveal this message` : "No branch currently contains this message"}><LocateFixed size={14} /><span><strong>Jump here</strong><small>{graphContextBranch ? `Open ${graphContextBranch.name} and reveal message` : "No branch currently reaches this node"}</small></span></button>
+      <button type="button" role="menuitem" onClick={() => jumpToGraphNode(graphContextNode.id)} disabled={!graphContextBranch} title={graphContextBranch ? `Switch to ${graphContextBranch.name} and reveal this message` : "No branch currently contains this message"}><LocateFixed size={14} /><span><strong>Jump here</strong><small>{graphContextBranch ? `Open ${graphContextBranch.name} and reveal message` : "No branch currently reaches this node"}</small></span></button>
       <button type="button" role="menuitem" onClick={() => void requestGraphFork()} disabled={forkGraphNode.isPending}><GitBranch size={14} /><span><strong>Fork</strong><small>Create a branch from this message</small></span></button>
       {forkGraphNode.error && <p className="context-menu-error">{forkGraphNode.error.message}</p>}
     </ContextMenu>}
@@ -219,7 +222,8 @@ export function treeNodeAlerts(nodes: MessageNode[], runs: ModelRun[]): Map<stri
   return alerts;
 }
 
-function TreeOverview({ nodes, runs, branches, activeBranchId, selectedNodeId, onSelect, onContextMenu }: { nodes: MessageNode[]; runs: ModelRun[]; branches: BranchRef[]; activeBranchId: string; selectedNodeId: string | null; onSelect(id: string): void; onContextMenu(id: string, point: ContextMenuPoint): void }) {
+export function TreeOverview({ nodes, runs, branches, activeBranchId, selectedNodeId, onSelect, onJump, onContextMenu }: { nodes: MessageNode[]; runs: ModelRun[]; branches: BranchRef[]; activeBranchId: string; selectedNodeId: string | null; onSelect(id: string): void; onJump(id: string): void; onContextMenu(id: string, point: ContextMenuPoint): void }) {
+  const lastNodeClick = useRef<{ nodeId: string; timestamp: number; x: number; y: number } | null>(null);
   const layout = useMemo(() => {
     const alerts = treeNodeAlerts(nodes, runs);
     const children = new Map<string | null, MessageNode[]>();
@@ -248,7 +252,17 @@ function TreeOverview({ nodes, runs, branches, activeBranchId, selectedNodeId, o
     const flowEdges: Edge[] = nodes.filter((node) => node.parentId).map((node) => ({ id: `${node.parentId}-${node.id}`, source: node.parentId!, target: node.id, className: `tree-edge${alerts.has(node.id) ? " tree-edge-alert" : ""}` }));
     return { flowNodes, flowEdges };
   }, [activeBranchId, branches, nodes, runs, selectedNodeId]);
-  return <ReactFlow nodes={layout.flowNodes} edges={layout.flowEdges} fitView minZoom={0.15} maxZoom={1.6} nodesDraggable={false} nodesConnectable={false} elementsSelectable onNodeClick={(_, node) => onSelect(node.id)} onNodeContextMenu={(event, node) => { event.preventDefault(); onContextMenu(node.id, { x: event.clientX, y: event.clientY }); }}>
+  return <ReactFlow nodes={layout.flowNodes} edges={layout.flowEdges} fitView minZoom={0.15} maxZoom={1.6} zoomOnDoubleClick={false} nodesDraggable={false} nodesConnectable={false} elementsSelectable onDoubleClick={(event) => {
+    const previous = lastNodeClick.current;
+    if (previous && event.timeStamp - previous.timestamp <= 750 && Math.abs(event.clientX - previous.x) <= 8 && Math.abs(event.clientY - previous.y) <= 8) {
+      event.preventDefault();
+      lastNodeClick.current = null;
+      onJump(previous.nodeId);
+    }
+  }} onNodeClick={(event, node) => {
+    lastNodeClick.current = { nodeId: node.id, timestamp: event.timeStamp, x: event.clientX, y: event.clientY };
+    onSelect(node.id);
+  }} onNodeContextMenu={(event, node) => { event.preventDefault(); onContextMenu(node.id, { x: event.clientX, y: event.clientY }); }}>
     <Background color="#24312d" gap={18} size={1} /><Controls showInteractive={false} position="bottom-left" />
   </ReactFlow>;
 }
