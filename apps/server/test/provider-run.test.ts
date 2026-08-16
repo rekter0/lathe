@@ -229,6 +229,139 @@ describe("provider run coordinator", () => {
     }
   });
 
+  it("reports a failed real command to the model and automatically continues", async () => {
+    const dataDirectory = await mkdtemp(join(tmpdir(), "lathe-tool-error-continuation-"));
+    directories.push(dataDirectory);
+    const persistence = await createPersistence({ dataDirectory });
+    try {
+      const project = await persistence.repository.createProject({ name: "Project" });
+      const profile = await persistence.repository.createProviderProfile({
+        label: "Fixture", protocol: "openai-chat", baseUrl: "https://fixture.invalid", models: [{
+          id: "fixture-model", label: "Fixture model", discovered: false,
+          capabilities: { streaming: true, tools: true, images: false, files: false, jsonMode: false, maxContextTokens: null }
+        }]
+      });
+      const specValue: JsonObject = {
+        name: "read_protected_file",
+        description: "Read a protected file",
+        inputSchema: { type: "object", properties: {} }
+      };
+      const source = `
+        function build() {
+          return {
+            program: "/bin/sh",
+            args: ["-c", "printf 'Permission denied\\n' >&2; exit 1"]
+          };
+        }
+        function formatResult(input) {
+          return {
+            status: input.status,
+            exitCode: input.exitCode,
+            stderr: input.stderr.text
+          };
+        }
+      `;
+      const implementationValue: JsonObject = { source };
+      const spec: AssetRevision = {
+        id: uuidv7(), assetId: uuidv7(), kind: "tool-spec", revision: 1, name: "read_protected_file",
+        description: "Read a protected file", tags: [], provenance: { test: true }, value: specValue,
+        contentHash: sha256Json(specValue), trusted: true, archivedAt: null, createdAt: nowIso()
+      };
+      const implementation: AssetRevision = {
+        id: uuidv7(), assetId: uuidv7(), kind: "tool-implementation", revision: 1, name: "protected file handler",
+        description: "Returns a nonzero command result", tags: [], provenance: { test: true }, value: implementationValue,
+        contentHash: sha256Json(implementationValue), trusted: true, archivedAt: null, createdAt: nowIso()
+      };
+      await persistence.repository.saveAssetRevision(spec);
+      await persistence.repository.saveAssetRevision(implementation);
+      const config = emptyResolvedConfig();
+      config.toolApprovalMode = "bypass-approval";
+      config.tools.push({
+        toolRevisionId: spec.id,
+        implementationRevisionId: implementation.id,
+        name: "read_protected_file",
+        description: "Read a protected file",
+        inputSchema: specValue.inputSchema as JsonObject,
+        enabled: true,
+        mode: "real",
+        targetId: null,
+        mcpServerId: null
+      });
+      const { session, branch } = await persistence.repository.createSession({
+        projectId: project.id,
+        name: "Session",
+        providerProfileId: profile.id,
+        modelId: "fixture-model",
+        draftConfig: config
+      });
+      await persistence.repository.updateSessionContinuation(session.id, true, 8);
+
+      const encoder = new TextEncoder();
+      const requestBodies: JsonObject[] = [];
+      const fetchFixture: typeof fetch = async (_input, init) => {
+        requestBodies.push(JSON.parse(String(init?.body)) as JsonObject);
+        const frames = requestBodies.length === 1
+          ? [
+              'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-permission","function":{"name":"read_protected_file","arguments":"{}"}}]}}]}\n\n',
+              'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+              "data: [DONE]\n\n"
+            ]
+          : [
+              'data: {"choices":[{"index":0,"delta":{"content":"I could not read the file because permission was denied."}}]}\n\n',
+              'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+              "data: [DONE]\n\n"
+            ];
+        return new Response(new ReadableStream({
+          start(controller) {
+            for (const frame of frames) controller.enqueue(encoder.encode(frame));
+            controller.close();
+          }
+        }), { status: 200, headers: { "content-type": "text/event-stream" } });
+      };
+
+      const coordinator = new ProviderRunCoordinator(persistence.repository, persistence.contentStore, new EventHub(), fetchFixture);
+      const started = await coordinator.start({
+        sessionId: session.id,
+        branchId: branch.id,
+        contextNodeId: null,
+        userMessage: "Read the protected file"
+      });
+      await waitFor(async () => requestBodies.length === 2, 12_000);
+      await waitFor(async () => {
+        const runs = await persistence.repository.listRuns(session.id);
+        return runs.length === 2 && runs.every((run) => run.status === "completed");
+      }, 12_000);
+
+      const runs = await persistence.repository.listRuns(session.id);
+      const originatingRun = runs.find((run) => run.id === started.id);
+      expect(originatingRun?.classification).toBe("tool-failure");
+      expect(originatingRun?.normalizedOutput).toMatchObject({
+        autoContinuation: { status: "started", nextRunId: expect.any(String), hadToolErrors: true }
+      });
+      const continuedMessages = requestBodies[1]?.messages as JsonObject[];
+      expect(continuedMessages).toContainEqual(expect.objectContaining({
+        role: "tool",
+        tool_call_id: "call-permission",
+        content: expect.stringContaining("Permission denied")
+      }));
+      const continuedToolResult = continuedMessages.find((message) => message.role === "tool");
+      expect(JSON.parse(String(continuedToolResult?.content))).toMatchObject({
+        status: "failed",
+        exitCode: 1,
+        stderr: expect.stringContaining("Permission denied")
+      });
+
+      const nodes = await persistence.repository.listNodes(session.id);
+      expect(nodes.map((node) => node.role)).toEqual(["user", "assistant", "tool", "assistant"]);
+      expect(nodes.at(-1)?.parts).toEqual([{
+        type: "text",
+        text: "I could not read the file because permission was denied."
+      }]);
+    } finally {
+      await persistence.repository.close();
+    }
+  }, 15_000);
+
   it("retains a finalized redacted trace when an integrated MCP tool fails", async () => {
     const dataDirectory = await mkdtemp(join(tmpdir(), "lathe-mcp-failure-"));
     directories.push(dataDirectory);

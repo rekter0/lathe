@@ -816,10 +816,6 @@ export class ProviderRunCoordinator implements RunCoordinator {
   private async maybeAutoContinue(pending: PendingToolRun, node: MessageNode, parts: ToolResultPart[]): Promise<void> {
     const session = await this.repository.getSession(pending.sessionId);
     if (!session?.autoContinueTools) return;
-    if (parts.some((part) => part.isError)) {
-      await this.annotateRun(pending.runId, "autoContinuation", { status: "stopped", reason: "tool-error" });
-      return;
-    }
     const history = pathToRoot(await this.repository.listNodes(pending.sessionId), node.id);
     const lastUser = history.findLastIndex((item) => item.role === "user");
     const completedToolTurns = history.slice(lastUser + 1).filter((item) => item.role === "tool").length;
@@ -831,7 +827,13 @@ export class ProviderRunCoordinator implements RunCoordinator {
     }
     try {
       const next = await this.start({ sessionId: pending.sessionId, branchId: pending.branchId, contextNodeId: node.id });
-      await this.annotateRun(pending.runId, "autoContinuation", { status: "started", nextRunId: next.id, turn: completedToolTurns, limit });
+      await this.annotateRun(pending.runId, "autoContinuation", {
+        status: "started",
+        nextRunId: next.id,
+        turn: completedToolTurns,
+        limit,
+        hadToolErrors: parts.some((part) => part.isError)
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await this.annotateRun(pending.runId, "autoContinuation", { status: "stopped", reason: "start-error", message });

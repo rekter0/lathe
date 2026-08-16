@@ -101,6 +101,15 @@ Bypass approval does not enable untrusted imported scripts, targets, or MCP prof
 
 Be especially careful when combining **Bypass approval** with **Automatic tool continuation**: the model can issue and execute a bounded sequence of commands without stopping at each call. Use a narrowly privileged target, a non-root container user, explicit working directories, and the smallest practical continuation limit.
 
+With Automatic tool continuation enabled, a resolved tool failure is still a
+model-facing result. Nonzero exits, permission errors, timeouts, output limits,
+MCP errors, formatter errors, and rejected calls remain marked `isError` and
+the originating run remains classified `tool-failure`, but Lathe includes the
+error result in the next model request so the model can recover or report it.
+Unresolved approval still pauses the chain. Cancellation, the configured
+continuation limit, a failure before Lathe can form a tool-result node, or a
+failure to start the next model run still stops it.
+
 ## Target environment
 
 Optional target-level environment values are merged into every command executed on that target:
