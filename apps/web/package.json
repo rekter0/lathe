@@ -30,6 +30,7 @@
     "react-dom": "catalog:",
     "react-markdown": "catalog:",
     "rehype-sanitize": "catalog:",
+    "remark-gfm": "catalog:",
     "tailwindcss": "catalog:",
     "zustand": "catalog:"
   },

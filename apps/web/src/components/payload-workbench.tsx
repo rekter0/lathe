@@ -2,12 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tabs from "@radix-ui/react-tabs";
-import ReactMarkdown from "react-markdown";
-import rehypeSanitize from "rehype-sanitize";
 import { ArrowDown, ArrowUp, Braces, CaseSensitive, Check, ChevronDown, CircleStop, Code2, Download, Eye, FileClock, GitCompare, History, ListRestart, Play, Plus, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Undo2, WandSparkles, X } from "lucide-react";
 import type { JsonObject, JsonValue, MessageNode } from "@lathe/domain";
 import { applyPayloadTransform, evaluatePayloadPipeline, payloadTransforms, techniqueSelectionWarnings, type PayloadPipelineStep, type PayloadTechnique, type PayloadTransformDefinition, type PayloadTransformId } from "@lathe/payloads";
 import { api, consumeEvents, downloadApiFile, jsonBody } from "../api.js";
+import { RenderedMarkdown } from "./rendered-markdown.js";
 import {
   candidatesFromDetail,
   defaultPayloadWorkbenchSettings,
@@ -196,7 +195,7 @@ function RawPayloadDiff({ original, candidates, selectedIds, onClose }: { origin
   const right = selected.at(-1)?.text ?? "";
   const leftLabel = selected.length > 1 ? `Candidate ${selected[0]?.ordinal ?? 1}` : "Source payload";
   const rightLabel = selected.length ? `Candidate ${selected.at(-1)?.ordinal ?? 1}` : "Candidate";
-  return <section className="payload-raw-diff" aria-label="Payload comparison"><header><div><GitCompare size={14} /><strong>Side-by-side comparison</strong><span>Raw is authoritative</span></div><div className="payload-diff-mode"><button type="button" aria-pressed={mode === "raw"} onClick={() => setMode("raw")}>Raw</button><button type="button" aria-pressed={mode === "rendered"} onClick={() => setMode("rendered")}>Rendered Markdown</button><Button type="button" variant="ghost" aria-label="Close payload diff" onClick={onClose}><X size={13} /></Button></div></header><div><article><h4>{leftLabel}</h4>{mode === "raw" ? <pre>{left}</pre> : <div className="payload-diff-rendered"><ReactMarkdown rehypePlugins={[rehypeSanitize]}>{left}</ReactMarkdown></div>}</article><article><h4>{rightLabel}</h4>{mode === "raw" ? <pre>{right}</pre> : <div className="payload-diff-rendered"><ReactMarkdown rehypePlugins={[rehypeSanitize]}>{right}</ReactMarkdown></div>}</article></div></section>;
+  return <section className="payload-raw-diff" aria-label="Payload comparison"><header><div><GitCompare size={14} /><strong>Side-by-side comparison</strong><span>Raw is authoritative</span></div><div className="payload-diff-mode"><button type="button" aria-pressed={mode === "raw"} onClick={() => setMode("raw")}>Raw</button><button type="button" aria-pressed={mode === "rendered"} onClick={() => setMode("rendered")}>Rendered Markdown</button><Button type="button" variant="ghost" aria-label="Close payload diff" onClick={onClose}><X size={13} /></Button></div></header><div><article><h4>{leftLabel}</h4>{mode === "raw" ? <pre>{left}</pre> : <div className="payload-diff-rendered"><RenderedMarkdown text={left} /></div>}</article><article><h4>{rightLabel}</h4>{mode === "raw" ? <pre>{right}</pre> : <div className="payload-diff-rendered"><RenderedMarkdown text={right} /></div>}</article></div></section>;
 }
 
 function CandidateCard({ candidate, revision, selectedForDiff, onToggleDiff, onRefine, onTransform, onUse, refining }: {

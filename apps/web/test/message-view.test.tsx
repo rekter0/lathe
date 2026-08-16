@@ -97,6 +97,36 @@ describe("transcript message views", () => {
     expect(within(messages[1]!).getByText("second").tagName).toBe("STRONG");
   });
 
+  it("renders GFM tables in a contained scroll region and preserves their exact raw source", () => {
+    const markdown = "| Layer | What occurred |\n| :--- | ---: |\n| API field | **Structured** call |\n| Tool result | `ToolCall` output |";
+    const { container } = render(<TranscriptMessage node={assistantNode("node-table", markdown, "run-table")} run={modelRun("run-table", "")} onSelectRun={() => undefined} />);
+
+    const table = screen.getByRole("table");
+    expect(within(table).getByRole("columnheader", { name: "Layer" }).style.textAlign).toBe("left");
+    expect(within(table).getByRole("columnheader", { name: "What occurred" }).style.textAlign).toBe("right");
+    expect(within(table).getByText("Structured").tagName).toBe("STRONG");
+    expect(within(table).getByText("ToolCall").tagName).toBe("CODE");
+    expect(table.parentElement?.classList.contains("markdown-table-scroll")).toBe(true);
+    expect(table.parentElement?.getAttribute("tabindex")).toBe("0");
+
+    fireEvent.click(screen.getByRole("button", { name: "Show raw message text" }));
+    expect(screen.queryByRole("table")).toBeNull();
+    expect(container.querySelector("pre.message-raw")?.textContent).toBe(markdown);
+
+    fireEvent.click(screen.getByRole("button", { name: "Show rendered message" }));
+    expect(screen.getByRole("table")).not.toBeNull();
+  });
+
+  it("sanitizes unsafe content inside GFM table cells", () => {
+    const unsafe = "| Link | HTML |\n| --- | --- |\n| [bad](javascript:alert(1)) | <img src=x onerror=alert(1)><script>alert(2)</script> |";
+    const { container } = render(<TranscriptMessage node={assistantNode("node-unsafe-table", unsafe, "run-unsafe-table")} run={modelRun("run-unsafe-table", "")} onSelectRun={() => undefined} />);
+
+    expect(screen.getByRole("table")).not.toBeNull();
+    expect(container.querySelector("script")).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
+    expect([...container.querySelectorAll("a")].some((link) => link.getAttribute("href")?.startsWith("javascript:"))).toBe(false);
+  });
+
   it("opens the request run from an operator message without rendering response evidence in that message", () => {
     const onSelectRun = vi.fn();
     const run = { ...modelRun("run-request", "private response reasoning"), contextNodeId: "operator-1" };

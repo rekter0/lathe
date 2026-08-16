@@ -5,8 +5,6 @@ import * as Tabs from "@radix-ui/react-tabs";
 import CodeMirror from "@uiw/react-codemirror";
 import { json } from "@codemirror/lang-json";
 import { Background, Controls, ReactFlow, type Edge, type Node } from "@xyflow/react";
-import ReactMarkdown from "react-markdown";
-import rehypeSanitize from "rehype-sanitize";
 import { Activity, Archive, ArrowLeft, Check, ChevronDown, CircleStop, Code2, Download, Eye, FilePlus2, GitBranch, GitCompare, LocateFixed, Paperclip, Play, RotateCcw, Save, ShieldAlert, SlidersHorizontal, Split, Wrench, X } from "lucide-react";
 import { pathToRoot, type JsonObject, type JsonValue, type MessagePart, type ResolvedConfig } from "@lathe/domain";
 import { api, consumeEvents, downloadApiFile, jsonBody } from "../api.js";
@@ -18,6 +16,7 @@ import { isComposerSubmitKey } from "../components/composer-keys.js";
 import { McpApprovalResolver } from "../components/mcp-approval.js";
 import { useOperatorDialog } from "../components/operator-dialog.js";
 import { PayloadWorkbench } from "../components/payload-workbench.js";
+import { RenderedMarkdown } from "../components/rendered-markdown.js";
 import { WorkbenchSplit } from "../components/workbench-split.js";
 import { useUiStore } from "../store.js";
 import type { AssetRevision, Attachment, AutomationJob, BranchRef, Finding, MessageNode, ModelRun, SafeProvider, WorkbenchData } from "../types.js";
@@ -519,7 +518,7 @@ function ResendAction({ node, data, onBranchCreated, onRunStarted }: { node: Mes
 }
 
 function RenderedText({ text }: { text: string }) {
-  return <ReactMarkdown skipHtml rehypePlugins={[rehypeSanitize]}>{text}</ReactMarkdown>;
+  return <RenderedMarkdown text={text} />;
 }
 
 function RawText({ text }: { text: string }) {
