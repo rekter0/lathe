@@ -15,6 +15,8 @@ if (process.argv[2] !== "app-server") {
 }
 
 const requiredConfigOverrides = [
+  'default_permissions="lathe_scoped_read_only_v1"',
+  'permissions.lathe_scoped_read_only_v1={description="Lathe scoped read-only",filesystem={":root"="deny",":minimal"="read",":workspace_roots"={"."="read"}},network={enabled=false}}',
   "mcp_servers={}",
   "shell_environment_policy.inherit=none",
   'web_search="disabled"',
@@ -194,17 +196,41 @@ async function handle(message) {
     await send({ id, result: models });
     return;
   }
+  if (method === "permissionProfile/list") {
+    await send({
+      id,
+      result: {
+        data: [{
+          id: "lathe_scoped_read_only_v1",
+          allowed: scenario !== "permission-profile-disallowed",
+          description: null,
+        }],
+        nextCursor: null,
+      },
+    });
+    return;
+  }
   if (method === "thread/start") {
-    const valid = params.sandbox === "read-only"
+    const valid = params.permissions === "lathe_scoped_read_only_v1"
+      && !("sandbox" in params)
       && !("sandboxPolicy" in params)
       && params.approvalPolicy === "never"
       && params.ephemeral === true
       && Array.isArray(params.environments)
       && params.environments.length === 0
-      && Array.isArray(params.runtimeWorkspaceRoots);
+      && Array.isArray(params.runtimeWorkspaceRoots)
+      && params.runtimeWorkspaceRoots.length === 1;
     activeThreadId = "thread-fixture";
     await send(valid
-      ? { id, result: { thread: { id: activeThreadId } } }
+      ? {
+          id,
+          result: {
+            thread: { id: activeThreadId },
+            ...(scenario === "permission-profile-inactive"
+              ? {}
+              : { activePermissionProfile: { id: "lathe_scoped_read_only_v1", parentId: null } }),
+          },
+        }
       : { id, error: { code: -32090, message: "unsafe thread settings" } });
     return;
   }
@@ -213,11 +239,13 @@ async function handle(message) {
       await send({ id, error: { code: -32601, message: `${method} unsupported` } });
       return;
     }
-    const valid = params.sandbox === "read-only"
+    const valid = params.permissions === "lathe_scoped_read_only_v1"
+      && !("sandbox" in params)
       && !("sandboxPolicy" in params)
       && params.approvalPolicy === "never"
       && params.excludeTurns === true
-      && Array.isArray(params.runtimeWorkspaceRoots);
+      && Array.isArray(params.runtimeWorkspaceRoots)
+      && params.runtimeWorkspaceRoots.length === 1;
     if (!valid) {
       await send({ id, error: { code: -32090, message: "unsafe continuity settings" } });
       return;
@@ -226,6 +254,9 @@ async function handle(message) {
     await send({
       id,
       result: {
+        ...(scenario === "permission-profile-inactive"
+          ? {}
+          : { activePermissionProfile: { id: "lathe_scoped_read_only_v1", parentId: null } }),
         thread: {
           id: activeThreadId,
           turns: [{ id: "hidden-turn", items: [{ type: "agentMessage", text: "native-history-secret" }] }],
@@ -235,16 +266,14 @@ async function handle(message) {
     return;
   }
   if (method === "turn/start") {
-    const safeTurn = params.sandboxPolicy?.type === "readOnly"
-      && params.sandboxPolicy?.access?.type === "restricted"
-      && params.sandboxPolicy?.access?.includePlatformDefaults === true
-      && Array.isArray(params.sandboxPolicy?.access?.readableRoots)
-      && params.sandboxPolicy.access.readableRoots.length === 1
+    const safeTurn = params.permissions === "lathe_scoped_read_only_v1"
       && params.approvalPolicy === "never"
       && !("sandbox" in params)
+      && !("sandboxPolicy" in params)
       && Array.isArray(params.environments)
       && params.environments.length === 0
-      && Array.isArray(params.runtimeWorkspaceRoots);
+      && Array.isArray(params.runtimeWorkspaceRoots)
+      && params.runtimeWorkspaceRoots.length === 1;
     if (!safeTurn) {
       await send({ id, error: { code: -32090, message: "unsafe turn settings" } });
       return;

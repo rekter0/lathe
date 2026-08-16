@@ -110,6 +110,30 @@ describe("CodexAppServerAdapter", () => {
     });
   });
 
+  it("fails closed when the scoped permission profile is denied or not activated", async () => {
+    const disallowed = await fixtureExecutable("permission-profile-disallowed");
+    await expect(new CodexAppServerAdapter().start(profile(disallowed), {
+      model: "gpt-fixture",
+      input: "Do not run",
+      workspace: { mode: "isolated" },
+    })).rejects.toMatchObject({
+      name: "CodexRuntimeError",
+      classification: "invalid-profile",
+      code: "permission-profile-disallowed",
+    });
+
+    const inactive = await fixtureExecutable("permission-profile-inactive");
+    await expect(new CodexAppServerAdapter().start(profile(inactive), {
+      model: "gpt-fixture",
+      input: "Do not run",
+      workspace: { mode: "isolated" },
+    })).rejects.toMatchObject({
+      name: "CodexRuntimeError",
+      classification: "invalid-profile",
+      code: "permission-profile-not-active",
+    });
+  });
+
   it("normalizes fragmented text and reasoning streams without duplicating completed items", async () => {
     const executable = await fixtureExecutable("fragmented");
     const run = await new CodexAppServerAdapter().start(profile(executable), {
@@ -188,32 +212,29 @@ describe("CodexAppServerAdapter", () => {
     expect(threadStart?.data).toMatchObject({
       params: {
         cwd: resolvedProject,
-        sandbox: "read-only",
+        permissions: "lathe_scoped_read_only_v1",
         approvalPolicy: "never",
         ephemeral: true,
         environments: [],
         runtimeWorkspaceRoots: [resolvedProject],
       },
     });
+    expect(items.find((item) => item.trace?.method === "permissionProfile/list")?.trace?.data)
+      .toMatchObject({ params: { cwd: resolvedProject, cursor: null, limit: 100 } });
+    expect(threadStart?.data).not.toHaveProperty("params.sandbox");
     expect(threadStart?.data).not.toHaveProperty("params.sandboxPolicy");
     const turnStart = items.find((item) => item.trace?.method === "turn/start")?.trace;
     expect(turnStart?.data).toMatchObject({
       params: {
         cwd: resolvedProject,
-        sandboxPolicy: {
-          type: "readOnly",
-          access: {
-            type: "restricted",
-            includePlatformDefaults: true,
-            readableRoots: [resolvedProject],
-          },
-        },
+        permissions: "lathe_scoped_read_only_v1",
         approvalPolicy: "never",
         environments: [],
         runtimeWorkspaceRoots: [resolvedProject],
       },
     });
     expect(turnStart?.data).not.toHaveProperty("params.sandbox");
+    expect(turnStart?.data).not.toHaveProperty("params.sandboxPolicy");
     expect(events(items)).toContainEqual(expect.objectContaining({
       type: "runtime.warning",
       code: "runtime-boundary",
@@ -249,11 +270,13 @@ describe("CodexAppServerAdapter", () => {
           lastTurnId: "turn-source",
           excludeTurns: true,
           ephemeral: true,
-          sandbox: "read-only",
-          runtimeWorkspaceRoots: [],
+          permissions: "lathe_scoped_read_only_v1",
+          runtimeWorkspaceRoots: [expect.any(String)],
           approvalPolicy: "never",
         },
       });
+    expect(forkedOutput.items.find((item) => item.trace?.method === "thread/fork")?.trace?.data)
+      .not.toHaveProperty("params.sandbox");
     expect(forkedOutput.items.find((item) => item.trace?.method === "thread/fork")?.trace?.data)
       .not.toHaveProperty("params.sandboxPolicy");
     expect(JSON.stringify(forkedOutput.items)).not.toContain("native-history-secret");
@@ -273,11 +296,12 @@ describe("CodexAppServerAdapter", () => {
       params: {
         threadId: "thread-source",
         excludeTurns: true,
-        sandbox: "read-only",
-        runtimeWorkspaceRoots: [],
+        permissions: "lathe_scoped_read_only_v1",
+        runtimeWorkspaceRoots: [expect.any(String)],
         approvalPolicy: "never",
       },
     });
+    expect(resumeRequest?.data).not.toHaveProperty("params.sandbox");
     expect(resumeRequest?.data).not.toHaveProperty("params.sandboxPolicy");
     expect(events(resumedOutput.items)).toContainEqual(expect.objectContaining({
       type: "runtime.warning",

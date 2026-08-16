@@ -15,6 +15,7 @@ import process from "node:process";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
   CodexAppServerProcess,
+  LATHE_CODEX_PERMISSION_PROFILE_ID,
   safeCodexEnvironment,
   type AppServerCallbacks,
 } from "./json-rpc-process.js";
@@ -47,6 +48,8 @@ const DEFAULT_CLIENT_INFO: RuntimeClientInfo = Object.freeze({
 });
 const MAX_MODEL_PAGES = 20;
 const MODEL_PAGE_SIZE = 100;
+const MAX_PERMISSION_PROFILE_PAGES = 20;
+const PERMISSION_PROFILE_PAGE_SIZE = 100;
 const VERSION_OUTPUT_LIMIT = 64 * 1024;
 
 interface InspectedExecutable {
@@ -373,10 +376,10 @@ async function prepareWorkspace(request: CodexGenerationRequest): Promise<Prepar
   }
   return {
     cwd: directory,
-    runtimeWorkspaceRoots: request.workspace.mode === "project-read-only" ? [directory] : [],
+    runtimeWorkspaceRoots: [directory],
     temporaryDirectory,
     warnings: [
-      "Codex read-only sandbox prevents writes but is not a proof that reads are confined to the selected cwd.",
+      "The installed Codex runtime enforces Lathe's scoped read-only permission profile; Lathe is not an independent operating-system sandbox.",
       ...(request.workspace.mode === "project-read-only"
         ? ["Project-read-only mode intentionally exposes the selected project to the Codex runtime."]
         : []),
@@ -510,6 +513,40 @@ async function readAccount(connection: CodexAppServerProcess): Promise<AccountPr
   return parseAccount(await connection.request("account/read", { refreshToken: false }));
 }
 
+async function requireReadOnlyPermissionProfile(
+  connection: CodexAppServerProcess,
+  cwd: string,
+): Promise<void> {
+  let cursor: string | null = null;
+  for (let page = 0; page < MAX_PERMISSION_PROFILE_PAGES; page += 1) {
+    const response = record(await connection.request("permissionProfile/list", {
+      cwd,
+      cursor,
+      limit: PERMISSION_PROFILE_PAGE_SIZE,
+    }));
+    const profiles = Array.isArray(response.data) ? response.data : [];
+    for (const entry of profiles) {
+      const profile = record(entry);
+      if (stringValue(profile.id) !== LATHE_CODEX_PERMISSION_PROFILE_ID) continue;
+      if (profile.allowed !== true) {
+        throw new CodexRuntimeError(
+          "invalid-profile",
+          `Codex permission profile ${LATHE_CODEX_PERMISSION_PROFILE_ID} is not allowed for this workspace`,
+          { code: "permission-profile-disallowed" },
+        );
+      }
+      return;
+    }
+    cursor = stringValue(response.nextCursor) ?? null;
+    if (cursor === null) break;
+  }
+  throw new CodexRuntimeError(
+    "invalid-profile",
+    `Codex permission profile ${LATHE_CODEX_PERMISSION_PROFILE_ID} is unavailable in the installed App Server`,
+    { code: "permission-profile-unavailable" },
+  );
+}
+
 interface EstablishedThread {
   readonly threadId: string;
   readonly continuity: CodexContinuityOutcome;
@@ -521,7 +558,7 @@ function threadOverrides(request: CodexGenerationRequest, workspace: PreparedWor
     model: request.model,
     cwd: workspace.cwd,
     approvalPolicy: "never",
-    sandbox: "read-only",
+    permissions: LATHE_CODEX_PERMISSION_PROFILE_ID,
     runtimeWorkspaceRoots: workspace.runtimeWorkspaceRoots,
     ...(request.baseInstructions === undefined ? {} : { baseInstructions: request.baseInstructions }),
     ...(request.developerInstructions === undefined
@@ -979,6 +1016,15 @@ function threadIdFrom(value: JsonValue): string {
   if (id === undefined) {
     throw new CodexRuntimeError("protocol", "Codex thread/start response did not include a thread id");
   }
+  const activePermissionProfile = record(result.activePermissionProfile);
+  const activePermissionProfileId = stringValue(activePermissionProfile.id);
+  if (activePermissionProfileId !== LATHE_CODEX_PERMISSION_PROFILE_ID) {
+    throw new CodexRuntimeError(
+      "invalid-profile",
+      `Codex did not activate the required ${LATHE_CODEX_PERMISSION_PROFILE_ID} permission profile; remove legacy sandbox_mode settings or use a dedicated Codex home`,
+      { code: "permission-profile-not-active" },
+    );
+  }
   return id;
 }
 
@@ -1061,6 +1107,7 @@ export class CodexAppServerAdapter implements CodexAppServerAdapterContract {
       controller.bindSignal(options.signal);
       const userAgent = await initialize(connection, profile, true);
       const account = await readAccount(connection);
+      await requireReadOnlyPermissionProfile(connection, workspace.cwd);
       const established = await establishThread(connection, request, workspace);
       const threadId = established.threadId;
       const turnParams: JsonObject = {
@@ -1069,14 +1116,7 @@ export class CodexAppServerAdapter implements CodexAppServerAdapterContract {
         model: request.model,
         cwd: workspace.cwd,
         approvalPolicy: "never",
-        sandboxPolicy: {
-          type: "readOnly",
-          access: {
-            type: "restricted",
-            includePlatformDefaults: true,
-            readableRoots: [workspace.cwd],
-          },
-        },
+        permissions: LATHE_CODEX_PERMISSION_PROFILE_ID,
         environments: [],
         runtimeWorkspaceRoots: workspace.runtimeWorkspaceRoots,
         ...(request.reasoningEffort === undefined ? {} : { effort: request.reasoningEffort }),

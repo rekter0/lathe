@@ -33,6 +33,10 @@ const DEFAULT_MAX_LINE_BYTES = 4 * 1024 * 1024;
 const DEFAULT_TERMINATION_GRACE_MS = 750;
 const MAX_STDERR_TRACE_BYTES = 1024 * 1024;
 
+export const LATHE_CODEX_PERMISSION_PROFILE_ID = "lathe_scoped_read_only_v1";
+export const LATHE_CODEX_PERMISSION_PROFILE_CONFIG =
+  'permissions.lathe_scoped_read_only_v1={description="Lathe scoped read-only",filesystem={":root"="deny",":minimal"="read",":workspace_roots"={"."="read"}},network={enabled=false}}';
+
 const SAFE_ENVIRONMENT_KEYS = [
   "HOME",
   "USER",
@@ -182,6 +186,10 @@ export class CodexAppServerProcess {
       [
         "app-server",
         "--stdio",
+        "-c",
+        `default_permissions="${LATHE_CODEX_PERMISSION_PROFILE_ID}"`,
+        "-c",
+        LATHE_CODEX_PERMISSION_PROFILE_CONFIG,
         "-c",
         "mcp_servers={}",
         "-c",

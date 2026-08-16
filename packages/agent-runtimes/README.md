@@ -21,14 +21,17 @@ official Codex App Server over newline-delimited JSON-RPC on stdio.
   OpenAI API keys and Codex access-token environment variables are not passed to
   the child. An API-key account cannot silently pass the subscription gate.
 - Each generation uses an ephemeral App Server process, an ephemeral Codex
-  thread, `approvalPolicy: "never"`, disabled web search, and a structured
-  read-only turn sandbox policy with restricted readable roots. Thread lifecycle
-  requests use the corresponding `sandbox: "read-only"` wire value. Isolated
-  mode uses a disposable empty 0700 directory unless the caller supplies an
-  empty absolute directory. Project mode adds only the explicitly selected
-  workspace to the platform-default readable roots. This is a request to the
-  installed Codex runtime, not an independent operating-system security
-  boundary supplied by Lathe.
+  thread, `approvalPolicy: "never"`, disabled web search, and the App Server's
+  injected `lathe_scoped_read_only_v1` permission profile on both thread and
+  turn requests. The profile denies root access, permits Codex's minimal runtime
+  paths, grants read-only access to the selected runtime workspace roots, and
+  disables command network access. Lathe checks that the profile is allowed
+  through `permissionProfile/list` before creating a thread and supplies the
+  selected absolute directory through `runtimeWorkspaceRoots`. Isolated mode
+  uses a disposable empty 0700 directory unless the caller supplies an empty
+  absolute directory. Project mode exposes the explicitly selected workspace
+  read-only. This remains a request enforced by the installed Codex runtime,
+  not an independent operating-system security boundary supplied by Lathe.
 - A generation can explicitly fork or resume a documented native Codex thread
   ID. Fork is the preferred mapping for Lathe because it preserves the source;
   resume appends to the vendor-owned native thread. Fork can optionally target a
@@ -60,13 +63,13 @@ The adapter implements the current stable method names (`initialize`,
 `account/read`, `model/list`, `thread/start`, `turn/start`, and
 `turn/interrupt`) and current text/reasoning notifications. Probe connections
 stay on the stable API surface. Generation connections opt into
-`experimentalApi` because Lathe uses `environments`, `runtimeWorkspaceRoots`,
-and `excludeTurns`; compatibility for those fields is therefore tied to the
-recorded Codex version. Parsing tolerates a small set of documented
-older/alternate response fields and punctuation/casing changes in notification
-names. Unknown notifications remain in the redacted raw trace. Missing or
-ambiguous authentication, thread IDs, turn IDs, malformed JSON, oversized
-frames, and process crashes fail closed.
+`experimentalApi` because Lathe uses named permission profiles, `environments`,
+`runtimeWorkspaceRoots`, and `excludeTurns`; compatibility for those fields is
+therefore tied to the recorded Codex version. Parsing tolerates a small set of
+documented older/alternate response fields and punctuation/casing changes in
+notification names. Unknown notifications remain in the redacted raw trace.
+Missing or ambiguous authentication, thread IDs, turn IDs, malformed JSON,
+oversized frames, and process crashes fail closed.
 
 The SHA-256 reported by probes covers only the resolved executable entry file.
 For script launchers or package-managed installations, it does not attest the
