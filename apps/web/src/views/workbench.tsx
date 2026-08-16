@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import * as Tabs from "@radix-ui/react-tabs";
@@ -7,7 +7,7 @@ import { json } from "@codemirror/lang-json";
 import { Background, Controls, ReactFlow, type Edge, type Node } from "@xyflow/react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
-import { Activity, Archive, ArrowLeft, Check, ChevronDown, CircleStop, Code2, Download, Eye, FilePlus2, GitBranch, GitCompare, LocateFixed, Paperclip, Play, RotateCcw, Save, ShieldAlert, SlidersHorizontal, Split, Wrench } from "lucide-react";
+import { Activity, Archive, ArrowLeft, Check, ChevronDown, CircleStop, Code2, Download, Eye, FilePlus2, GitBranch, GitCompare, LocateFixed, Paperclip, Play, RotateCcw, Save, ShieldAlert, SlidersHorizontal, Split, Wrench, X } from "lucide-react";
 import { pathToRoot, type JsonObject, type JsonValue, type MessagePart, type ResolvedConfig } from "@lathe/domain";
 import { api, consumeEvents, downloadApiFile, jsonBody } from "../api.js";
 import { BranchExportAction } from "../components/branch-export-action.js";
@@ -545,11 +545,69 @@ function BranchActions({ data, branch, selectedNode, onChanged }: { data: Workbe
   return <><Button variant="ghost" onClick={() => void requestFork()} title="Fork selected node" aria-label="Fork selected node" disabled={fork.isPending}><GitBranch size={15} /></Button><Button variant="ghost" onClick={() => rewind.mutate()} title="Move branch head to selected node" aria-label="Move branch head to selected node" disabled={rewind.isPending}><RotateCcw size={15} /></Button><Button variant="ghost" onClick={() => void requestCheckpoint()} title="Checkpoint selected node" aria-label="Checkpoint selected node" disabled={checkpoint.isPending}><Archive size={15} /></Button><BranchExportAction key={branch.id} branch={branch} /></>;
 }
 
-function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchData; branch: BranchRef; onRunStarted(id: string): void; onChanged(): void }) {
+const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+
+interface ClipboardFileSource {
+  files?: ArrayLike<File> | null;
+  items?: ArrayLike<Pick<DataTransferItem, "kind" | "getAsFile">> | null;
+}
+
+function clipboardImageExtension(mediaType: string): string {
+  const known: Record<string, string> = {
+    "image/avif": "avif",
+    "image/gif": "gif",
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/svg+xml": "svg",
+    "image/tiff": "tiff",
+    "image/webp": "webp"
+  };
+  return known[mediaType.toLowerCase()] ?? "img";
+}
+
+function isGenericClipboardName(name: string): boolean {
+  return name.trim().length === 0 || /^(?:blob|clipboard|image|screenshot)(?:[-_ ]?\d+)?(?:\.[a-z0-9]+)?$/i.test(name.trim());
+}
+
+export function clipboardImageFiles(source: ClipboardFileSource, now: Date = new Date()): File[] {
+  const fromItems = Array.from(source.items ?? []).flatMap((item) => {
+    if (item.kind !== "file") return [];
+    const file = item.getAsFile();
+    return file ? [file] : [];
+  });
+  const candidates = (fromItems.length > 0 ? fromItems : Array.from(source.files ?? [])).filter((file) => file.type.toLowerCase().startsWith("image/"));
+  const timestamp = now.toISOString().replace(/[-:.]/g, "");
+  return candidates.map((file, index) => {
+    if (!isGenericClipboardName(file.name)) return file;
+    const suffix = index === 0 ? "" : `-${index + 1}`;
+    return new File([file], `pasted-image-${timestamp}${suffix}.${clipboardImageExtension(file.type)}`, { type: file.type, lastModified: file.lastModified });
+  });
+}
+
+interface ComposerAttachmentItem {
+  clientId: string;
+  file: File | null;
+  fileName: string;
+  mediaType: string;
+  size: number;
+  status: "uploading" | "ready" | "failed";
+  attachment: Attachment | null;
+  error: string | null;
+}
+
+function attachmentErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Attachment upload failed";
+}
+
+export function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchData; branch: BranchRef; onRunStarted(id: string): void; onChanged(): void }) {
   const [message, setMessage] = useState("");
   const [sourcePayloadRevisionId, setSourcePayloadRevisionId] = useState<string | null>(null);
-  const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
+  const [attachmentItems, setAttachmentItems] = useState<ComposerAttachmentItem[]>([]);
   const [historyReset, setHistoryReset] = useState(0);
+  const readyAttachments = attachmentItems.flatMap((item) => item.status === "ready" && item.attachment ? [item.attachment] : []);
+  const uploadsPending = attachmentItems.some((item) => item.status === "uploading");
+  const uploadsFailed = attachmentItems.some((item) => item.status === "failed");
+  const reusableAttachments = data.attachments.filter((attachment) => !readyAttachments.some((selected) => selected.id === attachment.id));
   const submittedMessages = useMemo<ComposerHistoryEntry[]>(() => pathToRoot(data.nodes, branch.headNodeId)
     .filter((node) => node.role === "user")
     .map((node) => ({
@@ -561,35 +619,84 @@ function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchDa
     setMessage(value);
     setSourcePayloadRevisionId(nextSourcePayloadRevisionId);
   };
+  const uploadAttachment = async (clientId: string, file: File) => {
+    try {
+      const form = new FormData();
+      form.set("file", file, file.name);
+      const { attachment } = await api<{ attachment: Attachment }>(`/api/projects/${data.session.projectId}/attachments`, { method: "POST", body: form });
+      setAttachmentItems((items) => items.map((item) => item.clientId === clientId
+        ? { ...item, status: "ready", attachment, fileName: attachment.fileName, mediaType: attachment.mediaType, size: attachment.size, error: null }
+        : item));
+      onChanged();
+    } catch (error) {
+      setAttachmentItems((items) => items.map((item) => item.clientId === clientId
+        ? { ...item, status: "failed", error: attachmentErrorMessage(error) }
+        : item));
+    }
+  };
+  const queueAttachmentFiles = (files: readonly File[]) => {
+    const queued = files.map<ComposerAttachmentItem>((file) => ({
+      clientId: globalThis.crypto.randomUUID(),
+      file,
+      fileName: file.name || "attachment",
+      mediaType: file.type || "application/octet-stream",
+      size: file.size,
+      status: file.size > MAX_ATTACHMENT_BYTES ? "failed" : "uploading",
+      attachment: null,
+      error: file.size > MAX_ATTACHMENT_BYTES ? "Attachment exceeds the 100 MiB v1 limit" : null
+    }));
+    if (queued.length === 0) return;
+    setAttachmentItems((items) => [...items, ...queued]);
+    for (const item of queued) if (item.status === "uploading" && item.file) void uploadAttachment(item.clientId, item.file);
+  };
+  const retryAttachment = (item: ComposerAttachmentItem) => {
+    if (!item.file) return;
+    setAttachmentItems((items) => items.map((candidate) => candidate.clientId === item.clientId ? { ...candidate, status: "uploading", error: null } : candidate));
+    void uploadAttachment(item.clientId, item.file);
+  };
+  const pasteAttachments = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = clipboardImageFiles(event.clipboardData);
+    if (files.length === 0) return;
+    event.preventDefault();
+    queueAttachmentFiles(files);
+  };
   const send = useMutation({
     mutationFn: async () => {
       let contextNodeId = branch.headNodeId;
-      if (attachmentIds.length > 0) {
-        const parts: MessagePart[] = [{ type: "text", text: message }, ...attachmentIds.flatMap((id) => {
-          const item = data.attachments.find((attachment) => attachment.id === id);
-          return item ? [{ type: "attachment" as const, attachmentId: item.id, name: item.fileName, mediaType: item.mediaType }] : [];
-        })];
+      if (readyAttachments.length > 0) {
+        const parts: MessagePart[] = [
+          ...(message.trim().length > 0 ? [{ type: "text" as const, text: message }] : []),
+          ...readyAttachments.map((attachment) => ({ type: "attachment" as const, attachmentId: attachment.id, name: attachment.fileName, mediaType: attachment.mediaType }))
+        ];
         const response = await api<{ node: MessageNode }>(`/api/sessions/${data.session.id}/messages`, { method: "POST", ...jsonBody({ branchId: branch.id, parentId: branch.headNodeId, role: "user", parts, sourcePayloadRevisionId }) });
         contextNodeId = response.node.id;
       }
-      return api<{ run: { id: string } }>("/api/runs", { method: "POST", ...jsonBody({ sessionId: data.session.id, branchId: branch.id, contextNodeId, ...(attachmentIds.length === 0 ? { userMessage: message, sourcePayloadRevisionId } : {}) }) });
+      return api<{ run: { id: string } }>("/api/runs", { method: "POST", ...jsonBody({ sessionId: data.session.id, branchId: branch.id, contextNodeId, ...(readyAttachments.length === 0 ? { userMessage: message, sourcePayloadRevisionId } : {}) }) });
     },
-    onSuccess: ({ run }) => { setMessage(""); setSourcePayloadRevisionId(null); setAttachmentIds([]); setHistoryReset((value) => value + 1); onRunStarted(run.id); onChanged(); }
+    onSuccess: ({ run }) => { setMessage(""); setSourcePayloadRevisionId(null); setAttachmentItems([]); setHistoryReset((value) => value + 1); onRunStarted(run.id); onChanged(); }
   });
-  const upload = useMutation({ mutationFn: async (file: File) => {
-    const form = new FormData(); form.set("file", file);
-    return api<{ attachment: Attachment }>(`/api/projects/${data.session.projectId}/attachments`, { method: "POST", body: form });
-  }, onSuccess: ({ attachment }) => { setAttachmentIds((ids) => [...ids, attachment.id]); onChanged(); } });
-  const canSend = message.trim().length > 0 && !send.isPending && Boolean(data.session.providerProfileId);
+  const canSend = (message.trim().length > 0 || readyAttachments.length > 0) && !uploadsPending && !uploadsFailed && !send.isPending && Boolean(data.session.providerProfileId);
   return <ComposerPanel>
-    {data.attachments.length > 0 && <div className="attachment-picker">{data.attachments.map((attachment) => <label key={attachment.id}><input type="checkbox" checked={attachmentIds.includes(attachment.id)} onChange={(event) => setAttachmentIds((ids) => event.target.checked ? [...ids, attachment.id] : ids.filter((id) => id !== attachment.id))} />{attachment.fileName}</label>)}</div>}
+    {(attachmentItems.length > 0 || reusableAttachments.length > 0) && <div className="attachment-picker">
+      {attachmentItems.map((item) => <div className={`composer-attachment ${item.status}`} key={item.clientId} title={item.error ?? `${item.mediaType} · ${formatBytes(item.size)}`}>
+        {item.status === "uploading" ? <span className="spinner small" /> : item.status === "ready" ? <Check size={12} /> : <ShieldAlert size={12} />}
+        <span>{item.fileName}</span>
+        {item.status === "failed" && item.file && item.size <= MAX_ATTACHMENT_BYTES && <button type="button" className="composer-attachment-retry" onClick={() => retryAttachment(item)}>Retry</button>}
+        <button type="button" className="composer-attachment-remove" aria-label={`Remove ${item.fileName} from prompt`} title="Remove from this prompt" onClick={() => setAttachmentItems((items) => items.filter((candidate) => candidate.clientId !== item.clientId))}><X size={11} /></button>
+      </div>)}
+      {reusableAttachments.length > 0 && <select className="attachment-reuse" aria-label="Reuse stored attachment" value="" onChange={(event) => {
+        const attachment = data.attachments.find((candidate) => candidate.id === event.target.value);
+        if (!attachment) return;
+        setAttachmentItems((items) => [...items, { clientId: `stored:${attachment.id}`, file: null, fileName: attachment.fileName, mediaType: attachment.mediaType, size: attachment.size, status: "ready", attachment, error: null }]);
+      }}><option value="">Reuse stored…</option>{reusableAttachments.map((attachment) => <option value={attachment.id} key={attachment.id}>{attachment.fileName}</option>)}</select>}
+    </div>}
     <form onSubmit={(event) => { event.preventDefault(); if (canSend) send.mutate(); }}>
-      <label className="attach-button"><Paperclip size={17} /><input type="file" onChange={(event) => { const file = event.target.files?.[0]; if (file) upload.mutate(file); }} /></label>
-      <ComposerTextarea id="operator-composer-input" aria-label="Next operator payload" value={message} sourcePayloadRevisionId={sourcePayloadRevisionId} history={submittedMessages} navigationKey={`${data.session.id}:${branch.id}:${branch.headNodeId ?? "root"}:${historyReset}`} onValueChange={setComposerValue} onKeyDown={(event) => {
+      <label className="attach-button" title="Attach files"><Paperclip size={17} /><input type="file" multiple aria-label="Attach files" onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; queueAttachmentFiles(files); }} /></label>
+      <ComposerTextarea id="operator-composer-input" aria-label="Next operator payload" value={message} sourcePayloadRevisionId={sourcePayloadRevisionId} history={submittedMessages} navigationKey={`${data.session.id}:${branch.id}:${branch.headNodeId ?? "root"}:${historyReset}`} onValueChange={setComposerValue} onPaste={pasteAttachments} onKeyDown={(event) => {
         if (!isComposerSubmitKey({ key: event.key, shiftKey: event.shiftKey, isComposing: event.nativeEvent.isComposing })) return;
         event.preventDefault();
         if (canSend) event.currentTarget.form?.requestSubmit();
-      }} placeholder="Enter the next operator payload…" rows={2} required aria-keyshortcuts="Enter Shift+Enter ArrowUp ArrowDown" />
+      }} placeholder="Enter the next operator payload…" rows={2} aria-keyshortcuts="Enter Shift+Enter ArrowUp ArrowDown" />
       <div className="composer-actions">
         <PayloadWorkbench value={message} sourcePayloadRevisionId={sourcePayloadRevisionId} context={{
           projectId: data.session.projectId,
@@ -606,6 +713,8 @@ function Composer({ data, branch, onRunStarted, onChanged }: { data: WorkbenchDa
     </form>
     <small className="composer-shortcut">Enter to run · Shift+Enter for a new line · ↑ at start for history</small>
     {!data.session.providerProfileId && <small className="composer-hint">Select a provider and model in the inspector before running.</small>}
+    {uploadsPending && <small className="composer-hint">Uploading attachment… Run will be available when it finishes.</small>}
+    {uploadsFailed && <div className="form-error" role="alert">Attachment upload failed: {attachmentItems.filter((item) => item.status === "failed").map((item) => `${item.fileName}: ${item.error ?? "Unknown error"}`).join(" · ")}</div>}
     {send.error && <div className="form-error">{send.error.message}</div>}
   </ComposerPanel>;
 }
