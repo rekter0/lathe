@@ -121,9 +121,11 @@ After copying, inspect or edit the composer normally. Pressing **Run** is the on
 
 ## Transform and pipelines
 
-Transform operates on exact text. Built-in groups cover encodings, text transforms, and red-team framing. Undo and Reset apply only to the open draft.
+Transform operates on exact text. Select a transform to review its description, parameters, lossiness, expansion estimate, compatibility notes, and risk warnings, then apply it explicitly. Built-ins include Base64/Base32/URL/hex encodings, configurable Caesar rotation, fullwidth Unicode, deterministic zero-width insertion, text transforms, framing, and variable rendering. Parameterized transforms use the same validated defaults in the live workbench, saved pipelines, and server execution.
 
-A saved pipeline applies its enabled steps in order. **Render variables** is also available as a direct Transform action; inside a pipeline it resolves template placeholders at that exact point in the sequence. Every successful step creates a child payload revision. If a later step fails, Lathe retains the last successful revision and leaves the input draft recoverable; it never mutates an earlier revision.
+The inspection panel can show bounded raw text, exact parent/current text, escaped Unicode, individual code points, UTF-8 bytes, and a directional round-trip check. A round trip is reported as verified only when the declared inverse reproduces the exact parent; decoders may instead report a mismatch after canonicalizing padding or whitespace. Preview truncation never changes the authoritative draft. Undo and Reset apply only to the open draft.
+
+A saved pipeline applies its enabled steps and normalized parameters in order. **Render variables** is also available as a direct Transform action; inside a pipeline it resolves template placeholders at that exact point in the sequence. Every successful step creates a child payload revision recording the exact transform version and effective parameters. If a later step fails, Lathe retains those successful intermediate revisions while leaving the open input draft and undo state unchanged; it never mutates an earlier revision.
 
 Manual typing is captured as an `edited` child when the draft is transformed, restored/saved, copied to the composer, or run. If a revision-backed composer payload is edited before Run, Lathe creates another `edited` child and links the resulting user node to it.
 

@@ -4,7 +4,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import * as Tabs from "@radix-ui/react-tabs";
 import { ArrowDown, ArrowUp, Braces, FileText, FlaskConical, Gauge, Pencil, Plus, RotateCcw, Save, Sparkles, Trash2, WandSparkles, X } from "lucide-react";
 import type { JsonObject, JsonValue } from "@lathe/domain";
-import { getPayloadTransform, payloadTransforms, type PayloadTransformId } from "@lathe/payloads";
+import { getPayloadTransform, normalizePayloadTransformParameters, payloadTransforms, validatePayloadTransformParameters, type PayloadTransformId } from "@lathe/payloads";
 import { api, jsonBody } from "../api.js";
 import {
   defaultPayloadWorkbenchSettings,
@@ -16,6 +16,7 @@ import {
 import type { SafeProvider } from "../types.js";
 import { Button, Field, Input, Select, Textarea } from "./forms.js";
 import { useOperatorDialog } from "./operator-dialog.js";
+import { PayloadTransformParameterFields } from "./payload-transform-parameters.js";
 
 type SettingsTab = "profiles" | "instructions" | "techniques" | "pipelines" | "defaults";
 
@@ -318,7 +319,16 @@ function PipelinePanel({ assets }: { assets: PayloadAssetRevision[] }) {
     setSteps(storedSteps.flatMap((item, index) => {
       const step = record(item);
       const transformId = stringField(step.transformId) || stringField(step.id);
-      return payloadTransformIds.includes(transformId as PayloadTransformId) ? [{ id: `${index}-${transformId}`, transformId, enabled: step.enabled !== false, ...(Object.keys(stringRecord(step.parameters)).length > 0 ? { parameters: stringRecord(step.parameters) } : {}) }] : [];
+      if (!payloadTransformIds.includes(transformId as PayloadTransformId)) return [];
+      const storedParameters = stringRecord(step.parameters);
+      let parameters = storedParameters;
+      try {
+        parameters = { ...normalizePayloadTransformParameters(transformId as PayloadTransformId, storedParameters) };
+      } catch {
+        // Preserve invalid legacy values so the operator can inspect and repair
+        // them instead of silently replacing evidence in a new revision.
+      }
+      return [{ id: `${index}-${transformId}`, transformId, enabled: step.enabled !== false, ...(Object.keys(parameters).length > 0 ? { parameters } : {}) }];
     }));
   };
   const move = (index: number, direction: -1 | 1) => setSteps((prior) => {
@@ -328,21 +338,39 @@ function PipelinePanel({ assets }: { assets: PayloadAssetRevision[] }) {
     [next[index], next[target]] = [next[target]!, next[index]!];
     return next;
   });
+  const stepsValid = steps.every((step) => validatePayloadTransformParameters(step.transformId as PayloadTransformId, step.parameters).valid);
+  const serializedSteps = () => steps.map((step) => {
+    const definition = getPayloadTransform(step.transformId as PayloadTransformId);
+    const parameters = normalizePayloadTransformParameters(definition.id, step.parameters);
+    return { transformId: definition.id, version: definition.version, enabled: step.enabled, ...(Object.keys(parameters).length > 0 ? { parameters } : {}) };
+  });
   return <SettingsLibraryLayout
     title="Transform pipelines"
     description="Save an ordered sequence of deterministic transforms. Add Render variables wherever template overrides should be applied."
     list={<LibraryCards assets={assets} editingId={editing?.id} onEdit={edit} onDelete={(asset) => void requestDelete(asset)} />}
-    editor={<form className="payload-settings-form" onSubmit={(event) => { event.preventDefault(); mutations.save.mutate({ kind: "payload-pipeline", name, description, value: { steps: steps.map((step) => ({ transformId: step.transformId, version: 1, enabled: step.enabled, ...(step.parameters ? { parameters: step.parameters } : {}) })) }, editing }); }}>
+    editor={<form className="payload-settings-form" onSubmit={(event) => { event.preventDefault(); if (!stepsValid) return; mutations.save.mutate({ kind: "payload-pipeline", name, description, value: { steps: serializedSteps() }, editing }); }}>
       <EditorHeading editing={editing} onCancel={reset}>pipeline</EditorHeading>
       <Field label="Name"><Input value={name} onChange={(event) => setName(event.target.value)} required /></Field>
       <Field label="Description"><Input value={description} onChange={(event) => setDescription(event.target.value)} /></Field>
       <div className="payload-pipeline-builder" aria-label="Ordered transform steps">
-        {steps.map((step, index) => <div key={step.id}><span>{index + 1}</span><label className="payload-pipeline-enabled"><input type="checkbox" checked={step.enabled} onChange={(event) => setSteps((prior) => prior.map((item) => item.id === step.id ? { ...item, enabled: event.target.checked } : item))} /><strong>{payloadTransformLabel(step.transformId)}</strong></label><Button type="button" variant="ghost" aria-label={`Move ${payloadTransformLabel(step.transformId)} up`} disabled={index === 0} onClick={() => move(index, -1)}><ArrowUp size={12} /></Button><Button type="button" variant="ghost" aria-label={`Move ${payloadTransformLabel(step.transformId)} down`} disabled={index === steps.length - 1} onClick={() => move(index, 1)}><ArrowDown size={12} /></Button><Button type="button" variant="ghost" aria-label={`Remove ${payloadTransformLabel(step.transformId)}`} onClick={() => setSteps((prior) => prior.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></Button></div>)}
+        {steps.map((step, index) => {
+          const definition = getPayloadTransform(step.transformId as PayloadTransformId);
+          const validation = validatePayloadTransformParameters(definition.id, step.parameters);
+          return <div className="payload-pipeline-step" key={step.id}>
+            <div className="payload-pipeline-step-heading"><span>{index + 1}</span><label className="payload-pipeline-enabled"><input type="checkbox" checked={step.enabled} onChange={(event) => setSteps((prior) => prior.map((item) => item.id === step.id ? { ...item, enabled: event.target.checked } : item))} /><strong>{definition.label}</strong></label><Button type="button" variant="ghost" aria-label={`Move ${definition.label} up`} disabled={index === 0} onClick={() => move(index, -1)}><ArrowUp size={12} /></Button><Button type="button" variant="ghost" aria-label={`Move ${definition.label} down`} disabled={index === steps.length - 1} onClick={() => move(index, 1)}><ArrowDown size={12} /></Button><Button type="button" variant="ghost" aria-label={`Remove ${definition.label}`} onClick={() => setSteps((prior) => prior.filter((_, itemIndex) => itemIndex !== index))}><X size={12} /></Button></div>
+            <PayloadTransformParameterFields compact definition={definition} value={step.parameters ?? definition.parameterDefaults} onChange={(parameters) => setSteps((prior) => prior.map((item) => item.id === step.id ? { ...item, parameters } : item))} />
+            {!validation.valid && definition.parameterSchema.mode === "none" && <div className="payload-transform-parameter-errors" role="alert">{validation.errors.map((error) => <p key={error}>{error}</p>)}</div>}
+          </div>;
+        })}
         {steps.length === 0 && <p>No transforms yet.</p>}
       </div>
-      <div className="payload-pipeline-add"><Select aria-label="Transform to add" value={newTransform} onChange={(event) => setNewTransform(event.target.value)}>{payloadTransformIds.map((id) => <option key={id} value={id}>{payloadTransformLabel(id)}</option>)}</Select><Button type="button" variant="secondary" onClick={() => setSteps((prior) => [...prior, { id: `${Date.now()}-${prior.length}`, transformId: newTransform, enabled: true }])}><Plus size={13} /> Add</Button></div>
+      <div className="payload-pipeline-add"><Select aria-label="Transform to add" value={newTransform} onChange={(event) => setNewTransform(event.target.value)}>{payloadTransformIds.map((id) => <option key={id} value={id}>{payloadTransformLabel(id)}</option>)}</Select><Button type="button" variant="secondary" onClick={() => {
+        const definition = getPayloadTransform(newTransform as PayloadTransformId);
+        const parameters = { ...normalizePayloadTransformParameters(definition.id) };
+        setSteps((prior) => [...prior, { id: `${Date.now()}-${prior.length}`, transformId: definition.id, enabled: true, ...(Object.keys(parameters).length > 0 ? { parameters } : {}) }]);
+      }}><Plus size={13} /> Add</Button></div>
       {(mutations.save.error || mutations.remove.error) && <div className="form-error">{mutations.save.error?.message ?? mutations.remove.error?.message}</div>}
-      <Button disabled={!name || steps.length === 0 || mutations.save.isPending}><Save size={13} /> {editing ? "Save new revision" : "Save pipeline"}</Button>
+      <Button disabled={!name || steps.length === 0 || !stepsValid || mutations.save.isPending}><Save size={13} /> {editing ? "Save new revision" : "Save pipeline"}</Button>
     </form>}
   />;
 }

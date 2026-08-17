@@ -4,7 +4,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import * as Tabs from "@radix-ui/react-tabs";
 import { ArrowDown, ArrowUp, Braces, CaseSensitive, Check, ChevronDown, CircleStop, Code2, Download, Eye, FileClock, GitCompare, History, ListRestart, Play, Plus, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Undo2, WandSparkles, X } from "lucide-react";
 import type { JsonObject, JsonValue, MessageNode } from "@lathe/domain";
-import { applyPayloadTransform, evaluatePayloadPipeline, payloadTransforms, techniqueSelectionWarnings, type PayloadPipelineStep, type PayloadTechnique, type PayloadTransformDefinition, type PayloadTransformId } from "@lathe/payloads";
+import { applyPayloadTransform, countUnicodeCodePoints, evaluatePayloadPipeline, getPayloadTransform, normalizePayloadTransformParameters, payloadTransforms, techniqueSelectionWarnings, validatePayloadTransformParameters, type PayloadPipelineStep, type PayloadTechnique, type PayloadTransformDefinition, type PayloadTransformId } from "@lathe/payloads";
 import { api, consumeEvents, downloadApiFile, jsonBody } from "../api.js";
 import { RenderedMarkdown } from "./rendered-markdown.js";
 import {
@@ -30,6 +30,8 @@ import {
 } from "../payload-workbench-api.js";
 import { Button, Field, Input, Select, Textarea } from "./forms.js";
 import { useOperatorDialog } from "./operator-dialog.js";
+import { PayloadInspectionPanel, type PayloadTransformApplicationInspection } from "./payload-inspection.js";
+import { PayloadTransformParameterFields } from "./payload-transform-parameters.js";
 
 export { applyPayloadTransform, type PayloadTransformId } from "@lathe/payloads";
 
@@ -299,6 +301,9 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
   const [draftSource, setDraftSource] = useState<{ id: string; text: string | null } | null>(null);
   const [undoStack, setUndoStack] = useState<string[]>([]);
   const [transformError, setTransformError] = useState<string | null>(null);
+  const [selectedTransformId, setSelectedTransformId] = useState<PayloadTransformId>("base64-encode");
+  const [selectedTransformParameters, setSelectedTransformParameters] = useState<Record<string, string>>(() => ({ ...normalizePayloadTransformParameters("base64-encode") }));
+  const [transformApplication, setTransformApplication] = useState<PayloadTransformApplicationInspection | null>(null);
   const [settingsDraft, setSettingsDraft] = useState(defaultPayloadWorkbenchSettings);
   const [hydratedSettingsKey, setHydratedSettingsKey] = useState<string | null>(null);
   const [operatorInstruction, setOperatorInstruction] = useState("");
@@ -342,6 +347,9 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
   const pipelines = orderedRevisions(pipelineAssets.data?.assets ?? []);
   const contextIsStale = Boolean(context && (snapshotBranchId !== context.branchId || snapshotHeadId !== context.contextNodeId));
   const selectedProfile = profiles.find((asset) => asset.id === profileRevisionId);
+  const selectedTransform = getPayloadTransform(selectedTransformId);
+  const effectiveSelectedTransformParameters = selectedTransform.parameterSchema.mode === "variables" ? variablesAsStrings(variables) : selectedTransformParameters;
+  const selectedTransformValidation = validatePayloadTransformParameters(selectedTransform.id, effectiveSelectedTransformParameters);
   const selectedProfileBackend = record(record(selectedProfile?.value).backend);
   const selectedProfileNeedsWorkspaceConfirmation = selectedProfileBackend.kind === "codex-app-server" && selectedProfileBackend.workspaceAccess === "project-read-only";
   const selectedTechniques: PayloadTechnique[] = techniqueRevisionIds.flatMap((revisionId) => {
@@ -638,6 +646,9 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
       setDraftSource(sourcePayloadRevisionId ? { id: sourcePayloadRevisionId, text: null } : null);
       setUndoStack([]);
       setTransformError(null);
+      setSelectedTransformId("base64-encode");
+      setSelectedTransformParameters({ ...normalizePayloadTransformParameters("base64-encode") });
+      setTransformApplication(null);
       setTab("transform");
       setHydratedSettingsKey(null);
       setSettingsDraft(defaultPayloadWorkbenchSettings);
@@ -661,17 +672,28 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
     }
     setOpen(nextOpen);
   };
-  const apply = (transform: PayloadTransformDefinition) => {
+  const selectTransform = (transform: PayloadTransformDefinition) => {
+    setSelectedTransformId(transform.id);
+    setSelectedTransformParameters({ ...normalizePayloadTransformParameters(transform.id) });
+    setTransformError(null);
+    setTransformApplication(null);
+  };
+  const apply = () => {
+    const transform = selectedTransform;
     try {
-      const parameters = transform.id === "render-variables" ? variablesAsStrings(variables) : undefined;
+      const parameters = normalizePayloadTransformParameters(transform.id, effectiveSelectedTransformParameters);
       const transformed = transform.apply(draft, parameters);
       if (transformed !== draft) setUndoStack((items) => [...items.slice(-49), draft]);
       setDraft(transformed);
+      setTransformApplication({ definition: transform, parameters, parentText: draft, outputText: transformed });
       setTransformError(null);
       if (context && transformed !== draft) {
         const parent = draftSource;
         derive.mutate({ ...(parent ? { revisionId: parent.id, ...(draft !== parent.text ? { editText: draft } : {}) } : { seedText: draft }), body: { kind: "transform", transformId: transform.id, version: transform.version, ...(parameters ? { parameters } : {}) } }, {
-          onSuccess: ({ revision }) => setDraftSource((current) => !parent || current?.id === parent.id ? { id: revision.id, text: revision.text } : current),
+          onSuccess: ({ revision }) => {
+            setDraftSource((current) => !parent || current?.id === parent.id ? { id: revision.id, text: revision.text } : current);
+            void queryClient.invalidateQueries({ queryKey: ["payload-generations", context.sessionId] });
+          },
           onError: (error) => setTransformError(`The local transform succeeded, but its revision could not be recorded: ${error.message}`)
         });
       }
@@ -685,11 +707,13 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
     setDraft(prior);
     setUndoStack((items) => items.slice(0, -1));
     setTransformError(null);
+    setTransformApplication(null);
   };
   const reset = () => {
     if (draft !== original) setUndoStack((items) => [...items.slice(-49), draft]);
     setDraft(original);
     setTransformError(null);
+    setTransformApplication(null);
   };
   const selectedPipeline = pipelines.find((asset) => asset.id === pipelineRevisionId);
   const runPipeline = () => {
@@ -709,8 +733,20 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
         ...(step.transformId === "render-variables" ? { parameters: variablesAsStrings(variables) } : step.parameters ? { parameters: step.parameters } : {})
       }));
       const result = evaluatePayloadPipeline(draft, pipelineSteps);
-      if (result.output !== draft) setUndoStack((items) => [...items.slice(-49), draft]);
-      setDraft(result.output);
+      if (result.completed && result.output !== draft) {
+        setUndoStack((items) => [...items.slice(-49), draft]);
+        setDraft(result.output);
+        const finalStep = result.steps.at(-1);
+        const configuredStep = finalStep ? pipelineSteps[finalStep.index] : undefined;
+        if (finalStep && finalStep.output !== null && configuredStep) {
+          setTransformApplication({
+            definition: getPayloadTransform(finalStep.transformId),
+            parameters: normalizePayloadTransformParameters(finalStep.transformId, configuredStep.parameters),
+            parentText: finalStep.input,
+            outputText: finalStep.output
+          });
+        }
+      }
       setTransformError(result.completed ? null : result.steps.find((step) => step.error)?.error ?? "Pipeline stopped after its last successful step.");
       if (context) {
         const parent = draftSource;
@@ -718,8 +754,9 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
           onSuccess: ({ revision, error }) => {
             setDraftSource((current) => !parent || current?.id === parent.id ? { id: revision.id, text: revision.text } : current);
             if (error) setTransformError(error);
+            void queryClient.invalidateQueries({ queryKey: ["payload-generations", context.sessionId] });
           },
-          onError: (error) => setTransformError(`The local pipeline succeeded, but its revisions could not be recorded: ${error.message}`)
+          onError: (error) => setTransformError(`The pipeline result could not be recorded: ${error.message}`)
         });
       }
     } catch (error) {
@@ -732,6 +769,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
     setOriginal(candidate.text);
     setUndoStack([]);
     setTransformError(null);
+    setTransformApplication(null);
     setTab("transform");
   };
   const useCandidate = (candidate: StreamingPayloadCandidate, revision?: PayloadRevision) => {
@@ -786,6 +824,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
       }
     });
   };
+  const codePointCount = countUnicodeCodePoints(draft);
   const byteCount = new TextEncoder().encode(draft).byteLength;
   const libraryError = settingsQuery.error ?? sessionSettingsQuery.error ?? profileAssets.error ?? instructionAssets.error ?? techniqueAssets.error ?? pipelineAssets.error;
   const visibleSessionSettingsError = context && sessionSettingsError?.sessionId === context.sessionId ? sessionSettingsError.message : null;
@@ -803,9 +842,17 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
         <Tabs.List><Tabs.Trigger value="transform"><Braces size={13} /> Transform</Tabs.Trigger><Tabs.Trigger value="generate"><Sparkles size={13} /> Generate</Tabs.Trigger><Tabs.Trigger value="history"><History size={13} /> History</Tabs.Trigger></Tabs.List>
         <Tabs.Content value="transform" className="payload-workbench-tab-content">
           <div className="payload-workbench-layout">
-            <section className="payload-workbench-editor"><Field label="Next prompt"><Textarea autoFocus value={draft} onChange={(event) => { setDraft(event.target.value); setTransformError(null); }} rows={18} maxLength={1_000_000} placeholder="Draft the next payload…" /></Field><div className="payload-workbench-stats"><span>{draft.length.toLocaleString()} characters</span><span>{byteCount.toLocaleString()} UTF-8 bytes</span><span>{undoStack.length} undo step{undoStack.length === 1 ? "" : "s"}</span>{draftSource && <span>lineage · {draftSource.id.slice(0, 8)}</span>}</div>{(transformError || derive.error) && <div className="form-error" role="alert">{transformError ?? derive.error?.message}</div>}</section>
+            <section className="payload-workbench-editor"><Field label="Next prompt"><Textarea autoFocus value={draft} onChange={(event) => { setDraft(event.target.value); setTransformError(null); setTransformApplication(null); }} rows={18} maxLength={1_000_000} placeholder="Draft the next payload…" /></Field><div className="payload-workbench-stats"><span>{codePointCount.toLocaleString()} Unicode code points</span><span>{byteCount.toLocaleString()} UTF-8 bytes</span><span>{undoStack.length} undo step{undoStack.length === 1 ? "" : "s"}</span>{draftSource && <span>lineage · {draftSource.id.slice(0, 8)}</span>}</div>{(transformError || derive.error) && <div className="form-error" role="alert">{transformError ?? derive.error?.message}</div>}<PayloadInspectionPanel value={draft} selectedTransform={selectedTransform} application={transformApplication} /></section>
             <aside className="payload-toolbox" aria-label="Payload transformations">
-              {payloadTransformGroups.map((group) => <section className="payload-tool-group" key={group.label}><h3><TransformGroupIcon icon={group.icon} />{group.label}</h3><div>{group.transforms.map((transform) => <button type="button" disabled={derive.isPending} onClick={() => apply(transform)} key={transform.id}>{transform.label}</button>)}</div></section>)}
+              {payloadTransformGroups.map((group) => <section className="payload-tool-group" key={group.label}><h3><TransformGroupIcon icon={group.icon} />{group.label}</h3><div>{group.transforms.map((transform) => <button type="button" aria-pressed={selectedTransform.id === transform.id} disabled={derive.isPending} onClick={() => selectTransform(transform)} key={transform.id}>{transform.label}</button>)}</div></section>)}
+              <section className="payload-transform-selection" aria-label="Selected transform">
+                <header><div><strong>{selectedTransform.label}</strong><span>v{selectedTransform.version} · {selectedTransform.lossiness}</span></div><small>{selectedTransform.description}</small></header>
+                <PayloadTransformParameterFields definition={selectedTransform} value={selectedTransformParameters} onChange={(parameters) => { setSelectedTransformParameters(parameters); setTransformError(null); }} disabled={derive.isPending} />
+                {selectedTransform.riskFlags.length > 0 && <div className="payload-transform-risks">{selectedTransform.riskFlags.map((flag) => <span key={flag}>{flag.replaceAll("-", " ")}</span>)}</div>}
+                {selectedTransform.warnings.map((warning) => <p className={`payload-transform-warning ${warning.severity}`} key={warning.code}>{warning.message}</p>)}
+                <small className="payload-transform-expansion">{selectedTransform.expansion.summary}</small>
+                <Button type="button" onClick={apply} disabled={!selectedTransformValidation.valid || derive.isPending}>Apply {selectedTransform.label}</Button>
+              </section>
               <section className="payload-tool-group payload-pipeline-runner"><h3><Play size={13} /> Saved pipeline</h3><Select aria-label="Transform pipeline" value={pipelineRevisionId} onChange={(event) => setPipelineRevisionId(event.target.value)}><option value="">Select pipeline…</option>{pipelines.map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · r{asset.revision}</option>)}</Select>{selectedPipeline && <small>{selectedPipeline.description || "Its ordered deterministic steps are applied exactly."}</small>}<Button type="button" variant="secondary" onClick={runPipeline} disabled={!selectedPipeline || derive.isPending}><Play size={12} /> Apply pipeline</Button></section>
               <VariableOverridesEditor rows={variables} onChange={setVariables} />
             </aside>
@@ -833,7 +880,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
           </aside>
           <main className="payload-generate-results"><GenerationCandidates generation={generation} candidates={candidates} revisions={revisions} original={original} diffIds={diffIds} onDiffChange={setDiffIds} onRefine={(revision, feedback) => refine.mutate({ revision, feedback })} onTransform={sendCandidateToTransform} onUse={useCandidate} refinePending={refine.isPending} />{detailQuery.error && <div className="form-error">{detailQuery.error.message}</div>}</main></div>
         </Tabs.Content>
-        <Tabs.Content value="history" className="payload-workbench-tab-content"><HistoryPanel {...(context ? { context } : {})} generations={historyGenerations} standaloneRevisions={historyStandaloneRevisions} standaloneOutcomes={historyStandaloneOutcomes} loading={historyQuery.isLoading} loadingMore={historyQuery.isFetchingNextPage} hasMore={historyQuery.hasNextPage} error={historyQuery.error?.message ?? restore.error?.message ?? removeGeneration.error?.message ?? removeRevision.error?.message} onLoadMore={() => void historyQuery.fetchNextPage()} onRestore={(item) => restore.mutate(item)} onRestoreRevision={(revision) => { setDraft(revision.text); setDraftSource({ id: revision.id, text: revision.text }); setOriginal(revision.text); setUndoStack([]); setTransformError(null); setTab("transform"); }} onDelete={(item) => void requestGenerationDelete(item)} onDeleteRevision={(revision) => void requestRevisionDelete(revision)} {...(restore.variables?.generation.id ? { restoringId: restore.variables.generation.id } : {})} {...(removeGeneration.variables?.generation.id ? { deletingId: removeGeneration.variables.generation.id } : {})} {...(removeRevision.variables?.id ? { deletingRevisionId: removeRevision.variables.id } : {})} /></Tabs.Content>
+        <Tabs.Content value="history" className="payload-workbench-tab-content"><HistoryPanel {...(context ? { context } : {})} generations={historyGenerations} standaloneRevisions={historyStandaloneRevisions} standaloneOutcomes={historyStandaloneOutcomes} loading={historyQuery.isLoading} loadingMore={historyQuery.isFetchingNextPage} hasMore={historyQuery.hasNextPage} error={historyQuery.error?.message ?? restore.error?.message ?? removeGeneration.error?.message ?? removeRevision.error?.message} onLoadMore={() => void historyQuery.fetchNextPage()} onRestore={(item) => restore.mutate(item)} onRestoreRevision={(revision) => { setDraft(revision.text); setDraftSource({ id: revision.id, text: revision.text }); setOriginal(revision.text); setUndoStack([]); setTransformError(null); setTransformApplication(null); setTab("transform"); }} onDelete={(item) => void requestGenerationDelete(item)} onDeleteRevision={(revision) => void requestRevisionDelete(revision)} {...(restore.variables?.generation.id ? { restoringId: restore.variables.generation.id } : {})} {...(removeGeneration.variables?.generation.id ? { deletingId: removeGeneration.variables.generation.id } : {})} {...(removeRevision.variables?.id ? { deletingRevisionId: removeRevision.variables.id } : {})} /></Tabs.Content>
       </Tabs.Root>
       <div className="payload-workbench-footer"><div><Button type="button" variant="ghost" onClick={undo} disabled={undoStack.length === 0 || derive.isPending}><Undo2 size={14} /> Undo</Button><Button type="button" variant="ghost" onClick={reset} disabled={draft === original || derive.isPending}><RotateCcw size={14} /> Reset</Button></div><div><Dialog.Close asChild><Button type="button" variant="ghost">Cancel</Button></Dialog.Close><Button type="button" onClick={useDraft} disabled={draft.trim().length === 0 || derive.isPending}><WandSparkles size={14} /> {derive.isPending ? "Recording…" : "Use as next prompt"}</Button></div></div>
       <Dialog.Close className="dialog-close" aria-label="Close payload workbench"><X size={17} /></Dialog.Close>

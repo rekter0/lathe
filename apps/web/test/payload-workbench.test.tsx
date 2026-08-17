@@ -63,12 +63,14 @@ describe("PayloadWorkbench", () => {
     expect(onUse).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "Base64 encode" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply Base64 encode" }));
     expect(editor.value).toBe("aGVsbG8gLyB3b3JsZA==");
     fireEvent.click(screen.getByRole("button", { name: "Undo" }));
     expect(editor.value).toBe("hello / world");
 
     fireEvent.change(editor, { target: { value: "probe" } });
     fireEvent.click(screen.getByRole("button", { name: "XML payload" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply XML payload" }));
     expect(editor.value).toBe("<payload>\nprobe\n</payload>");
     fireEvent.click(screen.getByRole("button", { name: "Use as next prompt" }));
 
@@ -82,9 +84,119 @@ describe("PayloadWorkbench", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open payload workbench" }));
     const editor = screen.getByRole("textbox", { name: "Next prompt" }) as HTMLTextAreaElement;
     fireEvent.click(screen.getByRole("button", { name: "UTF-8 hex decode" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply UTF-8 hex decode" }));
 
     expect(editor.value).toBe("not hex");
     expect(screen.getByRole("alert").textContent).toMatch(/hexadecimal digits/i);
+  });
+
+  it("applies schema-driven parameters and verifies the declared directional inverse", () => {
+    renderWorkbench(<PayloadWorkbench value="Attack at dawn" onUse={() => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open payload workbench" }));
+    fireEvent.click(screen.getByRole("button", { name: "Caesar rotation" }));
+    const shift = screen.getByRole("spinbutton", { name: /Shift/ }) as HTMLInputElement;
+    expect(shift.value).toBe("13");
+    fireEvent.change(shift, { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply Caesar rotation" }));
+
+    expect((screen.getByRole("textbox", { name: "Next prompt" }) as HTMLTextAreaElement).value).toBe("Buubdl bu ebxo");
+    fireEvent.click(screen.getByRole("tab", { name: "Parent" }));
+    expect(screen.getByText("Attack at dawn")).not.toBeNull();
+    expect(screen.getAllByText("Buubdl bu ebxo")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("tab", { name: "Round-trip" }));
+    expect(screen.getByText("verified")).not.toBeNull();
+    expect(screen.getByText(/reproduced the parent text exactly/i)).not.toBeNull();
+  });
+
+  it("makes invisible transform output observable as escapes, code points, and UTF-8 bytes", () => {
+    renderWorkbench(<PayloadWorkbench value="ab" onUse={() => undefined} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open payload workbench" }));
+    fireEvent.click(screen.getByRole("button", { name: "Zero-width insertion" }));
+    expect(screen.getByRole("combobox", { name: /Character/ })).not.toBeNull();
+    expect((screen.getByRole("spinbutton", { name: /Interval/ }) as HTMLInputElement).value).toBe("1");
+    fireEvent.click(screen.getByRole("button", { name: "Apply Zero-width insertion" }));
+    expect((screen.getByRole("textbox", { name: "Next prompt" }) as HTMLTextAreaElement).value).toBe("a\u200bb");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Escaped" }));
+    expect(screen.getByText("a\\u200Bb")).not.toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Code points" }));
+    expect(screen.getByText(/U\+200B\s+<ZERO WIDTH SPACE>/)).not.toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "UTF-8 bytes" }));
+    expect(screen.getByText(/61 e2 80 8b 62/)).not.toBeNull();
+  });
+
+  it("retains saved-pipeline intermediates without replacing the draft or undo history after a later step fails", async () => {
+    const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const pipeline = {
+      id: "pipeline-r1",
+      assetId: "pipeline-1",
+      kind: "payload-pipeline",
+      revision: 1,
+      name: "Fail after two steps",
+      description: "Uppercase and reverse before an invalid hex decode.",
+      tags: [],
+      provenance: {},
+      value: {
+        steps: [
+          { transformId: "uppercase", version: 1, enabled: true },
+          { transformId: "reverse", version: 1, enabled: true },
+          { transformId: "hex-decode", version: 1, enabled: true }
+        ]
+      },
+      contentHash: "a".repeat(64),
+      trusted: true,
+      archivedAt: null,
+      createdAt: "2026-08-15T00:00:00.000Z"
+    };
+    const seed = { id: "revision-seed", projectId: "project-1", sessionId: "session-1", generationId: null, attemptId: null, parentRevisionId: null, ordinal: 1, operation: "edited", text: "abc" };
+    const first = { ...seed, id: "revision-step-1", parentRevisionId: seed.id, operation: "transformed", text: "ABC" };
+    const second = { ...first, id: "revision-step-2", parentRevisionId: first.id, text: "CBA" };
+    const restored = { ...second, id: "revision-restored", parentRevisionId: second.id, operation: "edited", text: "abc" };
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://lathe.local");
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+      if (url.pathname === "/api/payload-workbench/settings") return jsonResponse({ settings: {} });
+      if (url.pathname === "/api/sessions/session-1/payload-workbench/settings") return jsonResponse({ settings: null });
+      if (url.pathname === "/api/assets") return jsonResponse({ assets: url.searchParams.get("kind") === "payload-pipeline" ? [pipeline] : [] });
+      if (url.pathname === "/api/payload-generations") return jsonResponse({ generations: [], standaloneRevisions: [], standaloneOutcomes: [], nextCursor: null });
+      if (url.pathname === "/api/payload-revisions" && init?.method === "POST") {
+        requests.push({ path: url.pathname, body });
+        return jsonResponse({ revision: seed });
+      }
+      if (url.pathname === `/api/payload-revisions/${seed.id}/derive` && init?.method === "POST") {
+        requests.push({ path: url.pathname, body });
+        return jsonResponse({ revision: second, revisions: [first, second], completed: false, error: "Hex input must contain an even number of hexadecimal digits." });
+      }
+      if (url.pathname === `/api/payload-revisions/${second.id}/derive` && init?.method === "POST") {
+        requests.push({ path: url.pathname, body });
+        return jsonResponse({ revision: restored, revisions: [restored], completed: true, error: null });
+      }
+      return jsonResponse({});
+    }));
+    const onUse = vi.fn();
+    renderWorkbench(<PayloadWorkbench value="abc" context={{ projectId: "project-1", sessionId: "session-1", sessionName: "Session", branchId: "branch-1", branchName: "main", contextNodeId: null, path: [] }} onUse={onUse} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open payload workbench" }));
+    const editor = screen.getByRole("textbox", { name: "Next prompt" }) as HTMLTextAreaElement;
+    await screen.findByRole("option", { name: "Fail after two steps · r1" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Transform pipeline" }), { target: { value: pipeline.id } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply pipeline" }));
+
+    expect(editor.value).toBe("abc");
+    expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("alert").textContent).toMatch(/hexadecimal digits/i);
+    await waitFor(() => expect(requests.some((request) => request.path === `/api/payload-revisions/${seed.id}/derive`)).toBe(true));
+    expect(editor.value).toBe("abc");
+    expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Use as next prompt" }));
+    await waitFor(() => expect(requests.at(-1)).toEqual({
+      path: `/api/payload-revisions/${second.id}/derive`,
+      body: { kind: "edit", text: "abc" }
+    }));
+    expect(onUse).toHaveBeenCalledWith({ text: "abc", sourcePayloadRevisionId: restored.id });
   });
 
   it("renders variable overrides as a direct deterministic transform", () => {
@@ -94,6 +206,7 @@ describe("PayloadWorkbench", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Variable 1 name" }), { target: { value: "target" } });
     fireEvent.change(screen.getByRole("textbox", { name: "Variable target value" }), { target: { value: "model" } });
     fireEvent.click(screen.getByRole("button", { name: "Render variables" }));
+    fireEvent.click(screen.getByRole("button", { name: "Apply Render variables" }));
     expect((screen.getByRole("textbox", { name: "Next prompt" }) as HTMLTextAreaElement).value).toBe("Hello model");
   });
 

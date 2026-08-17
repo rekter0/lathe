@@ -224,6 +224,16 @@ test("generates, refines, compares, transforms, restores, and explicitly uses a 
   const nextPrompt = workbenchDialog.getByLabel("Next prompt");
   const untransformed = await nextPrompt.inputValue();
   expect(untransformed).toContain("Fixture **response**");
+  await workbenchDialog.getByRole("tab", { name: "Rendered Markdown" }).click();
+  await expect(workbenchDialog.locator(".payload-inspection-rendered strong").filter({ hasText: "response" }).first()).toBeVisible();
+  await workbenchDialog.getByRole("button", { name: "Caesar rotation" }).click();
+  await workbenchDialog.getByRole("spinbutton", { name: /Shift/ }).fill("1");
+  await workbenchDialog.getByRole("button", { name: "Apply Caesar rotation" }).click();
+  await expect(nextPrompt).not.toHaveValue(untransformed);
+  await workbenchDialog.getByRole("tab", { name: "Round-trip" }).click();
+  await expect(workbenchDialog.locator(".payload-round-trip")).toContainText("verified");
+  await workbenchDialog.getByRole("button", { name: "Undo" }).click();
+  await expect(nextPrompt).toHaveValue(untransformed);
   await workbenchDialog.getByLabel("Transform pipeline").selectOption(pipeline.id);
   await workbenchDialog.getByRole("button", { name: "Apply pipeline" }).click();
   await expect(nextPrompt).toHaveValue(untransformed.toUpperCase());
