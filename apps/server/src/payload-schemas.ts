@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { sessionPayloadWorkbenchSettingsInputSchema as domainSessionPayloadWorkbenchSettingsInputSchema } from "@lathe/domain";
+import { countUnicodeCodePoints, payloadTransformParameterLimits, validatePayloadTransformParameters } from "@lathe/payloads";
 
 export const payloadContextModeSchema = z.enum(["none", "minimal", "full"]);
 export const payloadDiversitySchema = z.enum(["low", "balanced", "high"]);
@@ -52,17 +53,48 @@ export const payloadTechniqueValueSchema = z.object({
 });
 
 export const payloadTransformIdSchema = z.enum([
-  "base64-encode", "base64-decode", "url-encode", "url-decode", "hex-encode", "hex-decode",
-  "uppercase", "lowercase", "reverse", "rot13", "json-escape", "json-unescape",
+  "base64-encode", "base64-decode", "base32-encode", "base32-decode",
+  "url-encode", "url-decode", "hex-encode", "hex-decode",
+  "uppercase", "lowercase", "reverse", "rot13", "caesar-rotate", "fullwidth", "zero-width-insert",
+  "json-escape", "json-unescape",
   "markdown-frame", "xml-frame", "json-frame", "repeat-twice", "render-variables"
 ]);
+
+const payloadTransformParameterRecordSchema = z.record(z.string(), z.string()).superRefine((parameters, context) => {
+  const entries = Object.entries(parameters);
+  if (entries.length > payloadTransformParameterLimits.maxEntries) {
+    context.addIssue({ code: "custom", message: `Parameters may contain at most ${payloadTransformParameterLimits.maxEntries} entries.` });
+    return;
+  }
+  let totalCodePoints = 0;
+  for (const [name, value] of entries) {
+    const nameCodePoints = countUnicodeCodePoints(name);
+    const valueCodePoints = countUnicodeCodePoints(value);
+    if (nameCodePoints === 0) context.addIssue({ code: "custom", path: [name], message: "Parameter names cannot be empty." });
+    else if (nameCodePoints > payloadTransformParameterLimits.maxNameCodePoints) {
+      context.addIssue({ code: "custom", path: [name], message: `Parameter names may contain at most ${payloadTransformParameterLimits.maxNameCodePoints} Unicode code points.` });
+    }
+    if (valueCodePoints > payloadTransformParameterLimits.maxValueCodePoints) {
+      context.addIssue({ code: "custom", path: [name], message: `Parameter values may contain at most ${payloadTransformParameterLimits.maxValueCodePoints} Unicode code points.` });
+    }
+    totalCodePoints += nameCodePoints + valueCodePoints;
+  }
+  if (totalCodePoints > payloadTransformParameterLimits.maxTotalCodePoints) {
+    context.addIssue({ code: "custom", message: `Parameters exceed the ${payloadTransformParameterLimits.maxTotalCodePoints} Unicode code-point aggregate limit.` });
+  }
+});
 
 export const payloadPipelineValueSchema = z.object({
   steps: z.array(z.object({
     transformId: payloadTransformIdSchema,
     version: z.literal(1),
     enabled: z.boolean().default(true),
-    parameters: z.record(z.string(), z.string()).optional()
+    parameters: payloadTransformParameterRecordSchema.optional()
+  }).superRefine((step, context) => {
+    const validation = validatePayloadTransformParameters(step.transformId, step.parameters);
+    for (const message of validation.errors) {
+      context.addIssue({ code: "custom", path: ["parameters"], message });
+    }
   })).max(100)
 });
 
@@ -113,8 +145,8 @@ export const refinePayloadRevisionInputSchema = z.object({
 
 export const derivePayloadRevisionInputSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("edit"), text: z.string().max(1_000_000) }),
-  z.object({ kind: z.literal("transform"), transformId: payloadTransformIdSchema, version: z.literal(1), parameters: z.record(z.string(), z.string().max(20_000)).optional() }),
-  z.object({ kind: z.literal("pipeline"), pipelineRevisionId: z.string().min(1), variables: z.record(z.string(), z.string().max(20_000)).default({}) })
+  z.object({ kind: z.literal("transform"), transformId: payloadTransformIdSchema, version: z.literal(1), parameters: payloadTransformParameterRecordSchema.optional() }),
+  z.object({ kind: z.literal("pipeline"), pipelineRevisionId: z.string().min(1), variables: payloadTransformParameterRecordSchema.default({}) })
 ]);
 
 export type PayloadGeneratorProfileValue = z.infer<typeof payloadGeneratorProfileValueSchema>;

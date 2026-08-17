@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createAutomationSchema,
   createPayloadGenerationSchema,
+  createPayloadRevisionSchema,
   createProviderProfileSchema,
   createSessionSchema,
   emptyResolvedConfig,
@@ -143,5 +144,19 @@ describe("payload workbench schemas", () => {
       ...settings,
       variables: { objective: "x".repeat(20_001) }
     }).success).toBe(false);
+  });
+
+  it("retains an exact empty payload produced by a deterministic transform", () => {
+    expect(createPayloadRevisionSchema.safeParse({
+      projectId: "project",
+      sessionId: "session",
+      generationId: null,
+      attemptId: null,
+      parentRevisionId: "parent",
+      ordinal: 1,
+      operation: "transformed",
+      text: "",
+      provenance: { kind: "transform" }
+    }).success).toBe(true);
   });
 });

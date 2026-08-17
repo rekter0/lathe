@@ -315,7 +315,7 @@ export const createPayloadRevisionSchema = z.object({
   parentRevisionId: idSchema.nullable().default(null),
   ordinal: z.number().int().positive(),
   operation: payloadRevisionOperationSchema,
-  text: z.string().min(1).max(10_000_000),
+  text: z.string().max(10_000_000),
   provenance: jsonObjectSchema
 });
 

@@ -143,7 +143,7 @@ const payloadAttemptsSchema = z.array(payloadAttemptSchema).max(100_000);
 const payloadRevisionSchema = z.object({
   id: z.string().min(1), projectId: z.string().min(1), sessionId: z.string().min(1),
   generationId: z.string().nullable(), attemptId: z.string().nullable(), parentRevisionId: z.string().nullable(),
-  ordinal: z.number().int().positive(), operation: payloadRevisionOperationSchema, text: z.string().min(1).max(10_000_000),
+  ordinal: z.number().int().positive(), operation: payloadRevisionOperationSchema, text: z.string().max(10_000_000),
   contentHash: sha256Schema, provenance: z.record(z.string(), jsonValueSchema), createdAt: isoDateSchema, deletedAt: isoDateSchema.nullable()
 });
 const payloadRevisionsSchema = z.array(payloadRevisionSchema).max(100_000);

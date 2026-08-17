@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { ZodError, z, type ZodType } from "zod";
 import { type AssetKind, type JsonObject, type JsonValue } from "@lathe/domain";
 import type { LatheRepository, ResourceDeletionResult } from "@lathe/db";
-import { applyPayloadTransform, evaluatePayloadPipeline } from "@lathe/payloads";
+import { applyPayloadTransform, evaluatePayloadPipeline, normalizePayloadTransformParameters } from "@lathe/payloads";
 import type { PayloadGenerationCoordinator } from "./payload-generation-coordinator.js";
 import { PayloadGenerationRequestError } from "./payload-generation-coordinator.js";
 import {
@@ -236,8 +236,10 @@ export function registerPayloadRoutes(app: Hono, dependencies: {
     }
     if (input.kind === "transform") {
       let text: string;
+      let parameters: Readonly<Record<string, string>>;
       try {
-        text = applyPayloadTransform(input.transformId, parent.text, input.parameters);
+        parameters = normalizePayloadTransformParameters(input.transformId, input.parameters);
+        text = applyPayloadTransform(input.transformId, parent.text, parameters);
       } catch (error) {
         throw new HTTPException(422, { message: error instanceof Error ? error.message : String(error) });
       }
@@ -245,7 +247,7 @@ export function registerPayloadRoutes(app: Hono, dependencies: {
         projectId: parent.projectId, sessionId: parent.sessionId, generationId: parent.generationId,
         attemptId: null, parentRevisionId: parent.id, ordinal: parent.ordinal,
         operation: "transformed", text,
-        provenance: { kind: "transform", transformId: input.transformId, version: input.version, parameters: input.parameters ?? {} }
+        provenance: { kind: "transform", transformId: input.transformId, version: input.version, parameters }
       });
       return context.json({ revision, revisions: [revision] }, 201);
     }
@@ -265,11 +267,21 @@ export function registerPayloadRoutes(app: Hono, dependencies: {
     let previous = parent;
     for (const step of evaluated.steps) {
       if (step.output === null) break;
+      const configured = steps[step.index];
+      if (!configured) throw new HTTPException(500, { message: `Pipeline step ${step.index} was not available after evaluation` });
+      const parameters = normalizePayloadTransformParameters(configured.transformId, configured.parameters);
       const revision = await repository.createPayloadRevision({
         projectId: parent.projectId, sessionId: parent.sessionId, generationId: parent.generationId,
         attemptId: null, parentRevisionId: previous.id, ordinal: parent.ordinal,
         operation: "transformed", text: step.output,
-        provenance: { kind: "pipeline-step", pipelineRevisionId: pipeline.id, stepIndex: step.index, transformId: step.transformId, variables: input.variables }
+        provenance: {
+          kind: "pipeline-step",
+          pipelineRevisionId: pipeline.id,
+          stepIndex: step.index,
+          transformId: step.transformId,
+          version: configured.version,
+          parameters
+        }
       });
       revisions.push(revision);
       previous = revision;
