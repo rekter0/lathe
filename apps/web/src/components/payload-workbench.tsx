@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tabs from "@radix-ui/react-tabs";
-import { ArrowDown, ArrowUp, Braces, CaseSensitive, Check, ChevronDown, CircleStop, Code2, Download, Eye, FileClock, GitCompare, History, Library, ListRestart, Play, Plus, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Undo2, WandSparkles, X } from "lucide-react";
+import { ArrowDown, ArrowUp, BookPlus, Braces, CaseSensitive, Check, ChevronDown, CircleStop, Code2, Download, Eye, FileClock, GitCompare, History, Library, ListRestart, Play, Plus, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Undo2, WandSparkles, X } from "lucide-react";
 import type { JsonObject, JsonValue, MessageNode } from "@lathe/domain";
 import { applyPayloadTransform, countUnicodeCodePoints, evaluatePayloadPipeline, getPayloadTransform, normalizePayloadTransformParameters, payloadTransforms, techniqueSelectionWarnings, validatePayloadTransformParameters, type PayloadPipelineStep, type PayloadTechnique, type PayloadTransformDefinition, type PayloadTransformId } from "@lathe/payloads";
 import { api, consumeEvents, downloadApiFile, jsonBody } from "../api.js";
@@ -36,6 +36,7 @@ import { PayloadInspectionPanel, type PayloadTransformApplicationInspection } fr
 import { PayloadTransformParameterFields } from "./payload-transform-parameters.js";
 import { PayloadArsenal } from "./payload-arsenal.js";
 import { defaultPayloadVariantMatrixDraft, normalizePayloadVariantMatrixDraft, PayloadVariantMatrix } from "./payload-variant-matrix.js";
+import { ArtifactMetadataDialog, type ArtifactMetadata } from "./artifact-metadata-dialog.js";
 
 export { applyPayloadTransform, type PayloadTransformId } from "@lathe/payloads";
 
@@ -264,7 +265,7 @@ function RevisionOutcomes({ outcomes, revisionId }: { outcomes: PayloadOutcome[]
   return <div className="payload-history-outcomes">{exact.map((outcome) => <span key={outcome.runId} title={outcome.operatorNotes ?? outcome.classification ?? outcome.status}><b>{outcome.operatorLabel ?? outcome.classification ?? outcome.status}</b>{outcome.operatorNotes && <i>{outcome.operatorNotes}</i>}</span>)}</div>;
 }
 
-function HistoryPanel({ context, generations, standaloneRevisions, standaloneOutcomes, loading, loadingMore, hasMore, error, onLoadMore, onRestore, onRestoreRevision, onDelete, onDeleteRevision, restoringId, deletingId, deletingRevisionId }: {
+function HistoryPanel({ context, generations, standaloneRevisions, standaloneOutcomes, loading, loadingMore, hasMore, error, onLoadMore, onRestore, onRestoreRevision, onSaveRecipe, onDelete, onDeleteRevision, restoringId, savingRecipeRevisionId, deletingId, deletingRevisionId }: {
   context?: PayloadWorkbenchContext;
   generations: PayloadGenerationDetail[];
   standaloneRevisions: PayloadRevision[];
@@ -276,9 +277,11 @@ function HistoryPanel({ context, generations, standaloneRevisions, standaloneOut
   onLoadMore(): void;
   onRestore(generation: PayloadGenerationDetail): void;
   onRestoreRevision(revision: PayloadRevision): void;
+  onSaveRecipe(revision: PayloadRevision): void;
   onDelete(generation: PayloadGenerationDetail): void;
   onDeleteRevision(revision: PayloadRevision): void;
   restoringId?: string;
+  savingRecipeRevisionId?: string;
   deletingId?: string;
   deletingRevisionId?: string;
 }) {
@@ -286,14 +289,14 @@ function HistoryPanel({ context, generations, standaloneRevisions, standaloneOut
   if (loading) return <div className="payload-history-empty"><span className="spinner" /> Loading generation history…</div>;
   return <section className="payload-history-panel"><header><div><History size={15} /><strong>Session generation history</strong></div><small>Restoring copies exact candidate output into this workbench; it never rewrites the conversation.</small></header>
     {error && <div className="form-error">{error}</div>}
-    {standaloneRevisions.length > 0 && <section className="payload-standalone-history"><h3>Manual and transformed payloads</h3>{standaloneRevisions.filter((revision) => !revision.deletedAt).toSorted((left, right) => (left.createdAt ?? "").localeCompare(right.createdAt ?? "")).map((revision) => <article key={revision.id}><div><strong>{revision.operation}</strong><code>{revision.id.slice(0, 8)}</code>{revision.parentRevisionId && <small>from {revision.parentRevisionId.slice(0, 8)}</small>}<pre>{revision.text}</pre><RevisionOutcomes outcomes={standaloneOutcomes} revisionId={revision.id} /></div><div className="payload-revision-actions"><Button type="button" variant="secondary" onClick={() => onRestoreRevision(revision)}><ListRestart size={13} /> Restore to Transform</Button><Button type="button" variant="ghost" aria-label={`Delete payload revision ${revision.id}`} title="Delete this unused immutable revision" disabled={deletingRevisionId === revision.id} onClick={() => onDeleteRevision(revision)}><Trash2 size={13} /></Button></div></article>)}</section>}
+    {standaloneRevisions.length > 0 && <section className="payload-standalone-history"><h3>Manual and transformed payloads</h3>{standaloneRevisions.filter((revision) => !revision.deletedAt).toSorted((left, right) => (left.createdAt ?? "").localeCompare(right.createdAt ?? "")).map((revision) => <article key={revision.id}><div><strong>{revision.operation}</strong><code>{revision.id.slice(0, 8)}</code>{revision.parentRevisionId && <small>from {revision.parentRevisionId.slice(0, 8)}</small>}<pre>{revision.text}</pre><RevisionOutcomes outcomes={standaloneOutcomes} revisionId={revision.id} /></div><div className="payload-revision-actions"><Button type="button" variant="secondary" onClick={() => onRestoreRevision(revision)}><ListRestart size={13} /> Restore to Transform</Button><Button type="button" variant="secondary" disabled={savingRecipeRevisionId === revision.id} onClick={() => onSaveRecipe(revision)}><BookPlus size={13} /> Save as recipe</Button><Button type="button" variant="ghost" aria-label={`Delete payload revision ${revision.id}`} title="Delete this unused immutable revision" disabled={deletingRevisionId === revision.id} onClick={() => onDeleteRevision(revision)}><Trash2 size={13} /></Button></div></article>)}</section>}
     {generations.length === 0 && standaloneRevisions.length === 0 && <div className="payload-history-empty"><FileClock size={22} />No payload history in this session.</div>}
     <div className="payload-history-list">{generations.map((detail) => {
       const generation = detail.generation;
       const activeRevisions = detail.revisions.filter((revision) => !revision.deletedAt).toSorted((left, right) => (left.createdAt ?? "").localeCompare(right.createdAt ?? ""));
       const sourceCount = activeRevisions.filter((revision) => Boolean(revision.attemptId ?? revision.sourceAttemptId)).length;
       const active = ["queued", "streaming"].includes(generation.status);
-      return <article key={generation.id}><div><strong>{generation.operatorInstruction || generation.feedback || "Payload generation"}</strong><small>{generation.createdAt ? new Date(generation.createdAt).toLocaleString() : generation.id.slice(0, 8)} · {sourceCount || generation.candidateCount || "?"} candidates</small>{activeRevisions.length > 0 && <details className="payload-generation-lineage"><summary>{activeRevisions.length} lineage revision{activeRevisions.length === 1 ? "" : "s"}</summary>{activeRevisions.map((revision) => <div key={revision.id}><span><b>{revision.operation}</b><code>{revision.id.slice(0, 8)}</code>{revision.parentRevisionId && <small>← {revision.parentRevisionId.slice(0, 8)}</small>}<RevisionOutcomes outcomes={detail.outcomes ?? []} revisionId={revision.id} /></span><div className="payload-revision-actions"><Button type="button" variant="ghost" title="Restore exact revision to Transform" aria-label={`Restore payload revision ${revision.id}`} onClick={() => onRestoreRevision(revision)}><ListRestart size={12} /></Button><Button type="button" variant="ghost" aria-label={`Delete payload revision ${revision.id}`} title="Delete this unused immutable revision" disabled={deletingRevisionId === revision.id} onClick={() => onDeleteRevision(revision)}><Trash2 size={12} /></Button></div></div>)}</details>}</div><span className={`status-badge status-${generation.status}`}>{generation.status}</span><div><Button type="button" variant="secondary" disabled={restoringId === generation.id} onClick={() => onRestore(detail)}><ListRestart size={13} /> Restore candidates</Button><Button type="button" variant="ghost" aria-label={`Delete generation ${generation.id}`} title={active ? "Cancel this generation before deleting it" : "Delete generation"} disabled={active || deletingId === generation.id} onClick={() => onDelete(detail)}><Trash2 size={13} /></Button></div></article>;
+      return <article key={generation.id}><div><strong>{generation.operatorInstruction || generation.feedback || "Payload generation"}</strong><small>{generation.createdAt ? new Date(generation.createdAt).toLocaleString() : generation.id.slice(0, 8)} · {sourceCount || generation.candidateCount || "?"} candidates</small>{activeRevisions.length > 0 && <details className="payload-generation-lineage"><summary>{activeRevisions.length} lineage revision{activeRevisions.length === 1 ? "" : "s"}</summary>{activeRevisions.map((revision) => <div key={revision.id}><span><b>{revision.operation}</b><code>{revision.id.slice(0, 8)}</code>{revision.parentRevisionId && <small>← {revision.parentRevisionId.slice(0, 8)}</small>}<RevisionOutcomes outcomes={detail.outcomes ?? []} revisionId={revision.id} /></span><div className="payload-revision-actions"><Button type="button" variant="ghost" title="Restore exact revision to Transform" aria-label={`Restore payload revision ${revision.id}`} onClick={() => onRestoreRevision(revision)}><ListRestart size={12} /></Button><Button type="button" variant="ghost" title="Save this exact lineage as a reusable recipe" aria-label={`Save payload revision ${revision.id} as recipe`} disabled={savingRecipeRevisionId === revision.id} onClick={() => onSaveRecipe(revision)}><BookPlus size={12} /></Button><Button type="button" variant="ghost" aria-label={`Delete payload revision ${revision.id}`} title="Delete this unused immutable revision" disabled={deletingRevisionId === revision.id} onClick={() => onDeleteRevision(revision)}><Trash2 size={12} /></Button></div></div>)}</details>}</div><span className={`status-badge status-${generation.status}`}>{generation.status}</span><div><Button type="button" variant="secondary" disabled={restoringId === generation.id} onClick={() => onRestore(detail)}><ListRestart size={13} /> Restore candidates</Button><Button type="button" variant="ghost" aria-label={`Delete generation ${generation.id}`} title={active ? "Cancel this generation before deleting it" : "Delete generation"} disabled={active || deletingId === generation.id} onClick={() => onDelete(detail)}><Trash2 size={13} /></Button></div></article>;
     })}</div>
     {hasMore && <Button type="button" variant="secondary" className="payload-history-load-more" disabled={loadingMore} onClick={onLoadMore}>{loadingMore ? <span className="spinner small" /> : <FileClock size={13} />} Load more</Button>}
   </section>;
@@ -333,6 +336,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
   const [candidates, setCandidates] = useState<StreamingPayloadCandidate[]>([]);
   const [revisions, setRevisions] = useState<PayloadRevision[]>([]);
   const [diffIds, setDiffIds] = useState<string[]>([]);
+  const [recipeSource, setRecipeSource] = useState<PayloadRevision | null>(null);
   const [sessionSettingsError, setSessionSettingsError] = useState<{ sessionId: string; message: string } | null>(null);
   const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastScheduledSessionSettings = useRef(new Map<string, string>());
@@ -355,6 +359,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
   const arsenalInstructionAssets = usePayloadAssets("payload-generator-instruction", open && tab === "arsenal", true);
   const arsenalTechniqueAssets = usePayloadAssets("payload-technique", open && tab === "arsenal", true);
   const arsenalPipelineAssets = usePayloadAssets("payload-pipeline", open && tab === "arsenal", true);
+  const arsenalRecipeAssets = usePayloadAssets("payload-recipe", open && tab === "arsenal", true);
   // Keep exact immutable revisions selectable. Defaults and restored generations
   // may intentionally point at an older revision after a newer one is saved.
   const profiles = orderedRevisions(profileAssets.data?.assets ?? []);
@@ -636,6 +641,17 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
       void queryClient.invalidateQueries({ queryKey: ["payload-generations", context?.sessionId] });
     }
   });
+  const saveRecipe = useMutation({
+    mutationFn: ({ revision, metadata }: { revision: PayloadRevision; metadata: ArtifactMetadata }) => api<{ recipe: PayloadAssetRevision }>(`/api/payload-revisions/${revision.id}/recipes`, {
+      method: "POST",
+      ...jsonBody(metadata)
+    }),
+    onSuccess: () => {
+      setRecipeSource(null);
+      void queryClient.invalidateQueries({ queryKey: ["assets", "payload-recipe"] });
+      void queryClient.invalidateQueries({ queryKey: ["assets", "payload-recipe", "include-archived"] });
+    }
+  });
   const derive = useMutation({
     mutationFn: async ({ revisionId, seedText, editText, body }: { revisionId?: string; seedText?: string; editText?: string; body: JsonObject | null }) => {
       let parentId = revisionId;
@@ -689,6 +705,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
       setCandidates([]);
       setRevisions([]);
       setDiffIds([]);
+      setRecipeSource(null);
     } else {
       void persistSessionSettings(true).catch(() => undefined);
     }
@@ -941,21 +958,25 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
           instructions={orderedRevisions(arsenalInstructionAssets.data?.assets ?? [])}
           techniques={orderedRevisions(arsenalTechniqueAssets.data?.assets ?? [])}
           pipelines={orderedRevisions(arsenalPipelineAssets.data?.assets ?? [])}
+          recipes={orderedRevisions(arsenalRecipeAssets.data?.assets ?? [])}
+          sessionId={context?.sessionId ?? null}
           selectedTransformId={selectedTransformId}
           selectedProfileRevisionId={profileRevisionId}
           selectedInstructionRevisionId={instructionRevisionId}
           selectedTechniqueRevisionIds={techniqueRevisionIds}
           selectedPipelineRevisionId={pipelineRevisionId}
-          loading={arsenalProfileAssets.isLoading || arsenalInstructionAssets.isLoading || arsenalTechniqueAssets.isLoading || arsenalPipelineAssets.isLoading}
-          error={arsenalProfileAssets.error?.message ?? arsenalInstructionAssets.error?.message ?? arsenalTechniqueAssets.error?.message ?? arsenalPipelineAssets.error?.message}
+          loading={arsenalProfileAssets.isLoading || arsenalInstructionAssets.isLoading || arsenalTechniqueAssets.isLoading || arsenalPipelineAssets.isLoading || arsenalRecipeAssets.isLoading}
+          error={arsenalProfileAssets.error?.message ?? arsenalInstructionAssets.error?.message ?? arsenalTechniqueAssets.error?.message ?? arsenalPipelineAssets.error?.message ?? arsenalRecipeAssets.error?.message}
           onSelectTransform={(transform) => { selectTransform(transform); setTab("transform"); }}
           onSelectProfile={(asset) => { setProfileRevisionId(asset.id); setTab("generate"); }}
           onSelectInstruction={(asset) => { setInstructionRevisionId(asset.id); setTab("generate"); }}
           onSelectTechnique={(asset) => { setTechniqueRevisionIds((current) => current.includes(asset.id) ? current : [...current, asset.id]); setTab("generate"); }}
           onSelectPipeline={(asset) => { setPipelineRevisionId(asset.id); setTab("transform"); }}
+          onReplayRecipe={(revision, warning) => { setDraft(revision.text); setDraftSource({ id: revision.id, text: revision.text }); setOriginal(revision.text); setUndoStack([]); setTransformError(warning ? `Recipe replay stopped after the last successful step: ${warning}` : null); setTransformApplication(null); setTab("transform"); }}
         /></Tabs.Content>
-        <Tabs.Content value="history" className="payload-workbench-tab-content"><HistoryPanel {...(context ? { context } : {})} generations={historyGenerations} standaloneRevisions={historyStandaloneRevisions} standaloneOutcomes={historyStandaloneOutcomes} loading={historyQuery.isLoading} loadingMore={historyQuery.isFetchingNextPage} hasMore={historyQuery.hasNextPage} error={historyQuery.error?.message ?? restore.error?.message ?? removeGeneration.error?.message ?? removeRevision.error?.message} onLoadMore={() => void historyQuery.fetchNextPage()} onRestore={(item) => restore.mutate(item)} onRestoreRevision={(revision) => { setDraft(revision.text); setDraftSource({ id: revision.id, text: revision.text }); setOriginal(revision.text); setUndoStack([]); setTransformError(null); setTransformApplication(null); setTab("transform"); }} onDelete={(item) => void requestGenerationDelete(item)} onDeleteRevision={(revision) => void requestRevisionDelete(revision)} {...(restore.variables?.generation.id ? { restoringId: restore.variables.generation.id } : {})} {...(removeGeneration.variables?.generation.id ? { deletingId: removeGeneration.variables.generation.id } : {})} {...(removeRevision.variables?.id ? { deletingRevisionId: removeRevision.variables.id } : {})} /></Tabs.Content>
+        <Tabs.Content value="history" className="payload-workbench-tab-content"><HistoryPanel {...(context ? { context } : {})} generations={historyGenerations} standaloneRevisions={historyStandaloneRevisions} standaloneOutcomes={historyStandaloneOutcomes} loading={historyQuery.isLoading} loadingMore={historyQuery.isFetchingNextPage} hasMore={historyQuery.hasNextPage} error={historyQuery.error?.message ?? restore.error?.message ?? removeGeneration.error?.message ?? removeRevision.error?.message} onLoadMore={() => void historyQuery.fetchNextPage()} onRestore={(item) => restore.mutate(item)} onRestoreRevision={(revision) => { setDraft(revision.text); setDraftSource({ id: revision.id, text: revision.text }); setOriginal(revision.text); setUndoStack([]); setTransformError(null); setTransformApplication(null); setTab("transform"); }} onSaveRecipe={setRecipeSource} onDelete={(item) => void requestGenerationDelete(item)} onDeleteRevision={(revision) => void requestRevisionDelete(revision)} {...(restore.variables?.generation.id ? { restoringId: restore.variables.generation.id } : {})} {...(saveRecipe.variables?.revision.id ? { savingRecipeRevisionId: saveRecipe.variables.revision.id } : {})} {...(removeGeneration.variables?.generation.id ? { deletingId: removeGeneration.variables.generation.id } : {})} {...(removeRevision.variables?.id ? { deletingRevisionId: removeRevision.variables.id } : {})} /></Tabs.Content>
       </Tabs.Root>
+      <ArtifactMetadataDialog open={Boolean(recipeSource)} title="Save payload lineage as recipe" description="Lathe reconstructs this revision's authoritative lineage. Generated and refined stages become captured checkpoints; saving does not call a model, run a target, or change the composer." confirmLabel="Save recipe" {...(recipeSource ? { defaultValue: { name: `${recipeSource.operation} recipe ${recipeSource.id.slice(0, 8)}`, description: "", tags: [] } } : {})} pending={saveRecipe.isPending} {...(saveRecipe.error ? { error: saveRecipe.error.message } : {})} onOpenChange={(nextOpen) => { if (!nextOpen) { setRecipeSource(null); saveRecipe.reset(); } }} onSubmit={(metadata) => { if (recipeSource) saveRecipe.mutate({ revision: recipeSource, metadata }); }} />
       <div className="payload-workbench-footer"><div><Button type="button" variant="ghost" onClick={undo} disabled={undoStack.length === 0 || derive.isPending}><Undo2 size={14} /> Undo</Button><Button type="button" variant="ghost" onClick={reset} disabled={draft === original || derive.isPending}><RotateCcw size={14} /> Reset</Button></div><div><Dialog.Close asChild><Button type="button" variant="ghost">Cancel</Button></Dialog.Close><Button type="button" onClick={useDraft} disabled={draft.trim().length === 0 || derive.isPending}><WandSparkles size={14} /> {derive.isPending ? "Recording…" : "Use as next prompt"}</Button></div></div>
       <Dialog.Close className="dialog-close" aria-label="Close payload workbench"><X size={17} /></Dialog.Close>
     </Dialog.Content></Dialog.Portal>

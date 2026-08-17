@@ -60,8 +60,10 @@ import {
   payloadGeneratorInstructionValueSchema,
   payloadGeneratorProfileValueSchema,
   payloadPipelineValueSchema,
+  payloadRecipeValueSchema,
   payloadTechniqueValueSchema
 } from "./payload-schemas.js";
+import { payloadRecipeAssetDependencies } from "./payload-recipes.js";
 import {
   buildCanonicalGenerationRequest,
   resolvedProviderConfig,
@@ -104,9 +106,20 @@ function validatePayloadAssetValue(kind: AssetKind, value: JsonValue): void {
   else if (kind === "payload-generator-instruction") payloadGeneratorInstructionValueSchema.parse(value);
   else if (kind === "payload-technique") payloadTechniqueValueSchema.parse(value);
   else if (kind === "payload-pipeline") payloadPipelineValueSchema.parse(value);
+  else if (kind === "payload-recipe") payloadRecipeValueSchema.parse(value);
 }
 
 async function validatePayloadAssetReferences(repository: LatheRepository, kind: AssetKind, value: JsonValue): Promise<void> {
+  if (kind === "payload-recipe") {
+    const recipe = payloadRecipeValueSchema.parse(value);
+    const assets = await repository.listAssetRevisions(undefined, true);
+    for (const dependency of payloadRecipeAssetDependencies(recipe)) {
+      const asset = assets.find((item) => item.id === dependency.id);
+      if (!asset) throw new HTTPException(409, { message: `Recipe ${dependency.label} revision is missing` });
+      if (asset.kind !== dependency.kind) throw new HTTPException(409, { message: `Recipe ${dependency.label} must be a ${dependency.kind} revision` });
+    }
+    return;
+  }
   if (kind !== "payload-generator-profile") return;
   const profile = payloadGeneratorProfileValueSchema.parse(value);
   if (profile.backend.kind !== "http-provider") return;
@@ -588,7 +601,7 @@ export function createApp(dependencies: AppDependencies): Hono {
     const body = await parseBody(context.req.raw, z.object({
       assetId: z.string().optional(),
       baseRevisionId: z.string().optional(),
-      kind: z.enum(["prompt", "tool-spec", "tool-implementation", "harness", "target", "mcp-server", "payload-generator-profile", "payload-generator-instruction", "payload-technique", "payload-pipeline"]),
+      kind: z.enum(["prompt", "tool-spec", "tool-implementation", "harness", "target", "mcp-server", "payload-generator-profile", "payload-generator-instruction", "payload-technique", "payload-pipeline", "payload-recipe"]),
       name: z.string().trim().min(1).max(120),
       description: z.string().max(4_000).default(""),
       tags: z.array(z.string()).default([]),

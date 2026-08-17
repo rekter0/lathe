@@ -257,7 +257,8 @@ export type AssetKind =
   | "payload-generator-profile"
   | "payload-generator-instruction"
   | "payload-technique"
-  | "payload-pipeline";
+  | "payload-pipeline"
+  | "payload-recipe";
 
 export interface AssetRevision<T extends JsonValue = JsonValue> {
   id: Id;
@@ -434,6 +435,42 @@ export interface PayloadRevision {
   provenance: JsonObject;
   createdAt: IsoDateTime;
   deletedAt: IsoDateTime | null;
+}
+
+export interface PayloadRecipeGeneratorCheckpoint extends JsonObject {
+  profileRevisionId: Id;
+  instructionRevisionId: Id | null;
+  techniqueRevisionIds: Id[];
+  pipelineRevisionId: Id | null;
+  contextHash: string;
+}
+
+export interface PayloadRecipeCheckpointStep extends JsonObject {
+  kind: "checkpoint";
+  sourceOperation: Exclude<PayloadRevisionOperation, "transformed">;
+  text: string;
+  contentHash: string;
+  generator: PayloadRecipeGeneratorCheckpoint | null;
+}
+
+export interface PayloadRecipeTransformStep extends JsonObject {
+  kind: "transform";
+  transformId: string;
+  version: number;
+  parameters: Record<string, string>;
+  variableNames: string[];
+  inputContentHash: string;
+  capturedOutputText: string;
+  outputContentHash: string;
+  pipelineRevisionId: Id | null;
+}
+
+/** Immutable, self-contained reconstruction recipe stored as an asset value. */
+export interface PayloadRecipeValue extends JsonObject {
+  version: 1;
+  finalContentHash: string;
+  variables: Array<{ name: string; defaultValue: string | null }>;
+  steps: Array<PayloadRecipeCheckpointStep | PayloadRecipeTransformStep>;
 }
 
 export interface TraceEvent {

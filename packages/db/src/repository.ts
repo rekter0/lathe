@@ -796,7 +796,7 @@ export class DrizzleLatheRepository implements LatheRepository {
   }
 
   private async assetReferences(id: string): Promise<ResourceReference[]> {
-    const { projects, sessions, snapshots, assets, jobs, payloadSettings, sessionPayloadSettings, payloadGenerations } = await this.referenceRows();
+    const { projects, sessions, snapshots, assets, jobs, payloadSettings, sessionPayloadSettings, payloadGenerations, payloadRevisions } = await this.referenceRows();
     const references: ResourceReference[] = [];
     for (const project of projects) {
       if (project.defaultHarnessRevisionId === id) references.push({ kind: "project", id: project.id, label: project.name, detail: "default harness" });
@@ -840,6 +840,11 @@ export class DrizzleLatheRepository implements LatheRepository {
         || generation.techniqueRevisionIds.includes(id)
       ) {
         references.push({ kind: "payload-generation", id: generation.id, label: generation.id, detail: "immutable payload generation configuration" });
+      }
+    }
+    for (const revision of payloadRevisions) {
+      if (revision.provenance.recipeRevisionId === id || revision.provenance.pipelineRevisionId === id) {
+        references.push({ kind: "payload-revision", id: revision.id, label: `Payload revision ${revision.ordinal}`, detail: "payload replay provenance" });
       }
     }
     return uniqueReferences(references);

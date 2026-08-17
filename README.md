@@ -16,7 +16,7 @@ Lathe is not an autonomous scanner or agent. The operator chooses the prompts, m
 - Manual, mock, host, existing container, SSH, and MCP tool execution with approval or explicit session bypass.
 - Streamed text/reasoning, provider refusal and fallback classification, tool evidence, raw traces, annotations, and findings.
 - Project-scoped attachments, provider-native branch JSON exports, and checksum-verified `.lathe-harness` and `.lathe-finding` bundles.
-- A Payload Workbench for deterministic transforms, context-aware helper generation, candidate refinement/comparison, and immutable payload lineage.
+- A Payload Workbench for deterministic transforms and variants, context-aware helper generation, immutable payload lineage, and replayable recipes.
 - Persistent replay, fan-out, and batch jobs with bounded concurrency and partial-result retention.
 - SQLite by default, with PostgreSQL available for relational storage.
 
@@ -79,7 +79,7 @@ Lathe creates the data directory as `0700` and SQLite as `0600` where supported.
 | --- | --- |
 | [Provider settings](./docs/settings-provider.md) | Protocols, endpoints, credentials, discovery, reasoning controls, and revisions. |
 | [Tools and targets](./docs/tools.md) | Tool definitions, QuickJS implementations, host/container/SSH targets, approvals, and MCP behavior. |
-| [Payload Workbench](./docs/payload-workbench.md) | Transform, Generate, controlled Variants, searchable Arsenal, History, and helper profiles. |
+| [Payload Workbench](./docs/payload-workbench.md) | Transform, Generate, Variants, searchable Arsenal, History, helper profiles, and replayable recipes. |
 | [Architecture](./ARCHITECTURE.md) | Package boundaries, graph and persistence model, generation flow, and artifacts. |
 | [Security](./SECURITY.md) | Deployment assumptions, secrets, execution trust, helper runtimes, attachments, and exports. |
 | [Agent guide](./AGENTS.md) | Repository invariants, coding conventions, dependency policy, and validation expectations. |

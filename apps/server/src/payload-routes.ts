@@ -14,16 +14,25 @@ import type { PayloadGenerationCoordinator } from "./payload-generation-coordina
 import { PayloadGenerationRequestError } from "./payload-generation-coordinator.js";
 import {
   createPayloadGenerationInputSchema,
+  createPayloadRecipeInputSchema,
   createPayloadVariantMatrixInputSchema,
   derivePayloadRevisionInputSchema,
   payloadContextPreviewInputSchema,
   payloadGeneratorProfileValueSchema,
   payloadPipelineValueSchema,
+  payloadRecipePreviewInputSchema,
+  payloadRecipeReplayInputSchema,
   payloadVariantMatrixPreflightInputSchema,
   sessionPayloadWorkbenchSettingsInputSchema,
   payloadWorkbenchSettingsInputSchema,
   refinePayloadRevisionInputSchema
 } from "./payload-schemas.js";
+import {
+  createPayloadRecipe,
+  PayloadRecipeRequestError,
+  previewPayloadRecipe,
+  replayPayloadRecipe
+} from "./payload-recipes.js";
 
 async function parseBody<T>(request: Request, schema: ZodType<T>): Promise<T> {
   let input: unknown;
@@ -42,6 +51,7 @@ function inUseMessage(label: string, result: ResourceDeletionResult): string {
 
 function requestError(error: unknown): never {
   if (error instanceof PayloadGenerationRequestError) throw new HTTPException(error.status, { message: error.message });
+  if (error instanceof PayloadRecipeRequestError) throw new HTTPException(error.status, { message: error.message });
   if (error instanceof ZodError) throw error;
   if (error instanceof Error && /not found/i.test(error.message)) throw new HTTPException(404, { message: error.message });
   if (error instanceof Error && /stale|does not belong|unavailable|archived|untrusted|current branch/i.test(error.message)) throw new HTTPException(409, { message: error.message });
@@ -307,6 +317,40 @@ export function registerPayloadRoutes(app: Hono, dependencies: {
     if (result.references.length > 0) return context.json({ error: { code: "resource-in-use", message: inUseMessage("Payload revision", result), references: result.references } }, 409);
     if (!result.deleted) throw new HTTPException(404, { message: "Payload revision not found" });
     return context.json({ deleted: true, id: context.req.param("id") });
+  });
+
+  app.post("/api/payload-revisions/:id/recipes", async (context) => {
+    const input = await parseBody(context.req.raw, createPayloadRecipeInputSchema);
+    try {
+      return context.json({ recipe: await createPayloadRecipe(repository, context.req.param("id"), input) }, 201);
+    } catch (error) {
+      requestError(error);
+    }
+  });
+
+  app.post("/api/payload-recipes/:revisionId/preview", async (context) => {
+    const input = await parseBody(context.req.raw, payloadRecipePreviewInputSchema);
+    try {
+      const { preview } = await previewPayloadRecipe(repository, context.req.param("revisionId"), input.sessionId, input.variables);
+      return context.json({ preview });
+    } catch (error) {
+      requestError(error);
+    }
+  });
+
+  app.post("/api/payload-recipes/:revisionId/replay", async (context) => {
+    const input = await parseBody(context.req.raw, payloadRecipeReplayInputSchema);
+    try {
+      return context.json(await replayPayloadRecipe(
+        repository,
+        context.req.param("revisionId"),
+        input.sessionId,
+        input.variables,
+        input.preflightHash
+      ), 201);
+    } catch (error) {
+      requestError(error);
+    }
   });
 
   app.post("/api/payload-revisions/:id/refine", async (context) => {

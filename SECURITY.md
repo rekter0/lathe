@@ -79,7 +79,7 @@ Attachments preserve exact bytes in a SHA-256-addressed content store and are re
 
 Branch export is a raw provider request body, not a checksummed Lathe artifact. It can contain the selected path, current prompts/tools/options, tool output, and inline attachments; it excludes provider URL/headers, siblings, and Lathe evidence metadata. Known managed credentials remain scrubbed (and matching attachments are rejected), while other heuristic filtering follows the global evidence setting.
 
-Artifact import validates path safety, declared hashes and sizes, file counts, compression expansion, manifest schemas, and supported ZIP features. Imported scripts remain disabled/untrusted. These checks reduce archive attacks but do not make imported content trustworthy.
+Artifact import validates path safety, declared hashes and sizes, file counts, compression expansion, manifest schemas, and supported ZIP features. Imported scripts remain disabled/untrusted, and imported payload recipes cannot be replayed until the operator trusts a new immutable revision. These checks reduce archive attacks but do not make imported content trustworthy.
 
 Deleting project/database references is not secure erasure: v1 has no content-store garbage collector. Dispose of sensitive stored bytes by securely removing the relevant `LATHE_DATA_DIR`.
 

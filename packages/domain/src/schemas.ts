@@ -110,7 +110,8 @@ export const assetKindSchema = z.enum([
   "payload-generator-profile",
   "payload-generator-instruction",
   "payload-technique",
-  "payload-pipeline"
+  "payload-pipeline",
+  "payload-recipe"
 ]);
 
 export const createSessionSchema = z.object({

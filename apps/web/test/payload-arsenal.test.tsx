@@ -57,6 +57,8 @@ function ArsenalHarness(props: Partial<React.ComponentProps<typeof PayloadArsena
     instructions={[instructionR1, instructionR2, instructionArchivedR3]}
     techniques={[technique]}
     pipelines={[pipeline]}
+    recipes={[]}
+    sessionId={null}
     selectedTransformId=""
     selectedProfileRevisionId=""
     selectedInstructionRevisionId=""
@@ -69,6 +71,7 @@ function ArsenalHarness(props: Partial<React.ComponentProps<typeof PayloadArsena
     onSelectInstruction={() => undefined}
     onSelectTechnique={() => undefined}
     onSelectPipeline={() => undefined}
+    onReplayRecipe={() => undefined}
     {...props}
   />;
 }

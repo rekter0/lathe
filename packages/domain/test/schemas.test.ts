@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  assetKindSchema,
   createAutomationSchema,
   createPayloadGenerationSchema,
   createPayloadRevisionSchema,
@@ -11,6 +12,12 @@ import {
   sessionPayloadWorkbenchSettingsInputSchema,
   updateSessionMetadataSchema
 } from "../src/index.js";
+
+describe("asset kind schema", () => {
+  it("accepts immutable payload recipes", () => {
+    expect(assetKindSchema.parse("payload-recipe")).toBe("payload-recipe");
+  });
+});
 
 describe("provider profile schema", () => {
   it("accepts HTTP endpoints but rejects credentials embedded in URLs", () => {

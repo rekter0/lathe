@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { createPersistence } from "@lathe/db";
-import { emptyResolvedConfig, nowIso, sha256Json, uuidv7, type AssetRevision, type JsonObject } from "@lathe/domain";
+import { emptyResolvedConfig, nowIso, sha256Json, uuidv7, type AssetRevision, type JsonObject, type PayloadRecipeValue } from "@lathe/domain";
 import { importFindingArtifact, importHarnessArtifact } from "@lathe/artifacts";
 import { createApp } from "../src/app.js";
 import { EventHub } from "../src/events.js";
@@ -504,6 +504,70 @@ describe("artifact routes", () => {
         text: "refined payload",
         provenance: { kind: "helper-refinement", feedback: "Make the payload more concise." }
       });
+      const recipeValue: PayloadRecipeValue = {
+        version: 1,
+        finalContentHash: sha256Json("cmVmaW5lZCBwYXlsb2Fk"),
+        variables: [],
+        steps: [
+          {
+            kind: "checkpoint",
+            sourceOperation: "generated",
+            text: generated.text,
+            contentHash: generated.contentHash,
+            generator: {
+              profileRevisionId: generatorProfile.id,
+              instructionRevisionId: generatorInstruction.id,
+              techniqueRevisionIds: [technique.id],
+              pipelineRevisionId: null,
+              contextHash: generatedGroup.contextHash
+            }
+          },
+          {
+            kind: "checkpoint",
+            sourceOperation: "refined",
+            text: refined.text,
+            contentHash: refined.contentHash,
+            generator: {
+              profileRevisionId: generatorProfile.id,
+              instructionRevisionId: generatorInstruction.id,
+              techniqueRevisionIds: [technique.id],
+              pipelineRevisionId: null,
+              contextHash: refinedGroup.contextHash
+            }
+          },
+          {
+            kind: "transform",
+            transformId: "base64-encode",
+            version: 1,
+            parameters: {},
+            variableNames: [],
+            inputContentHash: refined.contentHash,
+            capturedOutputText: "cmVmaW5lZCBwYXlsb2Fk",
+            outputContentHash: sha256Json("cmVmaW5lZCBwYXlsb2Fk"),
+            pipelineRevisionId: pipeline.id
+          }
+        ]
+      };
+      const capturedRecipeLeaf = await persistence.repository.createPayloadRevision({
+        projectId: project.id,
+        sessionId: session.id,
+        generationId: refinedGroup.id,
+        attemptId: null,
+        parentRevisionId: refined.id,
+        ordinal: 1,
+        operation: "transformed",
+        text: "cmVmaW5lZCBwYXlsb2Fk",
+        provenance: { kind: "transform", transformId: "base64-encode", version: 1, parameters: {}, pipelineRevisionId: pipeline.id }
+      });
+      const recipe = revision("payload-recipe", "Accepted payload recipe", recipeValue);
+      recipe.provenance = {
+        operatorAuthored: true,
+        sourceProjectId: project.id,
+        sourceSessionId: session.id,
+        sourceRevisionId: capturedRecipeLeaf.id,
+        sourcePathRevisionIds: [generated.id, refined.id, capturedRecipeLeaf.id]
+      };
+      await persistence.repository.saveAssetRevision(recipe);
       const transformed = await persistence.repository.createPayloadRevision({
         projectId: project.id,
         sessionId: session.id,
@@ -513,7 +577,20 @@ describe("artifact routes", () => {
         ordinal: 1,
         operation: "transformed",
         text: "cmVmaW5lZCBwYXlsb2Fk",
-        provenance: { transformId: "base64-encode", version: 1, pipelineRevisionId: pipeline.id }
+        provenance: {
+          kind: "recipe-replay",
+          recipeRevisionId: recipe.id,
+          recipeContentHash: recipe.contentHash,
+          replayId: uuidv7(),
+          stepIndex: 2,
+          stepCount: 3,
+          stepKind: "transform",
+          capturedContentHash: recipeValue.finalContentHash,
+          matchesCaptured: true,
+          transformId: "base64-encode",
+          version: 1,
+          pipelineRevisionId: pipeline.id
+        }
       });
       const accepted = await persistence.repository.appendNode({
         sessionId: session.id,
@@ -559,7 +636,7 @@ describe("artifact routes", () => {
       const importedResponse = await app.request("/api/artifacts/import", { method: "POST", headers, body: form });
       expect(importedResponse.status).toBe(201);
       const body = await importedResponse.json() as {
-        session: { id: string };
+        session: { id: string; projectId: string };
         importedEvidenceAssets: AssetRevision[];
         importedPayloadGenerations: Array<{ id: string; parentRevisionId: string | null; generatorProfileRevisionId: string; instructionRevisionId: string | null; techniqueRevisionIds: string[]; pipelineRevisionId: string | null }>;
         importedPayloadAttempts: Array<{ id: string; generationId: string; traceHash: string | null; nativeThreadId: string | null; nativeTurnId: string | null; normalizedOutput: JsonObject }>;
@@ -567,13 +644,14 @@ describe("artifact routes", () => {
       };
       expect(JSON.stringify(body)).not.toContain(credential);
       expect(JSON.stringify(body)).not.toContain(accountIdentifier);
-      expect(body.importedEvidenceAssets).toHaveLength(4);
+      expect(body.importedEvidenceAssets).toHaveLength(5);
       expect(body.importedEvidenceAssets.every((asset) => asset.trusted === false)).toBe(true);
       expect(new Set(body.importedEvidenceAssets.map((asset) => asset.kind))).toEqual(new Set([
         "payload-generator-profile",
         "payload-generator-instruction",
         "payload-technique",
-        "payload-pipeline"
+        "payload-pipeline",
+        "payload-recipe"
       ]));
       expect(body.importedPayloadGenerations).toHaveLength(2);
       expect(body.importedPayloadAttempts).toHaveLength(2);
@@ -604,6 +682,33 @@ describe("artifact routes", () => {
       }
       expect(assetsById.get(String(importedTransformed.provenance.pipelineRevisionId))).toBe("payload-pipeline");
       expect(importedTransformed.provenance.pipelineRevisionId).not.toBe(pipeline.id);
+      expect(assetsById.get(String(importedTransformed.provenance.recipeRevisionId))).toBe("payload-recipe");
+      expect(importedTransformed.provenance.recipeRevisionId).not.toBe(recipe.id);
+      const importedRecipe = body.importedEvidenceAssets.find((asset) => asset.kind === "payload-recipe")!;
+      expect(importedRecipe.trusted).toBe(false);
+      expect(importedRecipe.contentHash).toBe(sha256Json(importedRecipe.value));
+      expect(importedTransformed.provenance.recipeContentHash).toBe(importedRecipe.contentHash);
+      expect(importedTransformed.provenance.recipeContentHash).not.toBe(recipe.contentHash);
+      expect(importedRecipe.provenance).toMatchObject({
+        sourceProjectId: body.session.projectId,
+        sourceSessionId: body.session.id,
+        sourceRevisionId: importedTransformed.id,
+        sourcePathRevisionIds: [importedGenerated.id, importedRefined.id, importedTransformed.id],
+        importedSourceAssetRevisionId: recipe.id,
+        importedOriginalProjectId: project.id,
+        importedOriginalSessionId: session.id,
+        importedOriginalPayloadRevisionId: capturedRecipeLeaf.id,
+        importedOriginalPayloadPathRevisionIds: [generated.id, refined.id, capturedRecipeLeaf.id]
+      });
+      const importedRecipeValue = importedRecipe.value as PayloadRecipeValue;
+      const importedGenerator = importedRecipeValue.steps[0]?.kind === "checkpoint" ? importedRecipeValue.steps[0].generator : null;
+      const importedTransform = importedRecipeValue.steps[2]?.kind === "transform" ? importedRecipeValue.steps[2] : null;
+      expect(assetsById.get(importedGenerator?.profileRevisionId ?? "")).toBe("payload-generator-profile");
+      expect(assetsById.get(importedGenerator?.instructionRevisionId ?? "")).toBe("payload-generator-instruction");
+      expect(importedGenerator?.techniqueRevisionIds.map((id) => assetsById.get(id))).toEqual(["payload-technique"]);
+      expect(assetsById.get(importedTransform?.pipelineRevisionId ?? "")).toBe("payload-pipeline");
+      expect(JSON.stringify(importedRecipe.value)).not.toContain(recipe.id);
+      expect(JSON.stringify(importedRecipe.value)).not.toContain(pipeline.id);
       for (const revision of [importedGenerated, importedRefined]) {
         const attempt = body.importedPayloadAttempts.find((item) => item.id === revision.attemptId);
         expect(attempt?.generationId).toBe(revision.generationId);

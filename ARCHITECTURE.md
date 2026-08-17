@@ -87,6 +87,8 @@ Global defaults and each session's last-selected generator controls are mutable 
 
 Controlled variant preflight is deterministic and side-effect-free. Creation records an exact control revision when needed, then atomically adds attributed sibling `PayloadRevision` children; it never starts a model run or changes the conversation graph.
 
+Payload recipes capture a self-contained revision path as exact text checkpoints plus versioned deterministic transforms. Preview hash-checks the reconstruction; explicit replay creates a detached revision chain without regenerating checkpoints, touching the composer, or changing the conversation graph.
+
 ## Persistence
 
 `LATHE_DATABASE_URL` selects a Drizzle-backed repository at process startup. An absent/non-PostgreSQL value selects SQLite; `postgres:`/`postgresql:` selects PostgreSQL. Each dialect has its own checked-in migration track and runs the same repository contract tests.
@@ -97,7 +99,7 @@ Queued/running automation jobs and queued/streaming model runs, payload generati
 
 ## Immutable libraries and harnesses
 
-Prompts, tool specifications, tool implementations, harnesses, execution targets, MCP server profiles, and Payload Workbench profiles/instructions/techniques/pipelines share an immutable `AssetRevision` envelope. A revision records its logical asset ID, monotonically increasing revision, description, tags, provenance, content hash, trust flag, and archive timestamp.
+Prompts, tool specifications, tool implementations, harnesses, execution targets, MCP server profiles, and Payload Workbench profiles/instructions/techniques/pipelines/recipes share an immutable `AssetRevision` envelope. A revision records its logical asset ID, monotonically increasing revision, description, tags, provenance, content hash, trust flag, and archive timestamp.
 
 Starting from a harness creates a mutable resolved session draft. Operators may reorder/edit prompts or replace bindings without mutating library revisions; **Save as harness** creates new immutable prompt/harness revisions. Unused revisions and payload histories are reference-checked before archive or deletion. Built-in Claude Code-inspired and Codex-inspired configurations are explicitly Lathe-maintained approximations; operator-supplied exact configurations should carry their own source/license metadata.
 

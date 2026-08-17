@@ -1,6 +1,6 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
-import { sessionPayloadWorkbenchSettingsInputSchema as domainSessionPayloadWorkbenchSettingsInputSchema } from "@lathe/domain";
+import { sessionPayloadWorkbenchSettingsInputSchema as domainSessionPayloadWorkbenchSettingsInputSchema, sha256Json } from "@lathe/domain";
 import {
   countUnicodeCodePoints,
   normalizePayloadTransformParameters,
@@ -103,6 +103,120 @@ export const payloadPipelineValueSchema = z.object({
     }
   })).max(100)
 });
+
+const contentHashSchema = z.string().regex(/^[a-f0-9]{64}$/);
+export const payloadRecipeLimits = Object.freeze({
+  maxSteps: 100,
+  maxCheckpointCodePoints: 1_000_000,
+  maxCheckpointAggregateCodePoints: 5_000_000,
+  maxVariables: 1_000
+});
+
+const payloadRecipeGeneratorCheckpointSchema = z.object({
+  profileRevisionId: z.string().min(1),
+  instructionRevisionId: z.string().min(1).nullable(),
+  techniqueRevisionIds: z.array(z.string().min(1)).max(100),
+  pipelineRevisionId: z.string().min(1).nullable(),
+  contextHash: contentHashSchema
+}).strict();
+
+const payloadRecipeCheckpointStepSchema = z.object({
+  kind: z.literal("checkpoint"),
+  sourceOperation: z.enum(["generated", "refined", "edited"]),
+  text: z.string().superRefine((text, context) => {
+    if (countUnicodeCodePoints(text) > payloadRecipeLimits.maxCheckpointCodePoints) {
+      context.addIssue({ code: "custom", message: `Recipe checkpoint exceeds ${payloadRecipeLimits.maxCheckpointCodePoints} Unicode code points` });
+    }
+  }),
+  contentHash: contentHashSchema,
+  generator: payloadRecipeGeneratorCheckpointSchema.nullable()
+}).strict();
+
+const payloadRecipeTransformStepSchema = z.object({
+  kind: z.literal("transform"),
+  transformId: z.string().trim().min(1).max(200),
+  version: z.number().int().positive().max(1_000_000),
+  parameters: payloadTransformParameterRecordSchema,
+  variableNames: z.array(z.string().min(1).max(payloadTransformParameterLimits.maxNameCodePoints)).max(payloadRecipeLimits.maxVariables),
+  inputContentHash: contentHashSchema,
+  capturedOutputText: z.string().superRefine((text, context) => {
+    if (countUnicodeCodePoints(text) > payloadRecipeLimits.maxCheckpointCodePoints) {
+      context.addIssue({ code: "custom", message: `Captured transform output exceeds ${payloadRecipeLimits.maxCheckpointCodePoints} Unicode code points` });
+    }
+  }),
+  outputContentHash: contentHashSchema,
+  pipelineRevisionId: z.string().min(1).nullable()
+}).strict();
+
+export const payloadRecipeValueSchema = z.object({
+  version: z.literal(1),
+  finalContentHash: contentHashSchema,
+  variables: z.array(z.object({
+    name: z.string().min(1).max(payloadTransformParameterLimits.maxNameCodePoints),
+    defaultValue: z.string().max(payloadTransformParameterLimits.maxValueCodePoints).nullable()
+  }).strict()).max(payloadRecipeLimits.maxVariables),
+  steps: z.array(z.discriminatedUnion("kind", [payloadRecipeCheckpointStepSchema, payloadRecipeTransformStepSchema]))
+    .min(1)
+    .max(payloadRecipeLimits.maxSteps)
+}).strict().superRefine((recipe, context) => {
+  if (recipe.steps[0]?.kind !== "checkpoint") {
+    context.addIssue({ code: "custom", path: ["steps", 0], message: "A payload recipe must start with a captured checkpoint" });
+  }
+  const variableNames = new Set<string>();
+  for (const [index, variable] of recipe.variables.entries()) {
+    if (variableNames.has(variable.name)) context.addIssue({ code: "custom", path: ["variables", index, "name"], message: "Recipe variable names must be unique" });
+    variableNames.add(variable.name);
+  }
+  const capturedCodePoints = recipe.steps.reduce(
+    (total, step) => total + countUnicodeCodePoints(step.kind === "checkpoint" ? step.text : step.capturedOutputText),
+    0
+  );
+  if (capturedCodePoints > payloadRecipeLimits.maxCheckpointAggregateCodePoints) {
+    context.addIssue({ code: "custom", path: ["steps"], message: `Recipe captured outputs exceed ${payloadRecipeLimits.maxCheckpointAggregateCodePoints} aggregate Unicode code points` });
+  }
+  let priorContentHash: string | null = null;
+  for (const [index, step] of recipe.steps.entries()) {
+    const capturedText = step.kind === "checkpoint" ? step.text : step.capturedOutputText;
+    const capturedHash = step.kind === "checkpoint" ? step.contentHash : step.outputContentHash;
+    if (sha256Json(capturedText) !== capturedHash) {
+      context.addIssue({ code: "custom", path: ["steps", index], message: "Captured payload text does not match its content hash" });
+    }
+    if (step.kind === "checkpoint") {
+      if ((step.sourceOperation === "edited") !== (step.generator === null)) {
+        context.addIssue({ code: "custom", path: ["steps", index, "generator"], message: "Only generated and refined checkpoints carry generator metadata" });
+      }
+    } else {
+      if (priorContentHash !== null && step.inputContentHash !== priorContentHash) {
+        context.addIssue({ code: "custom", path: ["steps", index, "inputContentHash"], message: "Transform input hash does not match the prior captured step" });
+      }
+      const seenStepVariables = new Set<string>();
+      for (const name of step.variableNames) {
+        if (!variableNames.has(name)) context.addIssue({ code: "custom", path: ["steps", index, "variableNames"], message: `Transform references undeclared recipe variable ${name}` });
+        if (seenStepVariables.has(name)) context.addIssue({ code: "custom", path: ["steps", index, "variableNames"], message: `Transform variable ${name} is duplicated` });
+        seenStepVariables.add(name);
+      }
+    }
+    priorContentHash = capturedHash;
+  }
+  if (priorContentHash !== recipe.finalContentHash) {
+    context.addIssue({ code: "custom", path: ["finalContentHash"], message: "Recipe final hash does not match its last captured step" });
+  }
+});
+
+export const createPayloadRecipeInputSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  description: z.string().max(4_000).default(""),
+  tags: z.array(z.string().trim().min(1).max(120)).max(100).default([])
+}).strict();
+
+export const payloadRecipePreviewInputSchema = z.object({
+  sessionId: z.string().min(1),
+  variables: payloadTransformParameterRecordSchema.default({})
+}).strict();
+
+export const payloadRecipeReplayInputSchema = payloadRecipePreviewInputSchema.extend({
+  preflightHash: contentHashSchema
+}).strict();
 
 function variantMatrixParameterIssues(
   value: { transformId: z.infer<typeof payloadTransformIdSchema>; parameterSets: Array<Record<string, string>> }

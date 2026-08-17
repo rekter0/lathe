@@ -30,7 +30,7 @@ recomputed or requested against the current session state.
 
 ## Search the Arsenal
 
-**Arsenal** is a unified, local catalog of built-in transforms and immutable generator profile, instruction, technique, and pipeline revisions. Search metadata such as names, IDs, descriptions, tags, backend/model details, and transform warnings, then narrow results by kind, transform metadata, revision state, and trust. The inspector shows the exact revision ID, content hash, trust state, and whether an asset is current, historical, or archived; archived and untrusted revisions remain visible for evidence review but cannot be selected for new executable work.
+**Arsenal** is a unified, local catalog of built-in transforms and immutable generator profile, instruction, technique, pipeline, and recipe revisions. Search metadata such as names, IDs, descriptions, tags, backend/model details, and transform warnings, then narrow results by kind, transform metadata, revision state, and trust. The inspector shows the exact revision ID, content hash, trust state, and whether an asset is current, historical, or archived; archived and untrusted revisions remain visible for evidence review but cannot be selected for new executable work.
 
 Selection is an explicit handoff: transforms and pipelines open in **Transform**, while generator profiles, instructions, and techniques open in **Generate**. Inspecting or selecting an entry never runs a transform, starts helper generation, sends a target request, or changes the conversation graph. Arsenal is not a remote marketplace and performs no network discovery; it indexes only Lathe's built-ins and locally stored revisions.
 
@@ -155,7 +155,15 @@ Helper-model attempts use payload-generation records, not target `ModelRun` reco
 
 Once a payload revision is used for a real target run, its user node records that source revision. Later operator labels and notes appear chronologically as observed outcomes for the lineage; Lathe does not assign an automated effectiveness score or rank candidates.
 
-Finding exports include only payload lineage referenced by the selected finding: generator context manifest, profile/instruction/technique/pipeline revisions, helper traces, and runtime metadata. Stored credentials, account identifiers, and Codex authentication state remain excluded.
+Finding exports include only payload lineage referenced by the selected finding: generator context manifest, profile/instruction/technique/pipeline/recipe revisions, helper traces, and runtime metadata. Stored credentials, account identifiers, and Codex authentication state remain excluded.
+
+## Save and replay recipes
+
+From **History**, save a selected payload lineage as an immutable recipe revision. A recipe is self-contained: it records exact text checkpoints, deterministic transform versions and normalized parameters, variable requirements, captured output hashes, and any exact generator asset references needed to inspect the original provenance. It reproduces the stored payload path; it never reruns the original helper model.
+
+Inspect recipes under **Arsenal → Recipes**. Preview resolves the supplied variable overrides, checks every transform version, compares reconstructed output with the captured hashes, and produces a preflight hash for that exact replay. Missing variables, unavailable versions, or hash mismatches remain visible instead of being silently substituted. Imported recipes remain untrusted until **Trust as new revision** is explicitly confirmed; archived recipes remain inspectable but cannot be replayed.
+
+**Replay into Transform** is an explicit action. It creates a detached chain of immutable payload revisions and opens the last successful revision in Transform. If a step fails, the successful prefix remains available with the indexed failure. Preview and replay never call a provider, create a target run, add conversation nodes, move a branch, or copy text into the composer; composer use still requires the separate **Use as next prompt** action.
 
 ## Operator checklist
 

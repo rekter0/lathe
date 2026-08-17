@@ -25,6 +25,7 @@ import {
   type ModelRun,
   type PayloadGeneration,
   type PayloadGenerationAttempt,
+  type PayloadRecipeValue,
   type PayloadRevision,
   type ResolvedConfig
 } from "@lathe/domain";
@@ -35,6 +36,8 @@ import {
   collectExportSecrets,
   sanitizeAssetRevision
 } from "./security.js";
+import { payloadRecipeValueSchema } from "./payload-schemas.js";
+import { payloadRecipeAssetDependencies } from "./payload-recipes.js";
 
 const bytesResponse = (bytes: Uint8Array, fileName: string) => new Response(
   bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
@@ -51,7 +54,7 @@ const assetRevisionSchema = z.object({
   assetId: z.string().min(1),
   kind: z.enum([
     "prompt", "tool-spec", "tool-implementation", "harness", "target", "mcp-server",
-    "payload-generator-profile", "payload-generator-instruction", "payload-technique", "payload-pipeline"
+    "payload-generator-profile", "payload-generator-instruction", "payload-technique", "payload-pipeline", "payload-recipe"
   ]),
   revision: z.number().int().positive(),
   name: z.string().min(1).max(500),
@@ -273,14 +276,62 @@ function revisionPipelineId(revision: PayloadRevision): string | null {
   return typeof pipelineRevisionId === "string" && pipelineRevisionId.length > 0 ? pipelineRevisionId : null;
 }
 
+function revisionRecipeId(revision: PayloadRevision): string | null {
+  const recipeRevisionId = revision.provenance.recipeRevisionId;
+  return typeof recipeRevisionId === "string" && recipeRevisionId.length > 0 ? recipeRevisionId : null;
+}
+
+function rewritePayloadRecipeValue(
+  value: JsonValue,
+  revisions: ReadonlyMap<string, string>
+): PayloadRecipeValue {
+  const recipe = payloadRecipeValueSchema.parse(value) as PayloadRecipeValue;
+  return {
+    ...structuredClone(recipe),
+    steps: recipe.steps.map((step) => {
+      if (step.kind === "transform") {
+        return {
+          ...step,
+          pipelineRevisionId: step.pipelineRevisionId === null
+            ? null
+            : rewrittenRevisionId(revisions, step.pipelineRevisionId, "payload pipeline")
+        };
+      }
+      if (!step.generator) return step;
+      return {
+        ...step,
+        generator: {
+          ...step.generator,
+          profileRevisionId: rewrittenRevisionId(revisions, step.generator.profileRevisionId, "payload generator profile"),
+          instructionRevisionId: step.generator.instructionRevisionId === null
+            ? null
+            : rewrittenRevisionId(revisions, step.generator.instructionRevisionId, "payload generator instruction"),
+          techniqueRevisionIds: step.generator.techniqueRevisionIds.map((id) => rewrittenRevisionId(revisions, id, "payload technique")),
+          pipelineRevisionId: step.generator.pipelineRevisionId === null
+            ? null
+            : rewrittenRevisionId(revisions, step.generator.pipelineRevisionId, "payload pipeline")
+        }
+      };
+    })
+  };
+}
+
 function rewritePayloadRevisionProvenance(
   provenance: JsonObject,
-  revisions: ReadonlyMap<string, string>
+  revisions: ReadonlyMap<string, string>,
+  contentHashes: ReadonlyMap<string, string>
 ): JsonObject {
   const rewritten = structuredClone(provenance);
   const pipelineRevisionId = rewritten.pipelineRevisionId;
   if (typeof pipelineRevisionId === "string") {
     rewritten.pipelineRevisionId = rewrittenRevisionId(revisions, pipelineRevisionId, "payload pipeline");
+  }
+  const recipeRevisionId = rewritten.recipeRevisionId;
+  if (typeof recipeRevisionId === "string") {
+    rewritten.recipeRevisionId = rewrittenRevisionId(revisions, recipeRevisionId, "payload recipe");
+    const rewrittenHash = contentHashes.get(recipeRevisionId);
+    if (!rewrittenHash) throw new HTTPException(422, { message: `Finding bundle is missing rewritten payload recipe ${recipeRevisionId}` });
+    rewritten.recipeContentHash = rewrittenHash;
   }
   return rewritten;
 }
@@ -343,9 +394,33 @@ async function findingPayloadLineage(
     if (generation.pipelineRevisionId) assetRevisionIds.add(generation.pipelineRevisionId);
     for (const id of generation.techniqueRevisionIds) assetRevisionIds.add(id);
   }
+  const recipeRevisionIds = new Set<string>();
   for (const revision of selectedRevisions.values()) {
     const pipelineRevisionId = revisionPipelineId(revision);
     if (pipelineRevisionId) assetRevisionIds.add(pipelineRevisionId);
+    const recipeRevisionId = revisionRecipeId(revision);
+    if (recipeRevisionId) {
+      recipeRevisionIds.add(recipeRevisionId);
+      assetRevisionIds.add(recipeRevisionId);
+    }
+  }
+
+  const allAssets = await repository.listAssetRevisions(undefined, true);
+  for (const recipeRevisionId of recipeRevisionIds) {
+    const recipeAsset = allAssets.find((asset) => asset.id === recipeRevisionId && asset.kind === "payload-recipe");
+    if (!recipeAsset) throw new HTTPException(409, { message: `Payload revision references missing payload-recipe revision ${recipeRevisionId}` });
+    const parsed = payloadRecipeValueSchema.safeParse(recipeAsset.value);
+    if (!parsed.success || sha256Json(recipeAsset.value) !== recipeAsset.contentHash) {
+      throw new HTTPException(409, { message: `Payload recipe revision ${recipeRevisionId} is malformed` });
+    }
+    const recipe = parsed.data as PayloadRecipeValue;
+    for (const { id: dependencyId, kind: expectedKind } of payloadRecipeAssetDependencies(recipe)) {
+      const dependency = allAssets.find((asset) => asset.id === dependencyId);
+      if (!dependency || dependency.kind !== expectedKind) {
+        throw new HTTPException(409, { message: `Payload recipe ${recipeRevisionId} is missing ${expectedKind} revision ${dependencyId}` });
+      }
+      assetRevisionIds.add(dependencyId);
+    }
   }
   return {
     revisions: [...selectedRevisions.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
@@ -677,7 +752,7 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
       const source = parseArtifactJson(entry.data, assetRevisionSchema, `Evidence asset ${entry.path}`) as AssetRevision;
       const expectedKind = expectedAssetKind(entry.path, entry.role);
       if (expectedKind === "reference" && ![
-        "target", "mcp-server", "payload-generator-profile", "payload-generator-instruction", "payload-technique", "payload-pipeline"
+        "target", "mcp-server", "payload-generator-profile", "payload-generator-instruction", "payload-technique", "payload-pipeline", "payload-recipe"
       ].includes(source.kind)) throw new HTTPException(422, { message: `Evidence asset ${entry.path} has an invalid kind` });
       if (expectedKind !== "reference" && expectedKind !== source.kind) throw new HTTPException(422, { message: `Evidence asset ${entry.path} has an invalid kind` });
       validateImportedAssetCredentials(source, `Evidence asset ${entry.path}`);
@@ -705,6 +780,31 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
       const asset = evidenceAssetSources.find((item) => item.id === pipelineRevisionId);
       if (!asset || asset.kind !== "payload-pipeline") {
         throw new HTTPException(422, { message: `Payload revision ${revision.id} is missing payload-pipeline revision ${pipelineRevisionId}` });
+      }
+    }
+    for (const revision of sourcePayloadRevisions) {
+      const recipeRevisionId = revisionRecipeId(revision);
+      if (!recipeRevisionId) continue;
+      const asset = evidenceAssetSources.find((item) => item.id === recipeRevisionId);
+      if (!asset || asset.kind !== "payload-recipe") {
+        throw new HTTPException(422, { message: `Payload revision ${revision.id} is missing payload-recipe revision ${recipeRevisionId}` });
+      }
+      if (revision.provenance.recipeContentHash !== asset.contentHash) {
+        throw new HTTPException(422, { message: `Payload revision ${revision.id} has a stale payload recipe content hash` });
+      }
+    }
+    for (const asset of evidenceAssetSources) {
+      if (asset.kind !== "payload-recipe") continue;
+      if (sha256Json(asset.value) !== asset.contentHash) {
+        throw new HTTPException(422, { message: `Payload recipe ${asset.id} has an invalid content hash` });
+      }
+      const parsed = payloadRecipeValueSchema.safeParse(asset.value);
+      if (!parsed.success) throw new HTTPException(422, { message: `Payload recipe ${asset.id} is malformed` });
+      for (const { id: dependencyId, kind: expectedKind } of payloadRecipeAssetDependencies(parsed.data)) {
+        const dependency = evidenceAssetSources.find((item) => item.id === dependencyId);
+        if (!dependency || dependency.kind !== expectedKind) {
+          throw new HTTPException(422, { message: `Payload recipe ${asset.id} is missing ${expectedKind} revision ${dependencyId}` });
+        }
       }
     }
     const assetRevisionIds = new Map(evidenceAssetSources.map((source) => [source.id, uuidv7()]));
@@ -760,12 +860,24 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
       attachmentIds.set(sourceId, attachment.id);
     }
     const importedEvidenceAssets: AssetRevision[] = [];
+    const rewrittenAssetValues = new Map(evidenceAssetSources.map((source) => [
+      source.id,
+      source.kind === "payload-recipe" ? rewritePayloadRecipeValue(source.value, assetRevisionIds) : source.value
+    ]));
+    const rewrittenAssetContentHashes = new Map([...rewrittenAssetValues].map(([id, value]) => [id, sha256Json(value)]));
+    const deferredRecipeAssets: Array<{ source: AssetRevision; imported: AssetRevision }> = [];
     for (const source of evidenceAssetSources) {
+      const value = rewrittenAssetValues.get(source.id)!;
       const importedAsset: AssetRevision = {
         ...source, id: assetRevisionIds.get(source.id)!, assetId: uuidv7(), revision: 1,
         provenance: { ...source.provenance, importedArtifactId: imported.manifest.artifactId, importedBlob: stored.sha256, sourceRevisionId: source.id },
-        contentHash: sha256Json(source.value), trusted: false, archivedAt: null, createdAt: nowIso()
+        value,
+        contentHash: rewrittenAssetContentHashes.get(source.id)!, trusted: false, archivedAt: null, createdAt: nowIso()
       };
+      if (source.kind === "payload-recipe") {
+        deferredRecipeAssets.push({ source, imported: importedAsset });
+        continue;
+      }
       await repository.saveAssetRevision(importedAsset);
       importedEvidenceAssets.push(importedAsset);
     }
@@ -901,7 +1013,7 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
           operation: source.operation,
           text: source.text,
           provenance: {
-            ...rewritePayloadRevisionProvenance(source.provenance, assetRevisionIds),
+            ...rewritePayloadRevisionProvenance(source.provenance, assetRevisionIds, rewrittenAssetContentHashes),
             importedArtifactId: imported.manifest.artifactId,
             sourceRevisionId: source.id
           }
@@ -914,6 +1026,75 @@ export function registerArtifactRoutes(app: Hono, repository: LatheRepository, c
     };
 
     for (const source of sourcePayloadRevisions) await ensureRevision(source.id);
+    const acceptedPayloadRevisionIds = new Set(sourceNodes.flatMap((node) => node.sourcePayloadRevisionId ? [node.sourcePayloadRevisionId] : []));
+    for (const { source, imported: importedRecipe } of deferredRecipeAssets) {
+      const originalProvenance = structuredClone(source.provenance);
+      const originalSourceRevisionId = typeof originalProvenance.sourceRevisionId === "string" ? originalProvenance.sourceRevisionId : null;
+      const originalSourcePathRevisionIds = Array.isArray(originalProvenance.sourcePathRevisionIds)
+        ? originalProvenance.sourcePathRevisionIds.filter((id): id is string => typeof id === "string")
+        : [];
+      const originalPathIsAuthoritative = originalSourceRevisionId !== null
+        && originalSourcePathRevisionIds.length > 0
+        && originalSourcePathRevisionIds.at(-1) === originalSourceRevisionId
+        && originalSourcePathRevisionIds.every((id, index) => {
+          const revision = sourceRevisionById.get(id);
+          if (!revision) return false;
+          return revision.parentRevisionId === (index === 0 ? null : originalSourcePathRevisionIds[index - 1]);
+        });
+      let mappedPath = originalPathIsAuthoritative
+        ? originalSourcePathRevisionIds.map((id) => revisionIdsBySource.get(id)!)
+        : [];
+      let mappedLeaf = originalPathIsAuthoritative
+        ? revisionIdsBySource.get(originalSourceRevisionId) ?? null
+        : null;
+      if (!mappedLeaf) {
+        const candidates = sourcePayloadRevisions.filter((revision) => revisionRecipeId(revision) === source.id);
+        const leaf = candidates.find((revision) => acceptedPayloadRevisionIds.has(revision.id))
+          ?? candidates.toSorted((left, right) => {
+            const leftStep = typeof left.provenance.stepIndex === "number" ? left.provenance.stepIndex : -1;
+            const rightStep = typeof right.provenance.stepIndex === "number" ? right.provenance.stepIndex : -1;
+            return rightStep - leftStep || right.createdAt.localeCompare(left.createdAt);
+          })[0]
+          ?? null;
+        if (leaf) {
+          const materializedPath: PayloadRevision[] = [];
+          let cursor: PayloadRevision | undefined = leaf;
+          const seen = new Set<string>();
+          while (cursor && !seen.has(cursor.id)) {
+            seen.add(cursor.id);
+            materializedPath.push(cursor);
+            cursor = cursor.parentRevisionId ? sourceRevisionById.get(cursor.parentRevisionId) : undefined;
+          }
+          materializedPath.reverse();
+          mappedPath = materializedPath.flatMap((revision) => revisionIdsBySource.get(revision.id) ?? []);
+          mappedLeaf = revisionIdsBySource.get(leaf.id) ?? null;
+        }
+      }
+      const importedProvenance = structuredClone(originalProvenance);
+      delete importedProvenance.sourceProjectId;
+      delete importedProvenance.sourceSessionId;
+      delete importedProvenance.sourceRevisionId;
+      delete importedProvenance.sourcePathRevisionIds;
+      const provenance: JsonObject = {
+        ...importedProvenance,
+        importedArtifactId: imported.manifest.artifactId,
+        importedBlob: stored.sha256,
+        importedSourceAssetRevisionId: source.id,
+        ...(mappedLeaf ? {
+          sourceProjectId: project.id,
+          sourceSessionId: session.id,
+          sourceRevisionId: mappedLeaf,
+          sourcePathRevisionIds: mappedPath
+        } : {}),
+        ...(typeof originalProvenance.sourceProjectId === "string" ? { importedOriginalProjectId: originalProvenance.sourceProjectId } : {}),
+        ...(typeof originalProvenance.sourceSessionId === "string" ? { importedOriginalSessionId: originalProvenance.sourceSessionId } : {}),
+        ...(originalSourceRevisionId ? { importedOriginalPayloadRevisionId: originalSourceRevisionId } : {}),
+        ...(originalSourcePathRevisionIds.length > 0 ? { importedOriginalPayloadPathRevisionIds: originalSourcePathRevisionIds } : {})
+      };
+      const finalizedRecipe = { ...importedRecipe, provenance };
+      await repository.saveAssetRevision(finalizedRecipe);
+      importedEvidenceAssets.push(finalizedRecipe);
+    }
     let headNodeId: string | null = null;
     for (const source of sourceNodes) {
       const parts = source.parts.map((part) => {

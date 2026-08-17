@@ -10,7 +10,8 @@ export type PayloadAssetKind =
   | "payload-generator-profile"
   | "payload-generator-instruction"
   | "payload-technique"
-  | "payload-pipeline";
+  | "payload-pipeline"
+  | "payload-recipe";
 
 export type PayloadDiversity = "low" | "balanced" | "high";
 
@@ -139,6 +140,82 @@ export interface PayloadRevision {
   provenance?: JsonObject;
   createdAt?: string;
   deletedAt?: string | null;
+}
+
+export interface PayloadRecipeCheckpointStep {
+  kind: "checkpoint";
+  sourceOperation: "generated" | "refined" | "edited";
+  text: string;
+  contentHash: string;
+  generator: null | {
+    profileRevisionId: string;
+    instructionRevisionId: string | null;
+    techniqueRevisionIds: string[];
+    pipelineRevisionId: string | null;
+    contextHash: string;
+  };
+}
+
+export interface PayloadRecipeTransformStep {
+  kind: "transform";
+  transformId: string;
+  version: number;
+  parameters: Record<string, string>;
+  variableNames: string[];
+  inputContentHash: string;
+  outputContentHash: string;
+  capturedOutputText: string;
+  pipelineRevisionId: string | null;
+}
+
+export interface PayloadRecipeValue {
+  version: 1;
+  finalContentHash: string;
+  variables: Array<{ name: string; defaultValue: string | null }>;
+  steps: Array<PayloadRecipeCheckpointStep | PayloadRecipeTransformStep>;
+}
+
+export interface PayloadRecipePreviewStep {
+  index: number;
+  kind: "checkpoint" | "transform";
+  label: string;
+  status: string;
+  inputContentHash: string | null;
+  outputContentHash: string | null;
+  capturedOutputContentHash: string | null;
+  matchesCaptured: boolean | null;
+  text: string;
+  textTruncated: boolean;
+  codePoints: number | null;
+  error: string | null;
+}
+
+export interface PayloadRecipePreview {
+  recipeRevisionId: string;
+  recipeContentHash: string;
+  sessionId: string;
+  compatible: boolean;
+  completed: boolean;
+  preflightHash: string | null;
+  variables: {
+    required: string[];
+    missing: string[];
+    resolved: Record<string, string>;
+  };
+  steps: PayloadRecipePreviewStep[];
+  finalText: string;
+  finalContentHash: string;
+  capturedFinalContentHash: string;
+  matchesCaptured: boolean;
+  violations: Array<{ code: string; severity: "error" | "warning"; stepIndex: number | null; message: string }>;
+}
+
+export interface PayloadRecipeReplayResult {
+  recipe: PayloadAssetRevision;
+  revision: PayloadRevision | null;
+  revisions: PayloadRevision[];
+  completed: boolean;
+  error: { code: string; stepIndex: number; message: string } | null;
 }
 
 export interface PayloadGenerationDetail {
