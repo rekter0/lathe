@@ -52,6 +52,9 @@ blob-report/
 # Local writing drafts
 /writings/
 
+# Local implementation plans
+/plans/
+
 # Logs and temporary files
 *.log
 npm-debug.log*
