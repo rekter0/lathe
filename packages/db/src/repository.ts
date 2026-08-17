@@ -99,6 +99,17 @@ export interface CreateCheckpointInput extends Pick<Checkpoint, "sessionId" | "n
 export interface CreateRunInput extends Pick<ModelRun, "sessionId" | "branchId" | "contextNodeId" | "configSnapshotId"> { id?: string }
 export interface RestoreCheckpointInput { checkpointId: string; sessionId: string; branchId: string }
 export interface RestoreCheckpointResult { checkpoint: Checkpoint; branch: BranchRef; session: Session }
+export interface CreatePayloadRevisionFanOutInput {
+  sessionId: string;
+  baseRevisionId: string | null;
+  sourceText: string;
+  sourceProvenance: JsonObject;
+  variants: Array<{ text: string; provenance: JsonObject }>;
+}
+export interface CreatePayloadRevisionFanOutResult {
+  source: PayloadRevision;
+  revisions: PayloadRevision[];
+}
 
 export interface ResourceReference {
   kind: "project" | "session" | "checkpoint" | "snapshot" | "asset" | "automation" | "payload-settings" | "payload-generation" | "payload-revision" | "message";
@@ -183,6 +194,7 @@ export interface LatheRepository {
   listPayloadGenerationAttempts(generationId: string): Promise<PayloadGenerationAttempt[]>;
   updatePayloadGenerationAttempt(id: string, patch: Partial<Pick<PayloadGenerationAttempt, "status" | "classification" | "normalizedOutput" | "usage" | "traceHash" | "nativeThreadId" | "nativeTurnId" | "startedAt" | "finishedAt">>): Promise<PayloadGenerationAttempt | null>;
   createPayloadRevision(input: CreatePayloadRevisionInput): Promise<PayloadRevision>;
+  createPayloadRevisionFanOut(input: CreatePayloadRevisionFanOutInput): Promise<CreatePayloadRevisionFanOutResult>;
   getPayloadRevision(id: string, includeDeleted?: boolean): Promise<PayloadRevision | null>;
   listPayloadRevisions(sessionId: string, includeDeleted?: boolean): Promise<PayloadRevision[]>;
   listPayloadRevisionsForGeneration(generationId: string, includeDeleted?: boolean): Promise<PayloadRevision[]>;
@@ -1326,6 +1338,79 @@ export class DrizzleLatheRepository implements LatheRepository {
       deletedAt: null
     };
     return this.returning(this.db.insert(this.schema.payloadRevisions).values(revision).returning());
+  }
+
+  async createPayloadRevisionFanOut(input: CreatePayloadRevisionFanOutInput): Promise<CreatePayloadRevisionFanOutResult> {
+    if (input.variants.length < 1 || input.variants.length > 32) {
+      throw new Error("Payload revision fan-out requires between 1 and 32 variants");
+    }
+    const session = await this.getSession(input.sessionId);
+    if (!session) throw new Error("Payload revision fan-out session not found");
+    const base = input.baseRevisionId === null ? null : await this.getPayloadRevision(input.baseRevisionId);
+    if (input.baseRevisionId !== null && !base) throw new Error("Source payload revision not found");
+    if (base && (base.sessionId !== session.id || base.projectId !== session.projectId)) {
+      throw new Error("Source payload revision does not belong to session");
+    }
+
+    const timestamp = nowIso();
+    let source = base;
+    let sourceToInsert: PayloadRevision | null = null;
+    if (!base || base.text !== input.sourceText) {
+      const parsed = createPayloadRevisionSchema.parse({
+        projectId: session.projectId,
+        sessionId: session.id,
+        generationId: base?.generationId ?? null,
+        attemptId: null,
+        parentRevisionId: base?.id ?? null,
+        ordinal: base?.ordinal ?? 1,
+        operation: "edited",
+        text: input.sourceText,
+        provenance: input.sourceProvenance
+      });
+      sourceToInsert = {
+        ...parsed,
+        id: uuidv7(),
+        contentHash: sha256Json(parsed.text),
+        createdAt: timestamp,
+        deletedAt: null
+      };
+      source = sourceToInsert;
+    }
+    if (!source) throw new Error("Payload revision fan-out source was not resolved");
+
+    const revisions = input.variants.map((variant) => {
+      const parsed = createPayloadRevisionSchema.parse({
+        projectId: source.projectId,
+        sessionId: source.sessionId,
+        generationId: source.generationId,
+        attemptId: null,
+        parentRevisionId: source.id,
+        ordinal: source.ordinal,
+        operation: "transformed",
+        text: variant.text,
+        provenance: variant.provenance
+      });
+      return {
+        ...parsed,
+        id: uuidv7(),
+        contentHash: sha256Json(parsed.text),
+        createdAt: timestamp,
+        deletedAt: null
+      } satisfies PayloadRevision;
+    });
+
+    if (this.dialect === "sqlite") {
+      this.db.transaction((tx: any) => {
+        if (sourceToInsert) tx.insert(this.schema.payloadRevisions).values(sourceToInsert).run();
+        tx.insert(this.schema.payloadRevisions).values(revisions).run();
+      });
+    } else {
+      await this.db.transaction(async (tx: any) => {
+        if (sourceToInsert) await tx.insert(this.schema.payloadRevisions).values(sourceToInsert);
+        await tx.insert(this.schema.payloadRevisions).values(revisions);
+      });
+    }
+    return { source, revisions };
   }
 
   async getPayloadRevision(id: string, includeDeleted = false): Promise<PayloadRevision | null> {

@@ -13,6 +13,7 @@ import {
   normalizePayloadContextPreview,
   normalizePayloadWorkbenchSessionSettings,
   normalizePayloadWorkbenchSettings,
+  payloadVariantMatrixDraftIssue,
   payloadContextRequestOptions,
   reducePayloadGenerationEvent,
   type PayloadAssetKind,
@@ -26,6 +27,7 @@ import {
   type PayloadOutcome,
   type PayloadWorkbenchSettings,
   type PayloadWorkbenchSessionSettings,
+  type PayloadVariantMatrixDraft,
   type StreamingPayloadCandidate
 } from "../payload-workbench-api.js";
 import { Button, Field, Input, Select, Textarea } from "./forms.js";
@@ -33,6 +35,7 @@ import { useOperatorDialog } from "./operator-dialog.js";
 import { PayloadInspectionPanel, type PayloadTransformApplicationInspection } from "./payload-inspection.js";
 import { PayloadTransformParameterFields } from "./payload-transform-parameters.js";
 import { PayloadArsenal } from "./payload-arsenal.js";
+import { defaultPayloadVariantMatrixDraft, normalizePayloadVariantMatrixDraft, PayloadVariantMatrix } from "./payload-variant-matrix.js";
 
 export { applyPayloadTransform, type PayloadTransformId } from "@lathe/payloads";
 
@@ -43,7 +46,7 @@ export const payloadTransformGroups: Array<{ label: string; icon: "code" | "case
   { label: "Variables", icon: "code", transforms: payloadTransforms.filter((transform) => transform.group === "variables") }
 ];
 
-type WorkbenchTab = "transform" | "generate" | "arsenal" | "history";
+type WorkbenchTab = "transform" | "generate" | "variants" | "arsenal" | "history";
 
 export interface PayloadWorkbenchContext {
   projectId: string;
@@ -316,6 +319,8 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
   const [instructionRevisionId, setInstructionRevisionId] = useState("");
   const [techniqueRevisionIds, setTechniqueRevisionIds] = useState<string[]>([]);
   const [pipelineRevisionId, setPipelineRevisionId] = useState("");
+  const [variantMatrixDraft, setVariantMatrixDraft] = useState<PayloadVariantMatrixDraft>(() => normalizePayloadVariantMatrixDraft(defaultPayloadVariantMatrixDraft));
+  const [variantMatrixConfigIssue, setVariantMatrixConfigIssue] = useState<string | null>(null);
   const [variables, setVariables] = useState<VariableOverride[]>([]);
   const [contextPreview, setContextPreview] = useState<PayloadContextPreview | null>(null);
   const previewRequestKey = useRef("");
@@ -399,6 +404,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
     operatorInstruction,
     candidateCount: settingsDraft.candidateCount,
     diversity: settingsDraft.diversity,
+    variantMatrix: variantMatrixDraft,
     contextMode: settingsDraft.contextMode,
     includeProjectBrief: settingsDraft.includeProjectBrief,
     includeSessionBrief: settingsDraft.includeSessionBrief,
@@ -427,7 +433,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
     }
   });
   const persistSessionSettings = (force = false): Promise<void> => {
-    if (!context || !sessionSettingsReady) return Promise.resolve();
+    if (!context || !sessionSettingsReady || variantMatrixConfigIssue) return Promise.resolve();
     if (autosaveTimer.current) {
       clearTimeout(autosaveTimer.current);
       autosaveTimer.current = null;
@@ -444,7 +450,8 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
     if (context && (!sessionSettingsQuery.data || sessionSettingsQuery.isFetching)) return;
     const globalSettings = normalizePayloadWorkbenchSettings(settingsQuery.data.settings);
     const fromServer = normalizePayloadWorkbenchSessionSettings(sessionSettingsQuery.data?.settings, globalSettings);
-    const saved = context ? pendingSessionSettings.current.get(context.sessionId)?.settings ?? fromServer : fromServer;
+    const pending = context ? pendingSessionSettings.current.get(context.sessionId)?.settings : undefined;
+    const saved = pending ?? fromServer;
     setSettingsDraft({
       ...globalSettings,
       defaultGeneratorProfileRevisionId: saved.generatorProfileRevisionId,
@@ -462,13 +469,15 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
     setInstructionRevisionId(saved.instructionRevisionId ?? "");
     setTechniqueRevisionIds(saved.techniqueRevisionIds);
     setPipelineRevisionId(saved.pipelineRevisionId ?? "");
+    setVariantMatrixDraft(normalizePayloadVariantMatrixDraft(saved.variantMatrix));
+    setVariantMatrixConfigIssue(pending ? null : payloadVariantMatrixDraftIssue(sessionSettingsQuery.data?.settings));
     setVariables(variableRows(saved.variables));
     if (context) lastScheduledSessionSettings.current.set(context.sessionId, JSON.stringify(saved));
     setHydratedSettingsKey(currentSettingsKey);
   }, [context?.sessionId, currentSettingsKey, hydratedSettingsKey, open, sessionSettingsQuery.data, sessionSettingsQuery.isFetching, settingsQuery.data, settingsQuery.isFetching]);
 
   useEffect(() => {
-    if (!open || !context || !sessionSettingsReady) return;
+    if (!open || !context || !sessionSettingsReady || variantMatrixConfigIssue) return;
     if (lastScheduledSessionSettings.current.get(context.sessionId) === serializedSessionSettings) return;
     pendingSessionSettings.current.set(context.sessionId, { settings: sessionSettingsDraft, serialized: serializedSessionSettings });
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
@@ -482,7 +491,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
         autosaveTimer.current = null;
       }
     };
-  }, [context?.sessionId, open, serializedSessionSettings, sessionSettingsReady]);
+  }, [context?.sessionId, open, serializedSessionSettings, sessionSettingsReady, variantMatrixConfigIssue]);
 
   useEffect(() => {
     if (!open || generationId || !historyQuery.data) return;
@@ -668,6 +677,8 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
       setInstructionRevisionId("");
       setTechniqueRevisionIds([]);
       setPipelineRevisionId("");
+      setVariantMatrixDraft(normalizePayloadVariantMatrixDraft(defaultPayloadVariantMatrixDraft));
+      setVariantMatrixConfigIssue(null);
       setVariables([]);
       setContextPreview(null);
       setSnapshotBranchId(context?.branchId ?? null);
@@ -783,6 +794,22 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
     setTransformApplication(null);
     setTab("transform");
   };
+  const restoreVariantDraft = (revision: PayloadRevision) => {
+    setDraft(revision.text);
+    setDraftSource({ id: revision.id, text: revision.text });
+    setOriginal(revision.text);
+    setUndoStack([]);
+    setTransformError(null);
+    setTransformApplication(null);
+  };
+  const sendVariantToTransform = (revision: PayloadRevision) => {
+    restoreVariantDraft(revision);
+    setTab("transform");
+  };
+  const useVariant = (revision: PayloadRevision) => {
+    onUse({ text: revision.text, sourcePayloadRevisionId: revision.id });
+    changeOpen(false);
+  };
   const useCandidate = (candidate: StreamingPayloadCandidate, revision?: PayloadRevision) => {
     onUse({ text: candidate.text, sourcePayloadRevisionId: revision?.id ?? null });
     changeOpen(false);
@@ -843,6 +870,10 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
   const historyPages = historyQuery.data?.pages ?? [];
   const historyGenerations = uniqueById(historyPages.flatMap((page) => page.generations).map((detail) => ({ ...detail, id: detail.generation.id }))).map(({ id: _, ...detail }) => detail);
   const historyStandaloneRevisions = uniqueById(historyPages.flatMap((page) => page.standaloneRevisions ?? []));
+  const historyPayloadRevisions = uniqueById([
+    ...historyStandaloneRevisions,
+    ...historyGenerations.flatMap((detail) => detail.revisions)
+  ]);
   const historyStandaloneOutcomes = uniqueOutcomes(historyPages.flatMap((page) => page.standaloneOutcomes ?? []));
 
   return <Dialog.Root open={open} onOpenChange={changeOpen}>
@@ -850,7 +881,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
     <Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content payload-workbench-dialog">
       <div className="payload-workbench-heading"><span className="payload-workbench-mark"><Sparkles size={17} /></span><div><Dialog.Title>Payload workbench</Dialog.Title><Dialog.Description>Transform exact text or generate inspected candidates. Nothing enters the conversation until you explicitly use it.</Dialog.Description>{context && <div className="payload-workbench-context"><span>{context.sessionName}</span><span>{context.branchName}</span><code>{context.contextNodeId?.slice(0, 8) ?? "root"}</code></div>}</div></div>
       <Tabs.Root value={tab} onValueChange={(nextTab) => setTab(nextTab as WorkbenchTab)} className="payload-workbench-tabs">
-        <Tabs.List><Tabs.Trigger value="transform"><Braces size={13} /> Transform</Tabs.Trigger><Tabs.Trigger value="generate"><Sparkles size={13} /> Generate</Tabs.Trigger><Tabs.Trigger value="arsenal"><Library size={13} /> Arsenal</Tabs.Trigger><Tabs.Trigger value="history"><History size={13} /> History</Tabs.Trigger></Tabs.List>
+        <Tabs.List><Tabs.Trigger value="transform"><Braces size={13} /> Transform</Tabs.Trigger><Tabs.Trigger value="generate"><Sparkles size={13} /> Generate</Tabs.Trigger><Tabs.Trigger value="variants"><GitCompare size={13} /> Variants</Tabs.Trigger><Tabs.Trigger value="arsenal"><Library size={13} /> Arsenal</Tabs.Trigger><Tabs.Trigger value="history"><History size={13} /> History</Tabs.Trigger></Tabs.List>
         <Tabs.Content value="transform" className="payload-workbench-tab-content">
           <div className="payload-workbench-layout">
             <section className="payload-workbench-editor"><Field label="Next prompt"><Textarea autoFocus value={draft} onChange={(event) => { setDraft(event.target.value); setTransformError(null); setTransformApplication(null); }} rows={18} maxLength={1_000_000} placeholder="Draft the next payload…" /></Field><div className="payload-workbench-stats"><span>{codePointCount.toLocaleString()} Unicode code points</span><span>{byteCount.toLocaleString()} UTF-8 bytes</span><span>{undoStack.length} undo step{undoStack.length === 1 ? "" : "s"}</span>{draftSource && <span>lineage · {draftSource.id.slice(0, 8)}</span>}</div>{(transformError || derive.error) && <div className="form-error" role="alert">{transformError ?? derive.error?.message}</div>}<PayloadInspectionPanel value={draft} selectedTransform={selectedTransform} application={transformApplication} /></section>
@@ -891,6 +922,20 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
           </aside>
           <main className="payload-generate-results"><GenerationCandidates generation={generation} candidates={candidates} revisions={revisions} original={original} diffIds={diffIds} onDiffChange={setDiffIds} onRefine={(revision, feedback) => refine.mutate({ revision, feedback })} onTransform={sendCandidateToTransform} onUse={useCandidate} refinePending={refine.isPending} />{detailQuery.error && <div className="form-error">{detailQuery.error.message}</div>}</main></div>
         </Tabs.Content>
+        <Tabs.Content value="variants" className="payload-workbench-tab-content"><PayloadVariantMatrix
+          sessionId={context?.sessionId ?? null}
+          sourceText={draft}
+          sourceRevision={draftSource}
+          draft={variantMatrixDraft}
+          historyRevisions={historyPayloadRevisions}
+          disabled={Boolean(context && !sessionSettingsReady)}
+          configIssue={variantMatrixConfigIssue}
+          onDraftChange={(nextDraft) => { setVariantMatrixDraft(nextDraft); setVariantMatrixConfigIssue(null); }}
+          onSourceRecorded={(revisionId, text) => setDraftSource({ id: revisionId, text })}
+          onRestore={restoreVariantDraft}
+          onSendToTransform={sendVariantToTransform}
+          onUse={useVariant}
+        /></Tabs.Content>
         <Tabs.Content value="arsenal" className="payload-workbench-tab-content"><PayloadArsenal
           profiles={orderedRevisions(arsenalProfileAssets.data?.assets ?? [])}
           instructions={orderedRevisions(arsenalInstructionAssets.data?.assets ?? [])}

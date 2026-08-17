@@ -1,17 +1,25 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { ZodError, z, type ZodType } from "zod";
-import { type AssetKind, type JsonObject, type JsonValue } from "@lathe/domain";
+import { nowIso, uuidv7, type AssetKind, type JsonObject, type JsonValue, type PayloadRevision } from "@lathe/domain";
 import type { LatheRepository, ResourceDeletionResult } from "@lathe/db";
-import { applyPayloadTransform, evaluatePayloadPipeline, normalizePayloadTransformParameters } from "@lathe/payloads";
+import {
+  applyPayloadTransform,
+  evaluatePayloadPipeline,
+  evaluatePayloadVariantMatrix,
+  normalizePayloadTransformParameters,
+  type PayloadVariantMatrixEvaluation
+} from "@lathe/payloads";
 import type { PayloadGenerationCoordinator } from "./payload-generation-coordinator.js";
 import { PayloadGenerationRequestError } from "./payload-generation-coordinator.js";
 import {
   createPayloadGenerationInputSchema,
+  createPayloadVariantMatrixInputSchema,
   derivePayloadRevisionInputSchema,
   payloadContextPreviewInputSchema,
   payloadGeneratorProfileValueSchema,
   payloadPipelineValueSchema,
+  payloadVariantMatrixPreflightInputSchema,
   sessionPayloadWorkbenchSettingsInputSchema,
   payloadWorkbenchSettingsInputSchema,
   refinePayloadRevisionInputSchema
@@ -44,6 +52,42 @@ async function assertAssetKind(repository: LatheRepository, id: string | null, k
   if (id === null) return;
   const asset = (await repository.listAssetRevisions(kind)).find((item) => item.id === id);
   if (!asset) throw new HTTPException(409, { message: `${kind} revision is unavailable` });
+}
+
+async function evaluateVariantMatrixRequest(
+  repository: LatheRepository,
+  sessionId: string,
+  input: {
+    source: { revisionId: string | null; text: string };
+    transformId: Parameters<typeof evaluatePayloadVariantMatrix>[0]["transformId"];
+    version: 1;
+    parameterSets: Array<Record<string, string>>;
+  }
+): Promise<{ base: PayloadRevision | null; evaluation: PayloadVariantMatrixEvaluation }> {
+  const session = await repository.getSession(sessionId);
+  if (!session) throw new HTTPException(404, { message: "Session not found" });
+  const base = input.source.revisionId === null
+    ? null
+    : await repository.getPayloadRevision(input.source.revisionId);
+  if (input.source.revisionId !== null && !base) {
+    throw new HTTPException(404, { message: "Source payload revision not found" });
+  }
+  if (base && (base.sessionId !== session.id || base.projectId !== session.projectId)) {
+    throw new HTTPException(409, { message: "Source payload revision does not belong to session" });
+  }
+  return {
+    base,
+    evaluation: evaluatePayloadVariantMatrix({
+      source: {
+        kind: base && base.text === input.source.text ? "revision" : "draft",
+        revisionId: base?.id ?? null,
+        text: input.source.text
+      },
+      transformId: input.transformId,
+      version: input.version,
+      parameterSets: input.parameterSets
+    })
+  };
 }
 
 export function registerPayloadRoutes(app: Hono, dependencies: {
@@ -106,6 +150,81 @@ export function registerPayloadRoutes(app: Hono, dependencies: {
       }
       requestError(error);
     }
+  });
+
+  app.post("/api/sessions/:id/payload-variant-matrices/preflight", async (context) => {
+    const input = await parseBody(context.req.raw, payloadVariantMatrixPreflightInputSchema);
+    const { evaluation } = await evaluateVariantMatrixRequest(repository, context.req.param("id"), input);
+    return context.json({ preflight: evaluation.preflight });
+  });
+
+  app.post("/api/sessions/:id/payload-variant-matrices", async (context) => {
+    const input = await parseBody(context.req.raw, createPayloadVariantMatrixInputSchema);
+    const { base, evaluation } = await evaluateVariantMatrixRequest(repository, context.req.param("id"), input);
+    const { preflight, outputs } = evaluation;
+    if (!preflight.creatable || preflight.preflightHash === null) {
+      throw new HTTPException(422, {
+        message: preflight.violations.map((violation) => (
+          `${violation.ordinal === null ? "Matrix" : `Row ${violation.ordinal}`}: ${violation.message}`
+        )).join(" ") || "Payload variant matrix is not creatable"
+      });
+    }
+    if (preflight.preflightHash !== input.preflightHash) {
+      throw new HTTPException(409, { message: "Payload variant matrix preflight is stale. Preview the current matrix before creating it." });
+    }
+
+    const matrixId = uuidv7();
+    const createdAt = nowIso();
+    const variantCount = preflight.rows.length;
+    const variants = preflight.rows.map((row, index) => {
+      const text = outputs[index];
+      if (text === null || text === undefined || row.parameters === null || row.codePoints === null || row.utf8Bytes === null) {
+        throw new HTTPException(500, { message: `Payload variant matrix row ${row.ordinal} was unavailable after successful preflight` });
+      }
+      const earlierDuplicate = row.duplicateOutputOrdinals.find((ordinal) => ordinal < row.ordinal) ?? null;
+      return {
+        text,
+        provenance: {
+          kind: "variant-matrix",
+          matrixId,
+          preflightHash: preflight.preflightHash,
+          sourceHash: preflight.source.contentHash,
+          transformId: input.transformId,
+          version: input.version,
+          parameters: row.parameters,
+          ordinal: row.ordinal,
+          variantCount,
+          outputCodePoints: row.codePoints,
+          outputUtf8Bytes: row.utf8Bytes,
+          matchesControl: row.matchesControl,
+          duplicateOutputOf: earlierDuplicate
+        }
+      };
+    });
+    const persisted = await repository.createPayloadRevisionFanOut({
+      sessionId: context.req.param("id"),
+      baseRevisionId: base?.id ?? null,
+      sourceText: input.source.text,
+      sourceProvenance: {
+        kind: "variant-matrix-control",
+        preflightHash: preflight.preflightHash,
+        sourceHash: preflight.source.contentHash
+      },
+      variants
+    });
+    return context.json({
+      matrix: {
+        id: matrixId,
+        sourceRevisionId: persisted.source.id,
+        sourceContentHash: persisted.source.contentHash,
+        transformId: input.transformId,
+        version: input.version,
+        count: persisted.revisions.length,
+        preflightHash: preflight.preflightHash,
+        createdAt
+      },
+      variants: persisted.revisions
+    }, 201);
   });
 
   app.post("/api/payload-generator-profiles/:revisionId/probe", async (context) => {

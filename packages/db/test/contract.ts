@@ -156,13 +156,23 @@ export async function repositoryContract(repository: LatheRepository): Promise<v
     variables: { objective: "Exercise instruction boundaries", target_name: "Acme support bot" },
     candidateCount: 3,
     diversity: "high",
+    variantMatrix: {
+      transformId: "caesar-rotate",
+      version: 1,
+      parameterSets: [{ shift: "1" }, { shift: "13" }]
+    },
     contextMode: "full",
     includeProjectBrief: true,
     includeSessionBrief: true,
     includeTargetConfig: true,
     budgetChars: 24_000
   });
-  expect(sessionPayloadSettings).toMatchObject({ sessionId: session.id, candidateCount: 3, diversity: "high" });
+  expect(sessionPayloadSettings).toMatchObject({
+    sessionId: session.id,
+    candidateCount: 3,
+    diversity: "high",
+    variantMatrix: { transformId: "caesar-rotate", version: 1, parameterSets: [{ shift: "1" }, { shift: "13" }] }
+  });
   expect(await repository.getSessionPayloadWorkbenchSettings(session.id)).toEqual(sessionPayloadSettings);
   expect(await repository.getSessionPayloadWorkbenchSettings(otherSession.id)).toBeNull();
   await expect(repository.upsertSessionPayloadWorkbenchSettings("missing-session", {
@@ -322,6 +332,33 @@ export async function repositoryContract(repository: LatheRepository): Promise<v
     text: "Cross-session edit",
     provenance: {}
   })).rejects.toThrow(/does not belong/);
+
+  const variantFanOut = await repository.createPayloadRevisionFanOut({
+    sessionId: session.id,
+    baseRevisionId: null,
+    sourceText: "Matrix control",
+    sourceProvenance: { kind: "variant-matrix-control" },
+    variants: [
+      { text: "Nbusjy dpouspm", provenance: { kind: "variant-matrix", matrixId: "matrix", ordinal: 1 } },
+      { text: "Znge-k prageby", provenance: { kind: "variant-matrix", matrixId: "matrix", ordinal: 2 } }
+    ]
+  });
+  expect(variantFanOut.source).toMatchObject({ operation: "edited", parentRevisionId: null, text: "Matrix control" });
+  expect(variantFanOut.revisions).toHaveLength(2);
+  expect(variantFanOut.revisions.every((revision) => revision.parentRevisionId === variantFanOut.source.id)).toBe(true);
+  expect(variantFanOut.revisions.map((revision) => revision.contentHash)).toEqual([
+    sha256Json("Nbusjy dpouspm"),
+    sha256Json("Znge-k prageby")
+  ]);
+  const beforeRejectedFanOut = (await repository.listPayloadRevisions(session.id)).length;
+  await expect(repository.createPayloadRevisionFanOut({
+    sessionId: session.id,
+    baseRevisionId: generatedRevision.id,
+    sourceText: generatedRevision.text,
+    sourceProvenance: {},
+    variants: []
+  })).rejects.toThrow(/between 1 and 32/);
+  expect(await repository.listPayloadRevisions(session.id)).toHaveLength(beforeRejectedFanOut);
 
   const payloadMessage = await repository.appendNode({
     sessionId: session.id,

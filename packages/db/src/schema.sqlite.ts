@@ -8,6 +8,7 @@ import type {
   PayloadGenerationOptions,
   PayloadGenerationStatus,
   PayloadRevisionOperation,
+  SessionPayloadWorkbenchSettings,
   RunClassification,
   RunStatus,
   ResolvedConfig
@@ -259,6 +260,7 @@ export const sessionPayloadWorkbenchSettings = sqliteTable("session_payload_work
   variables: text("variables", { mode: "json" }).$type<Record<string, string>>().notNull(),
   candidateCount: integer("candidate_count").notNull(),
   diversity: text("diversity").$type<PayloadDiversity>().notNull(),
+  variantMatrix: text("variant_matrix", { mode: "json" }).$type<SessionPayloadWorkbenchSettings["variantMatrix"]>().notNull(),
   contextMode: text("context_mode").$type<PayloadGenerationOptions["contextMode"]>().notNull(),
   includeProjectBrief: integer("include_project_brief", { mode: "boolean" }).notNull(),
   includeSessionBrief: integer("include_session_brief", { mode: "boolean" }).notNull(),

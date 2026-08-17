@@ -85,6 +85,8 @@ Helper generation is persisted separately from conversation `ModelRun` records a
 
 Global defaults and each session's last-selected generator controls are mutable convenience state. Every generation instead records exact asset revisions, options, context manifest, backend snapshot, and trace evidence.
 
+Controlled variant preflight is deterministic and side-effect-free. Creation records an exact control revision when needed, then atomically adds attributed sibling `PayloadRevision` children; it never starts a model run or changes the conversation graph.
+
 ## Persistence
 
 `LATHE_DATABASE_URL` selects a Drizzle-backed repository at process startup. An absent/non-PostgreSQL value selects SQLite; `postgres:`/`postgresql:` selects PostgreSQL. Each dialect has its own checked-in migration track and runs the same repository contract tests.

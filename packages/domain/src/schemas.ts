@@ -197,6 +197,33 @@ export const payloadWorkbenchSettingsInputSchema = z.object({
   budgetChars: z.number().int().min(2_000).max(200_000)
 }) satisfies z.ZodType<Omit<PayloadWorkbenchSettings, "id" | "createdAt" | "updatedAt">>;
 
+const sessionVariantParameterRecordSchema = z.record(
+  z.string().min(1).max(120),
+  z.string().max(20_000)
+).superRefine((parameters, context) => {
+  const entries = Object.entries(parameters);
+  if (entries.length > 256) {
+    context.addIssue({ code: "custom", message: "A variant parameter set may contain at most 256 entries" });
+  }
+  const codePoints = entries.reduce((total, [name, value]) => total + [...name].length + [...value].length, 0);
+  if (codePoints > 200_000) {
+    context.addIssue({ code: "custom", message: "A variant parameter set may contain at most 200000 Unicode code points" });
+  }
+});
+
+export const payloadVariantMatrixDraftSchema = z.object({
+  transformId: z.string().trim().min(1).max(120),
+  version: z.literal(1),
+  parameterSets: z.array(sessionVariantParameterRecordSchema).min(1).max(32)
+}).strict().superRefine((matrix, context) => {
+  const codePoints = matrix.parameterSets.reduce((total, parameters) => (
+    total + Object.entries(parameters).reduce((rowTotal, [name, value]) => rowTotal + [...name].length + [...value].length, 0)
+  ), 0);
+  if (codePoints > 200_000) {
+    context.addIssue({ code: "custom", path: ["parameterSets"], message: "Variant matrix parameters may contain at most 200000 Unicode code points in total" });
+  }
+});
+
 export const sessionPayloadWorkbenchSettingsInputSchema = z.object({
   generatorProfileRevisionId: idSchema.nullable(),
   instructionRevisionId: idSchema.nullable(),
@@ -209,6 +236,7 @@ export const sessionPayloadWorkbenchSettingsInputSchema = z.object({
   variables: z.record(z.string(), z.string().max(20_000)),
   candidateCount: z.number().int().min(1).max(4),
   diversity: payloadDiversitySchema,
+  variantMatrix: payloadVariantMatrixDraftSchema.nullable().default(null),
   contextMode: payloadContextModeSchema,
   includeProjectBrief: z.boolean(),
   includeSessionBrief: z.boolean(),

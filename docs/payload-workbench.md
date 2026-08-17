@@ -1,6 +1,6 @@
 # Payload Workbench
 
-The Payload Workbench helps an operator develop the next payload while keeping generation separate from the target conversation. It has four tabs—**Transform**, **Generate**, **Arsenal**, and **History**—and never sends a candidate to the target model on its own.
+The Payload Workbench helps an operator develop the next payload while keeping generation separate from the target conversation. It has five tabs—**Transform**, **Generate**, **Variants**, **Arsenal**, and **History**—and never sends a candidate to the target model on its own.
 
 The wand beside the session composer opens the workbench. The distinct **Payload Workbench settings** wand in the global top-right toolbar is available on every page; the regular Settings page and Interface settings cog keep their existing purposes.
 
@@ -134,6 +134,18 @@ The inspection panel can show bounded raw text, exact parent/current text, escap
 A saved pipeline applies its enabled steps and normalized parameters in order. **Render variables** is also available as a direct Transform action; inside a pipeline it resolves template placeholders at that exact point in the sequence. Every successful step creates a child payload revision recording the exact transform version and effective parameters. If a later step fails, Lathe retains those successful intermediate revisions while leaving the open input draft and undo state unchanged; it never mutates an earlier revision.
 
 Manual typing is captured as an `edited` child when the draft is transformed, restored/saved, copied to the composer, or run. If a revision-backed composer payload is edited before Run, Lathe creates another `edited` child and links the resulting user node to it.
+
+## Create controlled variants
+
+**Variants** compares one deterministic registry transform across explicit parameter rows. The current workbench draft stays visible as the control. Choose the exact transform version, add or remove rows, and set every parameter value directly; Lathe does not infer factors or invoke a helper model.
+
+Run **authoritative preflight** before creating anything. The server normalizes the parameters, executes every transform without saving the output, and reports exact Unicode code-point and UTF-8 byte counts. Creation is blocked by invalid or duplicate effective parameters and by the hard limits of 32 rows, 4,000,000 aggregate code points, or 16 MiB of aggregate UTF-8 data across the control and variants. Different parameter rows that produce the same text remain attributable and are called out, including output that exactly matches the control.
+
+**Create variants** records the control as an immutable revision when needed, then records every output as a sibling `transformed` revision beneath that control. Each child retains the matrix ID and preflight hash, transform ID/version, normalized parameters, row number, output measurements, and collision information. A changed source or factor invalidates the preflight and requires another preview.
+
+Results use exact raw-text comparison. **Restore** makes a selected revision the workbench draft, **Send to Transform** opens it in the Transform tab, and **Use as next prompt** copies it to the session composer with its revision identity. None of these actions sends a target request; only the session's Run button can do that. Preflight and creation likewise create no conversation node, move no branch, and start neither target nor helper-model runs.
+
+The selected transform version and ordered parameter rows are saved with the session's Payload Workbench settings and restored when it is reopened. Source text and preflight state are deliberately recomputed from the current draft. Created results are immutable lineage, not mutable settings, and are reconstructed from payload history.
 
 ## History and provenance
 

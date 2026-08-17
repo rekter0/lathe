@@ -6,6 +6,7 @@
     { "idx": 1, "version": "6", "when": 1786752001000, "tag": "0001_checkpoint_session_state", "breakpoints": true },
     { "idx": 2, "version": "6", "when": 1786752002000, "tag": "0002_payload_workbench", "breakpoints": true },
     { "idx": 3, "version": "6", "when": 1786752003000, "tag": "0003_session_payload_workbench_settings", "breakpoints": true },
-    { "idx": 4, "version": "6", "when": 1786752004000, "tag": "0004_application_settings", "breakpoints": true }
+    { "idx": 4, "version": "6", "when": 1786752004000, "tag": "0004_application_settings", "breakpoints": true },
+    { "idx": 5, "version": "6", "when": 1786752005000, "tag": "0005_payload_variant_matrix_settings", "breakpoints": true }
   ]
 }

@@ -79,7 +79,7 @@ Lathe creates the data directory as `0700` and SQLite as `0600` where supported.
 | --- | --- |
 | [Provider settings](./docs/settings-provider.md) | Protocols, endpoints, credentials, discovery, reasoning controls, and revisions. |
 | [Tools and targets](./docs/tools.md) | Tool definitions, QuickJS implementations, host/container/SSH targets, approvals, and MCP behavior. |
-| [Payload Workbench](./docs/payload-workbench.md) | Transform/Generate/History, context budgets, techniques, HTTP helpers, and Codex App Server profiles. |
+| [Payload Workbench](./docs/payload-workbench.md) | Transform, Generate, controlled Variants, searchable Arsenal, History, and helper profiles. |
 | [Architecture](./ARCHITECTURE.md) | Package boundaries, graph and persistence model, generation flow, and artifacts. |
 | [Security](./SECURITY.md) | Deployment assumptions, secrets, execution trust, helper runtimes, attachments, and exports. |
 | [Agent guide](./AGENTS.md) | Repository invariants, coding conventions, dependency policy, and validation expectations. |

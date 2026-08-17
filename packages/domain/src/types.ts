@@ -338,6 +338,13 @@ export interface PayloadWorkbenchSettings extends PayloadGenerationOptions {
   updatedAt: IsoDateTime;
 }
 
+/** Mutable deterministic matrix controls; source text and results are never settings. */
+export interface PayloadVariantMatrixDraft {
+  transformId: string;
+  version: 1;
+  parameterSets: Record<string, string>[];
+}
+
 /** Mutable Payload Workbench choices scoped to one session. */
 export interface SessionPayloadWorkbenchSettings extends PayloadGenerationOptions {
   sessionId: Id;
@@ -349,6 +356,7 @@ export interface SessionPayloadWorkbenchSettings extends PayloadGenerationOption
   variables: Record<string, string>;
   candidateCount: number;
   diversity: PayloadDiversity;
+  variantMatrix: PayloadVariantMatrixDraft | null;
   createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
 }

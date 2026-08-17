@@ -72,6 +72,11 @@ describe("session Payload Workbench settings routes", () => {
         variables: { objective: "Test the target", target_name: "Fixture" },
         candidateCount: 4,
         diversity: "high",
+        variantMatrix: {
+          transformId: "caesar-rotate",
+          version: 1,
+          parameterSets: [{ shift: " 1 " }, { shift: "13" }]
+        },
         contextMode: "minimal",
         includeProjectBrief: true,
         includeSessionBrief: true,
@@ -85,7 +90,15 @@ describe("session Payload Workbench settings routes", () => {
       });
       expect(savedResponse.status).toBe(200);
       const saved = await savedResponse.json() as { settings: Record<string, unknown> };
-      expect(saved.settings).toMatchObject({ sessionId: first.session.id, ...input });
+      expect(saved.settings).toMatchObject({
+        sessionId: first.session.id,
+        ...input,
+        variantMatrix: {
+          transformId: "caesar-rotate",
+          version: 1,
+          parameterSets: [{ shift: "1" }, { shift: "13" }]
+        }
+      });
       expect(saved.settings.createdAt).toEqual(expect.any(String));
       expect(saved.settings.updatedAt).toEqual(expect.any(String));
 
@@ -100,6 +113,30 @@ describe("session Payload Workbench settings routes", () => {
         body: JSON.stringify({ ...input, techniqueRevisionIds: [technique.id, technique.id] })
       });
       expect(duplicateTechniques.status).toBe(400);
+
+      const duplicateVariantFactors = await app.request(`/api/sessions/${first.session.id}/payload-workbench/settings`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({
+          ...input,
+          variantMatrix: {
+            transformId: "caesar-rotate",
+            version: 1,
+            parameterSets: [{ shift: "1" }, { shift: " 1 " }]
+          }
+        })
+      });
+      expect(duplicateVariantFactors.status).toBe(400);
+
+      const unavailableVariantTransform = await app.request(`/api/sessions/${first.session.id}/payload-workbench/settings`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({
+          ...input,
+          variantMatrix: { transformId: "future-transform", version: 1, parameterSets: [{}] }
+        })
+      });
+      expect(unavailableVariantTransform.status).toBe(400);
 
       const wrongKind = await app.request(`/api/sessions/${first.session.id}/payload-workbench/settings`, {
         method: "PUT",

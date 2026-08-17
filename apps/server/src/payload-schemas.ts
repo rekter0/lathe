@@ -1,7 +1,13 @@
 import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { sessionPayloadWorkbenchSettingsInputSchema as domainSessionPayloadWorkbenchSettingsInputSchema } from "@lathe/domain";
-import { countUnicodeCodePoints, payloadTransformParameterLimits, validatePayloadTransformParameters } from "@lathe/payloads";
+import {
+  countUnicodeCodePoints,
+  normalizePayloadTransformParameters,
+  payloadTransformParameterLimits,
+  payloadVariantMatrixLimits,
+  validatePayloadTransformParameters
+} from "@lathe/payloads";
 
 export const payloadContextModeSchema = z.enum(["none", "minimal", "full"]);
 export const payloadDiversitySchema = z.enum(["low", "balanced", "high"]);
@@ -60,7 +66,7 @@ export const payloadTransformIdSchema = z.enum([
   "markdown-frame", "xml-frame", "json-frame", "repeat-twice", "render-variables"
 ]);
 
-const payloadTransformParameterRecordSchema = z.record(z.string(), z.string()).superRefine((parameters, context) => {
+export const payloadTransformParameterRecordSchema = z.record(z.string(), z.string()).superRefine((parameters, context) => {
   const entries = Object.entries(parameters);
   if (entries.length > payloadTransformParameterLimits.maxEntries) {
     context.addIssue({ code: "custom", message: `Parameters may contain at most ${payloadTransformParameterLimits.maxEntries} entries.` });
@@ -98,6 +104,58 @@ export const payloadPipelineValueSchema = z.object({
   })).max(100)
 });
 
+function variantMatrixParameterIssues(
+  value: { transformId: z.infer<typeof payloadTransformIdSchema>; parameterSets: Array<Record<string, string>> }
+): Array<{ path: Array<string | number>; message: string }> {
+  const issues: Array<{ path: Array<string | number>; message: string }> = [];
+  const normalizedHashes = new Set<string>();
+  let totalCodePoints = 0;
+  for (const [index, parameters] of value.parameterSets.entries()) {
+    try {
+      const normalized = normalizePayloadTransformParameters(value.transformId, parameters);
+      const key = JSON.stringify(Object.entries(normalized).sort(([left], [right]) => left.localeCompare(right)));
+      if (normalizedHashes.has(key)) {
+        issues.push({ path: ["parameterSets", index], message: "Variant parameter sets must be unique after normalization" });
+      }
+      normalizedHashes.add(key);
+      totalCodePoints += Object.entries(normalized).reduce(
+        (total, [name, parameter]) => total + countUnicodeCodePoints(name) + countUnicodeCodePoints(parameter),
+        0
+      );
+    } catch (error) {
+      issues.push({
+        path: ["parameterSets", index],
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+  if (totalCodePoints > payloadVariantMatrixLimits.maxTotalParameterCodePoints) {
+    issues.push({
+      path: ["parameterSets"],
+      message: `Variant parameters exceed the ${payloadVariantMatrixLimits.maxTotalParameterCodePoints} Unicode code-point aggregate limit.`
+    });
+  }
+  return issues;
+}
+
+const payloadVariantMatrixRequestFields = {
+  source: z.object({
+    revisionId: z.string().min(1).nullable(),
+    text: z.string().max(1_000_000)
+  }).strict(),
+  transformId: payloadTransformIdSchema,
+  version: z.literal(1),
+  parameterSets: z.array(payloadTransformParameterRecordSchema).min(1).max(payloadVariantMatrixLimits.maxRows)
+};
+
+export const payloadVariantMatrixPreflightInputSchema = z.object(payloadVariantMatrixRequestFields)
+  .strict();
+
+export const createPayloadVariantMatrixInputSchema = z.object({
+  ...payloadVariantMatrixRequestFields,
+  preflightHash: z.string().regex(/^[a-f0-9]{64}$/)
+}).strict();
+
 export const payloadWorkbenchSettingsInputSchema = z.object({
   defaultGeneratorProfileRevisionId: z.string().min(1).nullable(),
   defaultInstructionRevisionId: z.string().min(1).nullable(),
@@ -110,7 +168,32 @@ export const payloadWorkbenchSettingsInputSchema = z.object({
   budgetChars: z.number().int().min(2_000).max(200_000)
 });
 
-export const sessionPayloadWorkbenchSettingsInputSchema = domainSessionPayloadWorkbenchSettingsInputSchema;
+export const sessionPayloadWorkbenchSettingsInputSchema = domainSessionPayloadWorkbenchSettingsInputSchema
+  .superRefine((input, context) => {
+    if (input.variantMatrix === null) return;
+    const transform = payloadTransformIdSchema.safeParse(input.variantMatrix.transformId);
+    if (!transform.success) {
+      context.addIssue({ code: "custom", path: ["variantMatrix", "transformId"], message: "The saved variant transform is unavailable" });
+      return;
+    }
+    for (const issue of variantMatrixParameterIssues({ transformId: transform.data, parameterSets: input.variantMatrix.parameterSets })) {
+      context.addIssue({ code: "custom", path: ["variantMatrix", ...issue.path], message: issue.message });
+    }
+  })
+  .transform((input) => {
+    if (input.variantMatrix === null) return input;
+    const transformId = payloadTransformIdSchema.parse(input.variantMatrix.transformId);
+    return {
+      ...input,
+      variantMatrix: {
+        transformId,
+        version: input.variantMatrix.version,
+        parameterSets: input.variantMatrix.parameterSets.map((parameters) => (
+          normalizePayloadTransformParameters(transformId, parameters)
+        ))
+      }
+    };
+  });
 
 export const payloadContextPreviewInputSchema = z.object({
   branchId: z.string().min(1),

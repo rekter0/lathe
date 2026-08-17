@@ -112,6 +112,61 @@ describe("SQLite repository", () => {
       await persistence.repository.close();
     }
   });
+
+  it("adds an empty variant-matrix draft to existing session workbench settings", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "lathe-matrix-settings-migration-"));
+    directories.push(directory);
+    const databasePath = join(directory, "legacy-settings.sqlite");
+    const client = new Database(databasePath);
+    try {
+      for (const name of [
+        "0000_initial.sql",
+        "0001_checkpoint_session_state.sql",
+        "0002_payload_workbench.sql",
+        "0003_session_payload_workbench_settings.sql",
+        "0004_application_settings.sql"
+      ]) {
+        client.exec(await readFile(fileURLToPath(new URL(`../drizzle/sqlite/${name}`, import.meta.url)), "utf8"));
+      }
+      client.prepare(`INSERT INTO projects (
+        id, name, description, target_name, default_harness_revision_id, workspace_root, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run("matrix-project", "Matrix", "", "", null, null, now(), now());
+      client.prepare(`INSERT INTO sessions (
+        id, project_id, name, description, provider_profile_id, model_id, active_branch_id, draft_config,
+        auto_continue_tools, auto_continue_limit, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        "matrix-session", "matrix-project", "Matrix session", "", null, null, null,
+        JSON.stringify(emptyResolvedConfig()), 0, 8, now(), now()
+      );
+      client.prepare(`INSERT INTO session_payload_workbench_settings (
+        session_id, generator_profile_revision_id, instruction_revision_id, technique_revision_ids,
+        pipeline_revision_id, operator_instruction, variables, candidate_count, diversity, context_mode,
+        include_project_brief, include_session_brief, include_target_config, budget_chars, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        "matrix-session", null, null, "[]", null, "Retained instruction", "{}", 1, "balanced", "minimal",
+        1, 1, 0, 32_000, now(), now()
+      );
+      client.exec(`CREATE TABLE __drizzle_migrations (
+        id SERIAL PRIMARY KEY,
+        hash text NOT NULL,
+        created_at numeric
+      )`);
+      client.prepare("INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)")
+        .run("legacy-application-settings", 1786752004000);
+    } finally {
+      client.close();
+    }
+
+    const persistence = await createPersistence({ databaseUrl: `sqlite:${databasePath}`, dataDirectory: directory });
+    try {
+      expect(await persistence.repository.getSessionPayloadWorkbenchSettings("matrix-session")).toMatchObject({
+        operatorInstruction: "Retained instruction",
+        variantMatrix: null
+      });
+    } finally {
+      await persistence.repository.close();
+    }
+  });
 });
 
 function now(): string {

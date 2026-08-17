@@ -8,6 +8,7 @@ import type {
   PayloadGenerationOptions,
   PayloadGenerationStatus,
   PayloadRevisionOperation,
+  SessionPayloadWorkbenchSettings,
   ResolvedConfig,
   RunClassification,
   RunStatus
@@ -93,6 +94,7 @@ export const sessionPayloadWorkbenchSettings = pgTable("session_payload_workbenc
   techniqueRevisionIds: jsonb("technique_revision_ids").$type<string[]>().notNull(), pipelineRevisionId: text("pipeline_revision_id"),
   operatorInstruction: text("operator_instruction").notNull(), variables: jsonb("variables").$type<Record<string, string>>().notNull(),
   candidateCount: integer("candidate_count").notNull(), diversity: text("diversity").$type<PayloadDiversity>().notNull(),
+  variantMatrix: jsonb("variant_matrix").$type<SessionPayloadWorkbenchSettings["variantMatrix"]>().notNull(),
   contextMode: text("context_mode").$type<PayloadGenerationOptions["contextMode"]>().notNull(),
   includeProjectBrief: boolean("include_project_brief").notNull(), includeSessionBrief: boolean("include_session_brief").notNull(),
   includeTargetConfig: boolean("include_target_config").notNull(), budgetChars: integer("budget_chars").notNull(),

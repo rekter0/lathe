@@ -133,6 +133,11 @@ describe("payload workbench schemas", () => {
       variables: { objective: "Test hierarchy handling" },
       candidateCount: 3,
       diversity: "high" as const,
+      variantMatrix: {
+        transformId: "caesar-rotate",
+        version: 1 as const,
+        parameterSets: [{ shift: "1" }, { shift: "13" }]
+      },
       ...options
     };
     expect(sessionPayloadWorkbenchSettingsInputSchema.parse(settings)).toEqual(settings);
@@ -143,6 +148,14 @@ describe("payload workbench schemas", () => {
     expect(sessionPayloadWorkbenchSettingsInputSchema.safeParse({
       ...settings,
       variables: { objective: "x".repeat(20_001) }
+    }).success).toBe(false);
+    expect(sessionPayloadWorkbenchSettingsInputSchema.safeParse({
+      ...settings,
+      variantMatrix: { ...settings.variantMatrix, parameterSets: [] }
+    }).success).toBe(false);
+    expect(sessionPayloadWorkbenchSettingsInputSchema.safeParse({
+      ...settings,
+      variantMatrix: { transformId: "caesar-rotate", version: 2, parameterSets: [{ shift: "1" }] }
     }).success).toBe(false);
   });
 

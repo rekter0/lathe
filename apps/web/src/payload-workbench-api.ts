@@ -1,4 +1,6 @@
-import type { AssetRevision, JsonObject, JsonValue } from "@lathe/domain";
+import type { AssetRevision, JsonObject, JsonValue, PayloadVariantMatrixDraft } from "@lathe/domain";
+
+export type { PayloadVariantMatrixDraft } from "@lathe/domain";
 
 export type PayloadContextMode = "none" | "minimal" | "full";
 export type PayloadGenerationStatus = "queued" | "streaming" | "partial" | "completed" | "failed" | "cancelled" | "interrupted";
@@ -39,6 +41,7 @@ export interface PayloadWorkbenchSessionSettings extends PayloadGenerationOption
   operatorInstruction: string;
   candidateCount: 1 | 2 | 3 | 4;
   diversity: PayloadDiversity;
+  variantMatrix: PayloadVariantMatrixDraft | null;
 }
 
 export const defaultPayloadWorkbenchSettings: PayloadWorkbenchSettings = {
@@ -264,6 +267,16 @@ export function normalizePayloadWorkbenchSessionSettings(
   const techniqueIds = Array.isArray(source.techniqueRevisionIds)
     ? source.techniqueRevisionIds.filter((item): item is string => typeof item === "string" && item.length > 0)
     : [];
+  const variantMatrixSource = objectValue(source.variantMatrix);
+  const variantParameterSets = Array.isArray(variantMatrixSource?.parameterSets)
+    ? variantMatrixSource.parameterSets.slice(0, 32).flatMap((item) => {
+      const parameters = objectValue(item);
+      if (!parameters) return [];
+      return [Object.fromEntries(Object.entries(parameters).filter((entry): entry is [string, string] => typeof entry[1] === "string"))];
+    })
+    : [];
+  const variantTransformId = stringValue(variantMatrixSource?.transformId);
+  const variantVersion = numberValue(variantMatrixSource?.version);
   return {
     generatorProfileRevisionId: nullableString(source, "generatorProfileRevisionId", fallback.defaultGeneratorProfileRevisionId),
     instructionRevisionId: nullableString(source, "instructionRevisionId", fallback.defaultInstructionRevisionId),
@@ -273,12 +286,33 @@ export function normalizePayloadWorkbenchSessionSettings(
     operatorInstruction: stringValue(source.operatorInstruction) ?? "",
     candidateCount: normalized.candidateCount,
     diversity: normalized.diversity,
+    variantMatrix: variantTransformId && variantVersion === 1 && variantParameterSets.length > 0
+      ? { transformId: variantTransformId, version: 1, parameterSets: variantParameterSets }
+      : null,
     contextMode: normalized.contextMode,
     includeProjectBrief: normalized.includeProjectBrief,
     includeSessionBrief: normalized.includeSessionBrief,
     includeTargetConfig: normalized.includeTargetConfig,
     budgetChars: normalized.budgetChars
   };
+}
+
+/** Returns a user-facing reason when a persisted matrix draft cannot be used. */
+export function payloadVariantMatrixDraftIssue(value: unknown): string | null {
+  const source = objectValue(value);
+  if (!source || source.variantMatrix === undefined || source.variantMatrix === null) return null;
+  const matrix = objectValue(source.variantMatrix);
+  if (!matrix) return "The saved Variants configuration is malformed. Select a supported transform to replace it.";
+  if (numberValue(matrix.version) !== 1) return "The saved Variants transform version is unavailable. Select a supported transform to replace it.";
+  if (!stringValue(matrix.transformId)) return "The saved Variants transform is missing. Select a supported transform to replace it.";
+  if (!Array.isArray(matrix.parameterSets) || matrix.parameterSets.length === 0 || matrix.parameterSets.length > 32) {
+    return "The saved Variants factor rows are invalid. Select a supported transform to replace them.";
+  }
+  if (matrix.parameterSets.some((item) => {
+    const parameters = objectValue(item);
+    return !parameters || Object.values(parameters).some((parameter) => typeof parameter !== "string");
+  })) return "The saved Variants factor parameters are invalid. Select a supported transform to replace them.";
+  return null;
 }
 
 export function normalizePayloadContextPreview(value: unknown): PayloadContextPreview {
