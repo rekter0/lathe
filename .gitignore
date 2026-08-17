@@ -49,6 +49,9 @@ blob-report/
 .env.*
 !.env.example
 
+# Local writing drafts
+/writings/
+
 # Logs and temporary files
 *.log
 npm-debug.log*
