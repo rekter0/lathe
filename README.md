@@ -6,6 +6,8 @@ Lathe is not an autonomous scanner or agent. The operator chooses the prompts, m
 
 > **Early v1 software.** Run Lathe only on a trusted macOS or Linux machine. Provider and static MCP credentials are stored plaintext in the local database, and approved commands run with the authority of their selected target. Read [SECURITY.md](./SECURITY.md) before using real credentials or tools.
 
+![Lathe workbench showing a branched conversation, a blocked model turn, and session configuration](./docs/images/workbench-overview.jpg)
+
 ## Highlights
 
 - Immutable conversation nodes with named branches, checkpoints, rewind/fork, graph navigation, and side-by-side comparison.

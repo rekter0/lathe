@@ -8,6 +8,8 @@ The protocol must match the endpoint's wire format, not the company that made
 the model. For example, a Claude or DeepSeek model routed through OpenRouter's
 Chat Completions endpoint still uses **OpenAI Chat Completions** in Lathe.
 
+![Provider revision editor with protocol, endpoint, credential, headers, and request-body controls](./images/provider-settings.jpg)
+
 ## Add a provider
 
 Open **Settings → Providers**, then complete the **New provider profile** form:

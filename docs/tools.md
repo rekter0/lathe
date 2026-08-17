@@ -8,6 +8,8 @@ Lathe separates a model-visible tool into three independently versioned pieces:
 
 Editing any library item creates a new immutable revision. Existing session bindings remain pinned until the operator selects the new revision.
 
+![Session configuration with prompt blocks, a real tool binding, approval mode, and protocol overrides](./images/tool-configuration.jpg)
+
 ## Bash tool for an existing container
 
 Under **Settings → Tools**, create a tool specification with:

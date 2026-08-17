@@ -4,6 +4,8 @@ The Payload Workbench helps an operator develop the next payload while keeping g
 
 The wand beside the session composer opens the workbench. The distinct **Payload Workbench settings** wand in the global top-right toolbar is available on every page; the regular Settings page and Interface settings cog keep their existing purposes.
 
+![Payload Workbench Generate tab with a helper profile, reusable instruction, technique, variables, and context controls](./images/payload-workbench-generate.jpg)
+
 ## Configure the reusable libraries
 
 Open **Payload Workbench settings** from the top-right toolbar. Its five tabs store immutable, named revisions:
