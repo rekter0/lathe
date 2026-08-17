@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tabs from "@radix-ui/react-tabs";
-import { ArrowDown, ArrowUp, Braces, CaseSensitive, Check, ChevronDown, CircleStop, Code2, Download, Eye, FileClock, GitCompare, History, ListRestart, Play, Plus, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Undo2, WandSparkles, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Braces, CaseSensitive, Check, ChevronDown, CircleStop, Code2, Download, Eye, FileClock, GitCompare, History, Library, ListRestart, Play, Plus, RefreshCw, RotateCcw, Send, Sparkles, Trash2, Undo2, WandSparkles, X } from "lucide-react";
 import type { JsonObject, JsonValue, MessageNode } from "@lathe/domain";
 import { applyPayloadTransform, countUnicodeCodePoints, evaluatePayloadPipeline, getPayloadTransform, normalizePayloadTransformParameters, payloadTransforms, techniqueSelectionWarnings, validatePayloadTransformParameters, type PayloadPipelineStep, type PayloadTechnique, type PayloadTransformDefinition, type PayloadTransformId } from "@lathe/payloads";
 import { api, consumeEvents, downloadApiFile, jsonBody } from "../api.js";
@@ -32,6 +32,7 @@ import { Button, Field, Input, Select, Textarea } from "./forms.js";
 import { useOperatorDialog } from "./operator-dialog.js";
 import { PayloadInspectionPanel, type PayloadTransformApplicationInspection } from "./payload-inspection.js";
 import { PayloadTransformParameterFields } from "./payload-transform-parameters.js";
+import { PayloadArsenal } from "./payload-arsenal.js";
 
 export { applyPayloadTransform, type PayloadTransformId } from "@lathe/payloads";
 
@@ -42,7 +43,7 @@ export const payloadTransformGroups: Array<{ label: string; icon: "code" | "case
   { label: "Variables", icon: "code", transforms: payloadTransforms.filter((transform) => transform.group === "variables") }
 ];
 
-type WorkbenchTab = "transform" | "generate" | "history";
+type WorkbenchTab = "transform" | "generate" | "arsenal" | "history";
 
 export interface PayloadWorkbenchContext {
   projectId: string;
@@ -139,8 +140,12 @@ function TransformGroupIcon({ icon }: { icon: "code" | "case" | "frame" }) {
   return <Braces size={14} />;
 }
 
-function usePayloadAssets(kind: PayloadAssetKind, enabled: boolean) {
-  return useQuery({ queryKey: ["assets", kind], queryFn: () => api<{ assets: PayloadAssetRevision[] }>(`/api/assets?kind=${encodeURIComponent(kind)}`), enabled });
+function usePayloadAssets(kind: PayloadAssetKind, enabled: boolean, includeArchived = false) {
+  return useQuery({
+    queryKey: includeArchived ? ["assets", kind, "include-archived"] : ["assets", kind],
+    queryFn: () => api<{ assets: PayloadAssetRevision[] }>(`/api/assets?kind=${encodeURIComponent(kind)}${includeArchived ? "&includeArchived=true" : ""}`),
+    enabled
+  });
 }
 
 function VariableOverridesEditor({ rows, onChange }: { rows: VariableOverride[]; onChange(rows: VariableOverride[]): void }) {
@@ -339,6 +344,12 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
   const instructionAssets = usePayloadAssets("payload-generator-instruction", open);
   const techniqueAssets = usePayloadAssets("payload-technique", open);
   const pipelineAssets = usePayloadAssets("payload-pipeline", open);
+  // Archived revisions are loaded only for Arsenal inspection. The active
+  // workflow selectors above intentionally keep their existing active-only data.
+  const arsenalProfileAssets = usePayloadAssets("payload-generator-profile", open && tab === "arsenal", true);
+  const arsenalInstructionAssets = usePayloadAssets("payload-generator-instruction", open && tab === "arsenal", true);
+  const arsenalTechniqueAssets = usePayloadAssets("payload-technique", open && tab === "arsenal", true);
+  const arsenalPipelineAssets = usePayloadAssets("payload-pipeline", open && tab === "arsenal", true);
   // Keep exact immutable revisions selectable. Defaults and restored generations
   // may intentionally point at an older revision after a newer one is saved.
   const profiles = orderedRevisions(profileAssets.data?.assets ?? []);
@@ -839,7 +850,7 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
     <Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content payload-workbench-dialog">
       <div className="payload-workbench-heading"><span className="payload-workbench-mark"><Sparkles size={17} /></span><div><Dialog.Title>Payload workbench</Dialog.Title><Dialog.Description>Transform exact text or generate inspected candidates. Nothing enters the conversation until you explicitly use it.</Dialog.Description>{context && <div className="payload-workbench-context"><span>{context.sessionName}</span><span>{context.branchName}</span><code>{context.contextNodeId?.slice(0, 8) ?? "root"}</code></div>}</div></div>
       <Tabs.Root value={tab} onValueChange={(nextTab) => setTab(nextTab as WorkbenchTab)} className="payload-workbench-tabs">
-        <Tabs.List><Tabs.Trigger value="transform"><Braces size={13} /> Transform</Tabs.Trigger><Tabs.Trigger value="generate"><Sparkles size={13} /> Generate</Tabs.Trigger><Tabs.Trigger value="history"><History size={13} /> History</Tabs.Trigger></Tabs.List>
+        <Tabs.List><Tabs.Trigger value="transform"><Braces size={13} /> Transform</Tabs.Trigger><Tabs.Trigger value="generate"><Sparkles size={13} /> Generate</Tabs.Trigger><Tabs.Trigger value="arsenal"><Library size={13} /> Arsenal</Tabs.Trigger><Tabs.Trigger value="history"><History size={13} /> History</Tabs.Trigger></Tabs.List>
         <Tabs.Content value="transform" className="payload-workbench-tab-content">
           <div className="payload-workbench-layout">
             <section className="payload-workbench-editor"><Field label="Next prompt"><Textarea autoFocus value={draft} onChange={(event) => { setDraft(event.target.value); setTransformError(null); setTransformApplication(null); }} rows={18} maxLength={1_000_000} placeholder="Draft the next payload…" /></Field><div className="payload-workbench-stats"><span>{codePointCount.toLocaleString()} Unicode code points</span><span>{byteCount.toLocaleString()} UTF-8 bytes</span><span>{undoStack.length} undo step{undoStack.length === 1 ? "" : "s"}</span>{draftSource && <span>lineage · {draftSource.id.slice(0, 8)}</span>}</div>{(transformError || derive.error) && <div className="form-error" role="alert">{transformError ?? derive.error?.message}</div>}<PayloadInspectionPanel value={draft} selectedTransform={selectedTransform} application={transformApplication} /></section>
@@ -880,6 +891,24 @@ export function PayloadWorkbench({ value, sourcePayloadRevisionId = null, contex
           </aside>
           <main className="payload-generate-results"><GenerationCandidates generation={generation} candidates={candidates} revisions={revisions} original={original} diffIds={diffIds} onDiffChange={setDiffIds} onRefine={(revision, feedback) => refine.mutate({ revision, feedback })} onTransform={sendCandidateToTransform} onUse={useCandidate} refinePending={refine.isPending} />{detailQuery.error && <div className="form-error">{detailQuery.error.message}</div>}</main></div>
         </Tabs.Content>
+        <Tabs.Content value="arsenal" className="payload-workbench-tab-content"><PayloadArsenal
+          profiles={orderedRevisions(arsenalProfileAssets.data?.assets ?? [])}
+          instructions={orderedRevisions(arsenalInstructionAssets.data?.assets ?? [])}
+          techniques={orderedRevisions(arsenalTechniqueAssets.data?.assets ?? [])}
+          pipelines={orderedRevisions(arsenalPipelineAssets.data?.assets ?? [])}
+          selectedTransformId={selectedTransformId}
+          selectedProfileRevisionId={profileRevisionId}
+          selectedInstructionRevisionId={instructionRevisionId}
+          selectedTechniqueRevisionIds={techniqueRevisionIds}
+          selectedPipelineRevisionId={pipelineRevisionId}
+          loading={arsenalProfileAssets.isLoading || arsenalInstructionAssets.isLoading || arsenalTechniqueAssets.isLoading || arsenalPipelineAssets.isLoading}
+          error={arsenalProfileAssets.error?.message ?? arsenalInstructionAssets.error?.message ?? arsenalTechniqueAssets.error?.message ?? arsenalPipelineAssets.error?.message}
+          onSelectTransform={(transform) => { selectTransform(transform); setTab("transform"); }}
+          onSelectProfile={(asset) => { setProfileRevisionId(asset.id); setTab("generate"); }}
+          onSelectInstruction={(asset) => { setInstructionRevisionId(asset.id); setTab("generate"); }}
+          onSelectTechnique={(asset) => { setTechniqueRevisionIds((current) => current.includes(asset.id) ? current : [...current, asset.id]); setTab("generate"); }}
+          onSelectPipeline={(asset) => { setPipelineRevisionId(asset.id); setTab("transform"); }}
+        /></Tabs.Content>
         <Tabs.Content value="history" className="payload-workbench-tab-content"><HistoryPanel {...(context ? { context } : {})} generations={historyGenerations} standaloneRevisions={historyStandaloneRevisions} standaloneOutcomes={historyStandaloneOutcomes} loading={historyQuery.isLoading} loadingMore={historyQuery.isFetchingNextPage} hasMore={historyQuery.hasNextPage} error={historyQuery.error?.message ?? restore.error?.message ?? removeGeneration.error?.message ?? removeRevision.error?.message} onLoadMore={() => void historyQuery.fetchNextPage()} onRestore={(item) => restore.mutate(item)} onRestoreRevision={(revision) => { setDraft(revision.text); setDraftSource({ id: revision.id, text: revision.text }); setOriginal(revision.text); setUndoStack([]); setTransformError(null); setTransformApplication(null); setTab("transform"); }} onDelete={(item) => void requestGenerationDelete(item)} onDeleteRevision={(revision) => void requestRevisionDelete(revision)} {...(restore.variables?.generation.id ? { restoringId: restore.variables.generation.id } : {})} {...(removeGeneration.variables?.generation.id ? { deletingId: removeGeneration.variables.generation.id } : {})} {...(removeRevision.variables?.id ? { deletingRevisionId: removeRevision.variables.id } : {})} /></Tabs.Content>
       </Tabs.Root>
       <div className="payload-workbench-footer"><div><Button type="button" variant="ghost" onClick={undo} disabled={undoStack.length === 0 || derive.isPending}><Undo2 size={14} /> Undo</Button><Button type="button" variant="ghost" onClick={reset} disabled={draft === original || derive.isPending}><RotateCcw size={14} /> Reset</Button></div><div><Dialog.Close asChild><Button type="button" variant="ghost">Cancel</Button></Dialog.Close><Button type="button" onClick={useDraft} disabled={draft.trim().length === 0 || derive.isPending}><WandSparkles size={14} /> {derive.isPending ? "Recording…" : "Use as next prompt"}</Button></div></div>

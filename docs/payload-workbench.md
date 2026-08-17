@@ -1,6 +1,6 @@
 # Payload Workbench
 
-The Payload Workbench helps an operator develop the next payload while keeping generation separate from the target conversation. It has three tabs—**Transform**, **Generate**, and **History**—and never sends a candidate to the target model on its own.
+The Payload Workbench helps an operator develop the next payload while keeping generation separate from the target conversation. It has four tabs—**Transform**, **Generate**, **Arsenal**, and **History**—and never sends a candidate to the target model on its own.
 
 The wand beside the session composer opens the workbench. The distinct **Payload Workbench settings** wand in the global top-right toolbar is available on every page; the regular Settings page and Interface settings cog keep their existing purposes.
 
@@ -27,6 +27,12 @@ same session restores those choices; another session keeps its own independent
 draft. Conversation branch/head snapshots, context previews, transform text,
 and runtime-access confirmations are deliberately not restored. They are
 recomputed or requested against the current session state.
+
+## Search the Arsenal
+
+**Arsenal** is a unified, local catalog of built-in transforms and immutable generator profile, instruction, technique, and pipeline revisions. Search metadata such as names, IDs, descriptions, tags, backend/model details, and transform warnings, then narrow results by kind, transform metadata, revision state, and trust. The inspector shows the exact revision ID, content hash, trust state, and whether an asset is current, historical, or archived; archived and untrusted revisions remain visible for evidence review but cannot be selected for new executable work.
+
+Selection is an explicit handoff: transforms and pipelines open in **Transform**, while generator profiles, instructions, and techniques open in **Generate**. Inspecting or selecting an entry never runs a transform, starts helper generation, sends a target request, or changes the conversation graph. Arsenal is not a remote marketplace and performs no network discovery; it indexes only Lathe's built-ins and locally stored revisions.
 
 ### HTTP generator profile
 

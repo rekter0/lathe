@@ -513,6 +513,13 @@ describe("Lathe API", () => {
       const revisionTwoAsset = (await revisionTwo.json() as { asset: AssetRevision }).asset;
       expect(revisionTwoAsset.revision).toBe(2);
       expect((await app.request(`/api/library/assets/${revisionTwoAsset.id}`, { method: "DELETE", headers })).status).toBe(200);
+      const activeAssets = await app.request("/api/assets?kind=prompt", { headers });
+      expect((await activeAssets.json() as { assets: AssetRevision[] }).assets.map((asset) => asset.id)).not.toContain(revisionTwoAsset.id);
+      const allAssets = await app.request("/api/assets?kind=prompt&includeArchived=true", { headers });
+      expect((await allAssets.json() as { assets: AssetRevision[] }).assets).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: revisionTwoAsset.id, archivedAt: expect.any(String) })
+      ]));
+      expect((await app.request("/api/assets?kind=not-an-asset", { headers })).status).toBe(400);
       const revisionThree = await app.request("/api/library/assets", {
         method: "POST", headers, body: JSON.stringify({
           assetId: base.assetId, baseRevisionId: base.id, kind: "prompt", name: base.name,

@@ -3,6 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { ZodError, z, type ZodType } from "zod";
 import {
   applicationSettingsInputSchema,
+  assetKindSchema,
   appendMessageSchema,
   compareBranches,
   createAutomationSchema,
@@ -565,8 +566,10 @@ export function createApp(dependencies: AppDependencies): Hono {
   });
 
   app.get("/api/assets", async (context) => {
-    const kind = context.req.query("kind") as AssetKind | undefined;
-    return context.json({ assets: (await repository.listAssetRevisions(kind)).map(sanitizeAssetRevision) });
+    const rawKind = context.req.query("kind");
+    const kind = rawKind === undefined ? undefined : assetKindSchema.parse(rawKind);
+    const includeArchived = context.req.query("includeArchived") === "true";
+    return context.json({ assets: (await repository.listAssetRevisions(kind, includeArchived)).map(sanitizeAssetRevision) });
   });
   app.post("/api/assets", async (context) => {
     const asset = await parseBody(context.req.raw, z.custom<Parameters<typeof repository.saveAssetRevision>[0]>((value) => Boolean(value && typeof value === "object")));
